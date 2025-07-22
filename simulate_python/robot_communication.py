@@ -74,13 +74,13 @@ class RobotCommunication:
         
         # Update global state with torch tensors
         self.robot_joint_state["positions"] = torch.tensor(
-            positions, dtype=torch.float32, device=self.device
+            positions[:12], dtype=torch.float32, device=self.device
         )
         self.robot_joint_state["velocities"] = torch.tensor(
-            velocities, dtype=torch.float32, device=self.device
+            velocities[:12], dtype=torch.float32, device=self.device
         )
         self.robot_joint_state["torques"] = torch.tensor(
-            torques, dtype=torch.float32, device=self.device
+            torques[:12], dtype=torch.float32, device=self.device
         )
         
         # Update IMU data with torch tensors
