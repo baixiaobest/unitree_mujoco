@@ -7,6 +7,7 @@ import numpy as np
 
 from unitree_sdk2py_bridge import UnitreeSdk2Bridge, ElasticBand
 from robot_communication import RobotCommunication
+from observation_manager import ObservationManager, E2EObservationConfig
 
 # Import the message types based on robot type
 import config
@@ -65,11 +66,11 @@ def setup_viewer(mj_model, mj_data):
 def SimulationThread():
     """Main simulation thread that handles physics and robot control."""
     global mj_data, mj_model, elastic_band, band_attached_link, viewer, robot_comm
-    
+
     # Initialize the robot bridge to publish simulation data to DDS
     unitree = initialize_robot_bridge(mj_model, mj_data)
     num_joints = mj_model.nu
-    
+
     # Example desired positions for a standing pose
     desired_positions = [0.0] * num_joints
     if num_joints >= 12:  # Assuming it's a quadruped with 12 joints
@@ -80,6 +81,10 @@ def SimulationThread():
             0.0, 0.8, -1.6   # Rear Left leg
         ]
 
+    # Add observation manager initialization
+    observation_cfg = E2EObservationConfig()
+    observation_manager = ObservationManager(observation_cfg, robot_comm, device="cpu")
+
     while viewer.is_running():
         step_start = time.perf_counter()
 
@@ -89,6 +94,7 @@ def SimulationThread():
         joint_state = robot_comm.get_joint_state()
         base_state = robot_comm.get_base_state()
         
+
         # Periodically print robot state
         if int(mj_data.time * 100) % 100 == 0:
             print("\nCurrent time:", mj_data.time)
@@ -97,6 +103,10 @@ def SimulationThread():
                 print("Current joint velocities:", joint_state["velocities"].cpu().numpy())
             print("Base position:", base_state["position"].cpu().numpy())
             print("Base orientation (quaternion):", base_state["quaternion"].cpu().numpy())
+
+            # Get and print observation tensor
+            obs_tensor = observation_manager.get_observation()
+            print("Observation tensor:", obs_tensor.cpu().numpy())
         
         # Send commands to robot through the communication class
         robot_comm.send_position_commands(desired_positions, num_joints)

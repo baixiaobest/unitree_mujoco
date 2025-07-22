@@ -53,6 +53,8 @@ class RobotCommunication:
         # Initialize command publisher
         self.low_cmd_publisher: ChannelPublisher = ChannelPublisher("rt/lowcmd", LowCmd_)
         self.low_cmd_publisher.Init()
+
+        self.previous_position_commands = None
     
     def _low_state_handler(self, msg: LowState_) -> None:
         """Handler for low state messages from the robot
@@ -153,6 +155,9 @@ class RobotCommunication:
             if isinstance(desired_positions, torch.Tensor):
                 desired_positions = desired_positions.cpu().tolist()
             
+            # Store previous position command
+            self.previous_position_commands = desired_positions.copy()
+
             # Set joint commands
             for i in range(min(num_joints, len(cmd.motor_cmd))):
                 cmd.motor_cmd[i].mode = 0x0A  # Position control mode
@@ -169,3 +174,9 @@ class RobotCommunication:
         except Exception as e:
             print(f"Failed to send commands: {e}")
             return False
+        
+    def get_previous_position_commands(self) -> Optional[torch.Tensor]:
+        """Return the previous position command as a tensor."""
+        if self.previous_position_commands is None:
+            return None
+        return torch.tensor(self.previous_position_commands, dtype=torch.float32, device=self.device)
