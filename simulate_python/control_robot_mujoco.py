@@ -5,119 +5,12 @@ from threading import Thread
 import threading
 import numpy as np
 
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize
-from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelPublisher
 from unitree_sdk2py_bridge import UnitreeSdk2Bridge, ElasticBand
+from robot_communication import RobotCommunication
 
 # Import the message types based on robot type
 import config
-if config.ROBOT=="g1":
-    from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
-    from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_ as LowCmd_default
-else:
-    from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_
-    from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_ as LowCmd_default
 
-from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
-
-
-class RobotCommunication:
-    """Handles all communication with the robot (state subscription and command publishing)"""
-    
-    def __init__(self):
-        """Initialize communication channels for robot control"""
-        # Global state storage
-        self.robot_joint_state = {
-            "positions": [],
-            "velocities": [],
-            "torques": []
-        }
-        
-        self.robot_base_state = {
-            "position": [0.0, 0.0, 0.0],
-            "velocity": [0.0, 0.0, 0.0],
-            "quaternion": [1.0, 0.0, 0.0, 0.0],
-            "gyroscope": [0.0, 0.0, 0.0],
-            "accelerometer": [0.0, 0.0, 0.0]
-        }
-        
-        # Initialize channel factory
-        ChannelFactoryInitialize(config.DOMAIN_ID, config.INTERFACE)
-        
-        # Initialize subscribers for robot state
-        self.low_state_subscriber = ChannelSubscriber("rt/lowstate", LowState_)
-        self.low_state_subscriber.Init(self._low_state_handler, 10)
-        
-        self.high_state_subscriber = ChannelSubscriber("rt/sportmodestate", SportModeState_)
-        self.high_state_subscriber.Init(self._high_state_handler, 10)
-        
-        # Initialize command publisher
-        self.low_cmd_publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
-        self.low_cmd_publisher.Init()
-    
-    def _low_state_handler(self, msg: LowState_):
-        """Handler for low state messages from the robot"""
-        # Get joint positions, velocities, and torques
-        positions = []
-        velocities = []
-        torques = []
-        
-        for motor_state in msg.motor_state:
-            positions.append(motor_state.q)
-            velocities.append(motor_state.dq)
-            torques.append(motor_state.tau_est)
-        
-        # Update global state
-        self.robot_joint_state["positions"] = positions
-        self.robot_joint_state["velocities"] = velocities
-        self.robot_joint_state["torques"] = torques
-        
-        # Update IMU data
-        self.robot_base_state["quaternion"] = list(msg.imu_state.quaternion)
-        self.robot_base_state["gyroscope"] = list(msg.imu_state.gyroscope)
-        self.robot_base_state["accelerometer"] = list(msg.imu_state.accelerometer)
-    
-    def _high_state_handler(self, msg: SportModeState_):
-        """Handler for high state messages from the robot"""
-        # Update global base state
-        self.robot_base_state["position"] = list(msg.position)
-        self.robot_base_state["velocity"] = list(msg.velocity)
-    
-    def get_joint_state(self):
-        """Get the current robot joint state from subscribers"""
-        return self.robot_joint_state
-    
-    def get_base_state(self):
-        """Get the robot base state from subscribers"""
-        return self.robot_base_state
-    
-    def send_position_commands(self, desired_positions, num_joints, kp=30.0, kd=2.0):
-        """Send joint position commands to the robot"""
-        try:
-            # Create a LowCmd message
-            cmd = LowCmd_default()
-            
-            # Set header and mode
-            cmd.head[0] = 0xFE
-            cmd.head[1] = 0xEF
-            cmd.level_flag = 0xFF
-            
-            # Set joint commands
-            for i in range(min(num_joints, len(cmd.motor_cmd))):
-                cmd.motor_cmd[i].mode = 0x0A  # Position control mode
-                cmd.motor_cmd[i].q = desired_positions[i]
-                cmd.motor_cmd[i].kp = kp
-                cmd.motor_cmd[i].dq = 0.0
-                cmd.motor_cmd[i].kd = kd
-                cmd.motor_cmd[i].tau = 0.0
-            
-            # Publish the command - this will be received by the bridge's LowCmdHandler
-            self.low_cmd_publisher.Write(cmd)
-            return True
-            
-        except Exception as e:
-            print(f"Failed to send commands: {e}")
-            return False
 
 def initialize_simulation():
     """Initialize MuJoCo model and data objects."""
@@ -199,11 +92,11 @@ def SimulationThread():
         # Periodically print robot state
         if int(mj_data.time * 100) % 100 == 0:
             print("\nCurrent time:", mj_data.time)
-            if joint_state["positions"]:
-                print("Current joint positions:", joint_state["positions"])
-                print("Current joint velocities:", joint_state["velocities"])
-            print("Base position:", base_state["position"])
-            print("Base orientation (quaternion):", base_state["quaternion"])
+            if len(joint_state["positions"]) > 0:
+                print("Current joint positions:", joint_state["positions"].cpu().numpy())
+                print("Current joint velocities:", joint_state["velocities"].cpu().numpy())
+            print("Base position:", base_state["position"].cpu().numpy())
+            print("Base orientation (quaternion):", base_state["quaternion"].cpu().numpy())
         
         # Send commands to robot through the communication class
         robot_comm.send_position_commands(desired_positions, num_joints)
