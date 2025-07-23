@@ -26,16 +26,23 @@ class MujocoEnvironment(Environment):
         self.viewer, self.elastic_band, self.band_attached_link = self.setup_viewer()
         # Initialize robot bridge
         self.unitree_bridge = self.initialize_robot_bridge()
+
+        self.joints_offset = torch.tensor(
+            [ 0.1000, -0.1000,  0.1000, -0.1000,  0.8000,  0.8000,  1.0000,  1.0000, -1.5000, -1.5000, -1.5000, -1.5000], 
+            device=self.device, dtype=torch.float32)
+        self.joint_scale = 0.5
+
         # Observation manager
         E2EObservationConfig = ObservationConfig(
             observations=[
                 ObsItem("base_linear_velocity", base_lin_vel, 3),
                 ObsItem("base_angular_velocity", base_ang_vel, 3),
                 ObsItem("projected_gravity", projected_gravity, 3),
-                ObsItem("pose_2d_command", pose_2d_command, 4, params={"command_name": "pose_2d_command"}),
-                ObsItem("joint_positions", joint_positions, 12),
+                ObsItem("pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "pose_2d_command"}),
+                # ObsItem("pose_2d_command_obs", pose_2d_zero_command, 4),
+                ObsItem("joint_positions", joint_positions, 12, params={"offset": self.joints_offset}),
                 ObsItem("joint_velocities", joint_velocities, 12),
-                ObsItem("last_action", last_action, 12)
+                ObsItem("last_action", last_action, 12, params={"offset": self.joints_offset})
                 ])
         self._observation_manager = ObservationManager(self, E2EObservationConfig, device=self.device)
         # Command manager
@@ -52,18 +59,25 @@ class MujocoEnvironment(Environment):
         # Example desired positions for a standing pose
         self.num_joints = self.mj_model.nu
         self.desired_positions = [0.0] * self.num_joints
-        if self.num_joints >= 12:
-            self.desired_positions = [
-                0.0, 0.8, -1.6,  # Front Right leg
-                0.0, 0.8, -1.6,  # Front Left leg
-                0.0, 0.8, -1.6,  # Rear Right leg
-                0.0, 0.8, -1.6   # Rear Left leg
-            ]
+
+        self.policy = torch.jit.load("../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/NoCNN/model_jit.pt")
+
+        self.policy_to_unitree_joint_order_map = self.construct_policy_to_unitree_joint_order_map()
 
     def initialize_simulation(self):
         mj_model = mujoco.MjModel.from_xml_path(config.ROBOT_SCENE)
         mj_data = mujoco.MjData(mj_model)
         mj_model.opt.timestep = config.SIMULATE_DT
+        initial_joint_angles = np.array([
+        -0.1, 0.8, -1.5,  # FR_hip, FR_thigh, FR_calf
+        0.1, 0.8, -1.5,  # FL_hip, FL_thigh, FL_calf
+        -0.1, 0.8, -1.5,  # RR_hip, RR_thigh, RR_calf
+        0.1, 0.8, -1.5   # RL_hip, RL_thigh, RL_calf
+        ], dtype=np.float32)
+
+        # Make sure the length matches mj_model.nu (number of actuated joints)
+        mj_data.qpos[7:7+len(initial_joint_angles)] = initial_joint_angles
+
         return mj_model, mj_data
 
     def simulation_step(self):
@@ -96,6 +110,49 @@ class MujocoEnvironment(Environment):
         else:
             viewer = mujoco.viewer.launch_passive(self.mj_model, self.mj_data)
         return viewer, elastic_band, band_attached_link
+    
+    def construct_policy_to_unitree_joint_order_map(self):
+        """
+        Constructs a mapping from policy joint order to Unitree joint order.
+        
+        Returns:
+            A dictionary mapping policy joint indices to Unitree joint indices.
+        """
+        policy_joint_order = ['FL_hip_joint', 'FR_hip_joint', 'RL_hip_joint', 'RR_hip_joint', 
+                            'FL_thigh_joint', 'FR_thigh_joint', 'RL_thigh_joint', 'RR_thigh_joint', 
+                            'FL_calf_joint', 'FR_calf_joint', 'RL_calf_joint', 'RR_calf_joint']
+        
+        unitree_joint_order = ['FR_hip_joint', 'FR_thigh_joint', 'FR_calf_joint', 
+                            'FL_hip_joint', 'FL_thigh_joint', 'FL_calf_joint', 
+                            'RR_hip_joint', 'RR_thigh_joint', 'RR_calf_joint', 
+                            'RL_hip_joint', 'RL_thigh_joint', 'RL_calf_joint']
+        
+        # Create mapping from policy index to unitree index
+        mapping = {}
+        for i, joint in enumerate(policy_joint_order):
+            unitree_idx = unitree_joint_order.index(joint)
+            mapping[i] = unitree_idx
+        
+        return mapping
+    
+    def reorder_policy_to_unitree_joint_order(self, policy_action: torch.Tensor, device="cpu"):
+        """
+        Reorders joint values from policy joint order to Unitree joint order.
+        
+        Args:
+            policy_action: Tensor of shape (12,) in policy joint order
+            device: Device to place the resulting tensor on
+            
+        Returns:
+            Tensor of shape (12,) in Unitree joint order
+        """
+        
+        # Create new tensor in unitree order
+        unitree_action = torch.zeros_like(policy_action)
+        for policy_idx, unitree_idx in self.policy_to_unitree_joint_order_map.items():
+            unitree_action[unitree_idx] = policy_action[policy_idx]
+        
+        return unitree_action
 
     def simulation_thread(self):
         # Wait for the viewer to initialize
@@ -115,15 +172,21 @@ class MujocoEnvironment(Environment):
                     print("Current joint positions:", joint_state["positions"].cpu().numpy())
                     print("Current joint velocities:", joint_state["velocities"].cpu().numpy())
                 print("Base position:", base_state["position"].cpu().numpy())
-                print("Base linear velocity:", base_state["velocity"].cpu().numpy())
-                print("Base angular velocity (gyroscope):", base_state["gyroscope"].cpu().numpy())
-                print("Base orientation (quaternion):", base_state["quaternion"].cpu().numpy())
-                obs_tensor = self._observation_manager.get_observation()
-                print("Observation tensor:", obs_tensor.cpu().numpy())
+                obs_map = self._observation_manager.get_obs_map()
+                for obs in obs_map:
+                    print(f"{obs}: {obs_map[obs].cpu().numpy()}")
+                print("Joint output: ", self.desired_positions)
                 print(f"Elapsed time: {self.elapsed_time:.3f}s, Steps: {self.steps}")
 
             # Send commands to robot
-            self._robot_comm.send_position_commands(self.desired_positions, self.num_joints)
+            obs = self._observation_manager.get_observation()
+            obs = obs.unsqueeze(0) # Add batch dimension
+            policy_action = self.policy(obs).squeeze(0)  # Remove batch dimension
+
+            policy_action = self.joint_scale * policy_action + self.joints_offset
+            self.desired_positions = self.reorder_policy_to_unitree_joint_order(policy_action, device=self.device)
+
+            self._robot_comm.send_position_commands(self.desired_positions, self.num_joints, kp=20.0, kd=1.0)
 
             # Execute simulation step
             self.simulation_step()

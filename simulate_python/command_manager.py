@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import torch
 from scipy.spatial.transform import Rotation as R
 import math
+import math_utils
 
 @dataclass
 class CommandConfig:
@@ -53,8 +54,8 @@ class Pose2dCommandConfig(CommandConfig):
 class Pose2dCommand(Command):
     def __init__(self, env: Environment, cfg: Pose2dCommandConfig, device: str = "cpu"):
         super().__init__(env, cfg, device)
-        self._command = torch.zeros(4, device=device)
-        self.command_w = torch.zeros(4, device=device)  # Command in world frame
+        self._command = torch.zeros(4, device=device, dtype=torch.float32)  # Command in robot base frame
+        self.command_w = torch.zeros(4, device=device, dtype=torch.float32)  # Command in world frame
         self.cfg = cfg
 
     @property
@@ -68,7 +69,7 @@ class Pose2dCommand(Command):
         y = torch.rand(1, device=self._command.device) * (self.cfg.y_range[1] - self.cfg.y_range[0]) + self.cfg.y_range[0]
         z = torch.rand(1, device=self._command.device) * (self.cfg.z_range[1] - self.cfg.z_range[0]) + self.cfg.z_range[0]
         angle = torch.rand(1, device=self._command.device) * (self.cfg.angle_range[1] - self.cfg.angle_range[0]) + self.cfg.angle_range[0]
-        self.command_w = torch.tensor([x.item(), y.item(), z.item(), angle.item(), 0.0], device=self._command.device)
+        self.command_w = torch.tensor([x.item(), y.item(), z.item(), angle.item(), 0.0], device=self._command.device, dtype=torch.float32)
 
     def update(self):
         """Transform world-frame command to robot base frame"""
@@ -82,25 +83,18 @@ class Pose2dCommand(Command):
 
         # Step 2: Rotate - Apply inverse quaternion rotation to the position
         # We need to convert from world frame to robot frame
-        quat_np = robot_quat.cpu().numpy()
+        local_pos_rotated = math_utils.quat_rotate_inverse(robot_quat.unsqueeze(0), local_pos.unsqueeze(0))[0]
 
-        r = R.from_quat([quat_np[1], quat_np[2], quat_np[3], quat_np[0]])
-        local_pos_rotated = torch.tensor(
-            r.inv().apply(local_pos.cpu().numpy()),
-            device=self.device
-        )
-
-        # Step 3: Get yaw directly from scipy
-        # Extract yaw (using 'ZYX' convention where z is yaw)
-        euler_angles = r.as_euler('ZYX')
-        robot_yaw = euler_angles[0]
+        # Step 3: Get yaw 
+        _, _, robot_yaw = math_utils.euler_xyz_from_quat(robot_quat.unsqueeze(0))
+        robot_yaw = robot_yaw[0]
         
         # Transform angle to robot frame
         local_angle = self.command_w[3] - robot_yaw
         local_angle = ((local_angle + math.pi) % (2 * math.pi)) - math.pi
         
         # Combine into final command vector
-        self._command = torch.cat([local_pos_rotated, torch.tensor([local_angle], device=self.device)])
+        self._command = torch.cat([local_pos_rotated, torch.tensor([local_angle], device=self.device, dtype=torch.float32)])
 
 
 @dataclass

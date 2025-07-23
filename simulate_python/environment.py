@@ -5,7 +5,7 @@ class Environment:
     def __init__(self, device="cpu"):
         self.device = device
         # Initialize robot communication
-        self._robot_comm = RobotCommunication()
+        self._robot_comm = RobotCommunication(device)
         self.elapsed_time = 0.0
         self.steps = 0
         self._command_manager = None

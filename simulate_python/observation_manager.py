@@ -42,6 +42,7 @@ class ObservationManager:
         self.observation_cfg = observation_cfg
         self.device = device
         self.robot_comm = env.robot_comm
+        self.obs_map = {}
     
     def get_observation(self):
         """Construct observation by calling functions from observation config
@@ -57,6 +58,7 @@ class ObservationManager:
         for obs_item in self.observation_cfg.observations:
             obs_part = obs_item.function(self.env, self.robot_comm, **obs_item.params)
             obs_parts.append(obs_part.flatten())  # Ensure each part is flattened
+            self.obs_map[obs_item.name] = obs_part
         
         # Concatenate all observation parts into a single tensor
         return torch.cat(obs_parts)
@@ -64,3 +66,7 @@ class ObservationManager:
     def get_observation_dim(self):
         """Get the total dimension of the observation vector"""
         return self.observation_cfg.get_obs_dim()
+    
+    def get_obs_map(self):
+        """Get the mapping of observation names to their tensors"""
+        return self.obs_map
