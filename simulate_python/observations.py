@@ -2,6 +2,7 @@ import torch
 from robot_communication import RobotCommunication
 from environment import Environment
 import math_utils
+from joint_mapping import JointMapping
 
 def base_lin_vel(env: Environment, robot_comm: RobotCommunication):
     """Extract base linear velocity from robot state"""
@@ -26,29 +27,23 @@ def pose_2d_zero_command(env: Environment, robot_comm: RobotCommunication):
     """Get a zero 2D pose command (for testing or default state)"""
     return torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32, device=robot_comm.device)
 
-def joint_positions(env: Environment, robot_comm: RobotCommunication, offset: torch.Tensor = None):
+def joint_positions(env: Environment, 
+                    robot_comm: RobotCommunication, 
+                    jointMap: JointMapping,
+                    scale: float = 1.0,
+                    offset: torch.Tensor = None):
     """Extract joint positions from robot state"""
-    if offset is not None:
-        return robot_comm.get_joint_state()["positions"] - offset
-    else:
-        return robot_comm.get_joint_state()["positions"]
+    return jointMap.unitree_to_policy(robot_comm.get_joint_state()["positions"], scale=scale, offset=offset)
+    
 
-def joint_velocities(env: Environment, robot_comm: RobotCommunication, offset: torch.Tensor = None):
+def joint_velocities(env: Environment, 
+                    robot_comm: RobotCommunication, 
+                    jointMap: JointMapping,
+                    scale: float = 1.0,
+                    offset: torch.Tensor = None):
     """Extract joint velocities from robot state"""
-    if offset is not None:
-        return robot_comm.get_joint_state()["velocities"] - offset
-    else:
-        return robot_comm.get_joint_state()["velocities"]
+    return jointMap.unitree_to_policy(robot_comm.get_joint_state()["velocities"], scale=scale, offset=offset)
 
-def last_action(env: Environment, robot_comm: RobotCommunication, offset: torch.Tensor = None):
+def last_policy_output(env: Environment, robot_comm: RobotCommunication, offset: torch.Tensor = None):
     """Get the last action sent to the robot"""
-    # This assumes the last action was a position command
-    previous_commands = robot_comm.get_previous_position_commands()
-    if previous_commands is not None:
-        if offset is not None:
-            return previous_commands - offset
-        else:
-            return previous_commands
-        return previous_commands
-    else:
-        return torch.zeros(12, device=robot_comm.device)
+    return env.last_policy_output
