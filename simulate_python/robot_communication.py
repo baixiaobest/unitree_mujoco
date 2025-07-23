@@ -2,6 +2,7 @@ from typing import Dict, List, Union, Optional
 import torch
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelPublisher
+import math_utils as math_utils
 
 # Import the message types based on robot type
 import config
@@ -123,6 +124,19 @@ class RobotCommunication:
             Dictionary containing base position, velocity, orientation, and IMU data as tensors
         """
         return self.robot_base_state
+    
+    def get_euler_angles(self) -> torch.Tensor:
+        """Get the Euler angles (roll, pitch, yaw) from the robot's quaternion
+        
+        Returns:
+            Tensor containing Euler angles in radians
+        """
+        quat = self.robot_base_state["quaternion"]
+        roll, pitch, yaw = math_utils.euler_xyz_from_quat(quat.unsqueeze(0))
+        roll = roll.squeeze(0)
+        pitch = pitch.squeeze(0)
+        yaw = yaw.squeeze(0)
+        return torch.tensor([roll, pitch, yaw], dtype=torch.float32, device=self.device)
     
     def send_position_commands(
         self, 

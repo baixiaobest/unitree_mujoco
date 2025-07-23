@@ -6,7 +6,10 @@ from joint_mapping import JointMapping
 
 def base_lin_vel(env: Environment, robot_comm: RobotCommunication):
     """Extract base linear velocity from robot state"""
-    return robot_comm.get_base_state()["velocity"]
+    vel_w = robot_comm.get_base_state()["velocity"]
+    quat = robot_comm.get_base_state()["quaternion"]
+    vel_b = math_utils.quat_rotate_inverse(quat.unsqueeze(0), vel_w.unsqueeze(0))[0]
+    return vel_b
 
 def base_ang_vel(env: Environment, robot_comm: RobotCommunication):
     """Extract base angular velocity (gyroscope) from robot state"""
@@ -16,7 +19,7 @@ def projected_gravity(env: Environment, robot_comm: RobotCommunication):
     """Calculate gravity vector in robot frame using quaternion"""
     quat = robot_comm.get_base_state()["quaternion"]  # (w, x, y, z)
     gravity = torch.tensor([0.0, 0.0, -1.0], device=quat.device, dtype=torch.float32)
-    projected = math_utils.quat_rotate(quat.unsqueeze(0), gravity.unsqueeze(0))[0]
+    projected = math_utils.quat_rotate_inverse(quat.unsqueeze(0), gravity.unsqueeze(0))[0]
     return projected
 
 def pose_2d_command(env: Environment, robot_comm: RobotCommunication, command_name: str):

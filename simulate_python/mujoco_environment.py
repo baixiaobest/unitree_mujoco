@@ -40,8 +40,8 @@ class MujocoEnvironment(Environment):
                 ObsItem("base_linear_velocity", base_lin_vel, 3),
                 ObsItem("base_angular_velocity", base_ang_vel, 3),
                 ObsItem("projected_gravity", projected_gravity, 3),
-                # ObsItem("pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "pose_2d_command"}),
-                ObsItem("pose_2d_command_obs", pose_2d_zero_command, 4),
+                ObsItem("pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "pose_2d_command"}),
+                # ObsItem("pose_2d_command_obs", pose_2d_zero_command, 4),
                 ObsItem("joint_positions", joint_positions, 12, 
                     params={
                         "jointMap": self.joint_map,
@@ -60,7 +60,7 @@ class MujocoEnvironment(Environment):
                 ("pose_2d_command",
                 Pose2dCommand,
                 Pose2dCommandConfig(
-                    resample_interval=5.0, x_range=(-5, 5), y_range=(-5, 5), z_range=(0.4, 0.4), 
+                    resample_interval=10.0, x_range=(-5, 5), y_range=(-5, 5), z_range=(0.4, 0.4), 
                     angle_range=(-math.pi, math.pi)))]
         )
         self._command_manager = CommandManager(self, command_cfg, device=self.device)
@@ -91,7 +91,7 @@ class MujocoEnvironment(Environment):
         mj_data.qpos[2] = 0.34  # Set base height to 0.4m
 
         # set friction for all geometries
-        mj_model.geom_friction[:, 0] = 1.0
+        # mj_model.geom_friction[:, 0] = 1.0
 
         return mj_model, mj_data
 
@@ -177,6 +177,7 @@ class MujocoEnvironment(Environment):
             for obs in obs_map:
                 print(f"{obs}: {obs_map[obs].detach().cpu().numpy()}")
             print("----------------")
+            print(f"euler xyz: {self.robot_comm.get_euler_angles().cpu().numpy()}")
             print(f"Elapsed time: {self.elapsed_time:.3f}s, Steps: {self.steps}")
 
             # Send commands to robot
@@ -186,7 +187,7 @@ class MujocoEnvironment(Environment):
 
             self.desired_positions = self.joint_map.policy_to_unitree(policy_action, self.joint_scale, self.joints_offset)
 
-            self._robot_comm.send_position_commands(self.desired_positions, self.num_joints, kp=40.0, kd=2.0)
+            self._robot_comm.send_position_commands(self.desired_positions, self.num_joints, kp=25.0, kd=1.0)
 
             self._last_policy_output = policy_action.detach()
 
