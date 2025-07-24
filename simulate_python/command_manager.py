@@ -1,10 +1,10 @@
 from environment import Environment
-from robot_communication import RobotCommunication
 from dataclasses import dataclass
 import torch
 from scipy.spatial.transform import Rotation as R
 import math
 import math_utils
+from mujoco_visualizer import MujocoVisualizer
 
 @dataclass
 class CommandConfig:
@@ -43,6 +43,10 @@ class Command:
     def get_dimension(self):
         """Get the dimension of the command"""
         return self.command.size()
+    
+    def visualize(self, visualizer: MujocoVisualizer):
+        """Visualize the command in the environment"""
+        raise NotImplementedError("This method should be implemented by subclasses")
 
 @dataclass
 class Pose2dCommandConfig(CommandConfig):
@@ -50,6 +54,7 @@ class Pose2dCommandConfig(CommandConfig):
     y_range: tuple[float, float]
     z_range: tuple[float, float]
     angle_range: tuple[float, float]
+    visualize: bool = False
 
 class Pose2dCommand(Command):
     def __init__(self, env: Environment, cfg: Pose2dCommandConfig, device: str = "cpu"):
@@ -96,6 +101,28 @@ class Pose2dCommand(Command):
         # Combine into final command vector
         self._command = torch.cat([local_pos_rotated, torch.tensor([local_angle], device=self.device, dtype=torch.float32)])
 
+    def visualize(self, visualizer: MujocoVisualizer):
+        """Visualize the 2D pose command in the environment"""
+        if not self.cfg.visualize:
+            return
+        
+        # Get command position and yaw
+        command_pos = self.command_w[:3]
+        command_yaw = self.command_w[3]
+        arrow_dir = torch.tensor([1.0, 0.0, 0.0]).to(device=self.device, dtype=torch.float32)
+
+        quat = math_utils.quat_from_euler_xyz(
+            torch.zeros(1, device=self.device), 
+            torch.zeros(1, device=self.device), 
+            command_yaw.unsqueeze(0))
+        
+        arrow_dir = math_utils.quat_rotate(quat, arrow_dir.unsqueeze(0))[0]
+
+        visualizer.add_arrow(command_pos.cpu().numpy(), 
+                             (command_pos + arrow_dir).cpu().numpy(), 
+                             size=MujocoVisualizer.DEFAULT_ARROW_SIZE, 
+                             color=MujocoVisualizer.GREEN)
+
 
 @dataclass
 class CommandManagerConfig:
@@ -132,3 +159,9 @@ class CommandManager:
             if cmd_name == name:
                 return cmd_instance.command
         raise ValueError(f"Command '{name}' not found in CommandManager")
+    
+    def visulize_commands(self, visualizer: MujocoVisualizer):
+        """Visualize commands in the environment"""
+        for cmd_name, cmd_instance in self.command_instances:
+            if hasattr(cmd_instance, 'visualize'):
+                cmd_instance.visualize(visualizer)

@@ -6,16 +6,17 @@ import threading
 import numpy as np
 import math
 
-from environment import Environment
+from environment import Environment, Go2Environment
 from unitree_sdk2py_bridge import UnitreeSdk2Bridge, ElasticBand
 from observation_manager import ObservationManager, ObservationConfig, ObsItem
 from command_manager import CommandManager, CommandManagerConfig, Pose2dCommandConfig, Pose2dCommand
 from observations import *
-from joint_mapping import JointMapping
+from mujoco_visualizer import MujocoVisualizer
 
 import config
 
-class MujocoEnvironment(Environment):
+class MujocoEnvironment(Go2Environment):
+    """Mujoco simulation specific environment"""
     @property
     def last_policy_output(self):
         return self._last_policy_output
@@ -31,8 +32,8 @@ class MujocoEnvironment(Environment):
         self.viewer, self.elastic_band, self.band_attached_link = self.setup_viewer()
         # Initialize robot bridge
         self.unitree_bridge = self.initialize_robot_bridge()
-
-        self.joint_map = self.construct_policy_to_unitree_joint_order_map()
+        # Visualization
+        self.visualizer = MujocoVisualizer(self.viewer._user_scn)
 
         # Observation manager
         E2EObservationConfig = ObservationConfig(
@@ -54,6 +55,7 @@ class MujocoEnvironment(Environment):
                 ObsItem("last_policy_output", last_policy_output, 12)
                 ])
         self._observation_manager = ObservationManager(self, E2EObservationConfig, device=self.device)
+
         # Command manager
         command_cfg = CommandManagerConfig(
             commands=[
@@ -61,7 +63,8 @@ class MujocoEnvironment(Environment):
                 Pose2dCommand,
                 Pose2dCommandConfig(
                     resample_interval=10.0, x_range=(-5, 5), y_range=(-5, 5), z_range=(0.4, 0.4), 
-                    angle_range=(-math.pi, math.pi)))]
+                    angle_range=(-math.pi, math.pi), visualize=True
+                    ))]
         )
         self._command_manager = CommandManager(self, command_cfg, device=self.device)
 
@@ -88,10 +91,7 @@ class MujocoEnvironment(Environment):
         mj_data.qpos[7:7+len(initial_joint_angles)] = initial_joint_angles
 
         # Set height
-        mj_data.qpos[2] = 0.34  # Set base height to 0.4m
-
-        # set friction for all geometries
-        # mj_model.geom_friction[:, 0] = 1.0
+        mj_data.qpos[2] = 0.34  # Set base height
 
         return mj_model, mj_data
 
@@ -125,34 +125,6 @@ class MujocoEnvironment(Environment):
         else:
             viewer = mujoco.viewer.launch_passive(self.mj_model, self.mj_data)
         return viewer, elastic_band, band_attached_link
-    
-    def construct_policy_to_unitree_joint_order_map(self):
-        """
-        Constructs a mapping from policy joint order to Unitree joint order.
-        
-        Returns:
-            A dictionary mapping policy joint indices to Unitree joint indices.
-        """
-        policy_joint_order = ['FL_hip_joint', 'FR_hip_joint', 'RL_hip_joint', 'RR_hip_joint', 
-                            'FL_thigh_joint', 'FR_thigh_joint', 'RL_thigh_joint', 'RR_thigh_joint', 
-                            'FL_calf_joint', 'FR_calf_joint', 'RL_calf_joint', 'RR_calf_joint']
-        
-        unitree_joint_order = ['FR_hip_joint', 'FR_thigh_joint', 'FR_calf_joint', 
-                            'FL_hip_joint', 'FL_thigh_joint', 'FL_calf_joint', 
-                            'RR_hip_joint', 'RR_thigh_joint', 'RR_calf_joint', 
-                            'RL_hip_joint', 'RL_thigh_joint', 'RL_calf_joint']
-        
-        self.joints_offset = torch.tensor(
-            [ 0.1000, -0.1000,  0.1000, -0.1000,  0.8000,  0.8000,  1.0000,  1.0000, -1.5000, -1.5000, -1.5000, -1.5000], 
-            device=self.device, dtype=torch.float32)
-        
-        self.joint_scale = 0.5
-        
-        return JointMapping(
-            policy_joint_order=policy_joint_order,
-            unitree_joint_order=unitree_joint_order,
-            device=self.device
-        )
 
     def simulation_thread(self):
         # Wait for the viewer to initialize
@@ -206,9 +178,16 @@ class MujocoEnvironment(Environment):
             if time_until_next_step > 0:
                 time.sleep(time_until_next_step)
 
+    def debug_visualization(self):
+        """Render debug arrows in the viewer"""
+        self.command_manager.visulize_commands(self.visualizer)
+
     def viewer_thread(self):
         while self.viewer.is_running():
             self.locker.acquire()
+            self.visualizer.clear_buffer()
+            self.debug_visualization()
+            self.visualizer.render()
             self.viewer.sync()
             self.locker.release()
             time.sleep(config.VIEWER_DT)
