@@ -1,5 +1,5 @@
 ROBOT = "go2" # Robot name, "go2", "b2", "b2w", "h1", "go2w", "g1" 
-ROBOT_SCENE = "../unitree_robots/" + ROBOT + "/scene.xml" # Robot scene
+ROBOT_SCENE = "../unitree_robots/" + ROBOT + "/scene_terrain.xml" # Robot scene
 DOMAIN_ID = 1 # Domain id
 INTERFACE = "wlo1" # Interface 
 

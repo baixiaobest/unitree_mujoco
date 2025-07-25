@@ -9,7 +9,8 @@ import math
 from environment import Environment, Go2Environment
 from unitree_sdk2py_bridge import UnitreeSdk2Bridge, ElasticBand
 from observation_manager import ObservationManager, ObservationConfig, ObsItem
-from command_manager import CommandManager, CommandManagerConfig, Pose2dCommandConfig, Pose2dCommand
+from command_manager import CommandManager, CommandManagerConfig
+from commands import Pose2dCommand, Pose2dCommandConfig, GameControllerPose2dCommandConfig, GameControllerPose2dCommand
 from observations import *
 from mujoco_visualizer import MujocoVisualizer
 
@@ -35,14 +36,17 @@ class MujocoEnvironment(Go2Environment):
         # Visualization
         self.visualizer = MujocoVisualizer(self.viewer._user_scn)
 
+        self.print_debug = False
+
         # Observation manager
         E2EObservationConfig = ObservationConfig(
             observations=[
                 ObsItem("base_linear_velocity", base_lin_vel, 3),
                 ObsItem("base_angular_velocity", base_ang_vel, 3),
                 ObsItem("projected_gravity", projected_gravity, 3),
-                ObsItem("pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "pose_2d_command"}),
+                # ObsItem("pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "pose_2d_command"}),
                 # ObsItem("pose_2d_command_obs", pose_2d_zero_command, 4),
+                ObsItem("game_controller_pose_2d_command", pose_2d_command, 4, params={"command_name": "game_controller_pose_2d_command"}),
                 ObsItem("joint_positions", joint_positions, 12, 
                     params={
                         "jointMap": self.joint_map,
@@ -59,12 +63,24 @@ class MujocoEnvironment(Go2Environment):
         # Command manager
         command_cfg = CommandManagerConfig(
             commands=[
-                ("pose_2d_command",
-                Pose2dCommand,
-                Pose2dCommandConfig(
-                    resample_interval=10.0, x_range=(-5, 5), y_range=(-5, 5), z_range=(0.4, 0.4), 
-                    angle_range=(-math.pi, math.pi), visualize=True
-                    ))]
+                # ("pose_2d_command",
+                # Pose2dCommand,
+                # Pose2dCommandConfig(
+                #     resample_interval=10.0, x_range=(-5, 5), y_range=(-5, 5), z_range=(0.4, 0.4), 
+                #     angle_range=(-math.pi, math.pi), visualize=True
+                #     ))
+                ("game_controller_pose_2d_command",
+                GameControllerPose2dCommand,
+                GameControllerPose2dCommandConfig(
+                    resample_interval=0.05,
+                    max_distance=3.0,  # Maximum distance from robot position
+                    controller_index=0,  # Use the first controller
+                    joystick_deadzone=0.1,  # Deadzone for joystick input
+                    x_axis=1,  # Left stick X axis
+                    y_axis=0,  # Left stick Y axis
+                    visualize=True
+                ))
+            ]
         )
         self._command_manager = CommandManager(self, command_cfg, device=self.device)
 
@@ -72,7 +88,7 @@ class MujocoEnvironment(Go2Environment):
         self.num_joints = self.mj_model.nu
         self.desired_positions = [0.0] * self.num_joints
 
-        self.policy = torch.jit.load("../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/NoCNN/model_jit.pt")
+        self.policy = torch.jit.load("../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/TorqueOffset/model_jit.pt")
 
         self._last_policy_output = torch.zeros(self.num_joints, dtype=torch.float32, device=self.device)
 
@@ -139,18 +155,19 @@ class MujocoEnvironment(Go2Environment):
 
             # Print robot state periodically
             # if int(self.mj_data.time * 100) % 100 == 0:
-            if len(joint_state["positions"]) > 0:
-                print("Current joint positions:", joint_state["positions"].cpu().numpy())
-                print("Current joint velocities:", joint_state["velocities"].cpu().numpy())
-            print("Base position:", base_state["position"].cpu().numpy())
-            print("Joint output: ", self.desired_positions)
-            print("--------OBS-------")
-            obs_map = self._observation_manager.get_obs_map()
-            for obs in obs_map:
-                print(f"{obs}: {obs_map[obs].detach().cpu().numpy()}")
-            print("----------------")
-            print(f"euler xyz: {self.robot_comm.get_euler_angles().cpu().numpy()}")
-            print(f"Elapsed time: {self.elapsed_time:.3f}s, Steps: {self.steps}")
+            if self.print_debug:
+                if len(joint_state["positions"]) > 0:
+                    print("Current joint positions:", joint_state["positions"].cpu().numpy())
+                    print("Current joint velocities:", joint_state["velocities"].cpu().numpy())
+                print("Base position:", base_state["position"].cpu().numpy())
+                print("Joint output: ", self.desired_positions)
+                print("--------OBS-------")
+                obs_map = self._observation_manager.get_obs_map()
+                for obs in obs_map:
+                    print(f"{obs}: {obs_map[obs].detach().cpu().numpy()}")
+                print("----------------")
+                print(f"euler xyz: {self.robot_comm.get_euler_angles().cpu().numpy()}")
+                print(f"Elapsed time: {self.elapsed_time:.3f}s, Steps: {self.steps}")
 
             # Send commands to robot
             obs = self._observation_manager.get_observation()
