@@ -56,7 +56,9 @@ class MujocoEnvironment(Go2Environment):
                     params={
                         "jointMap": self.joint_map
                     }),
-                ObsItem("last_policy_output", last_policy_output, 12)
+                ObsItem("last_policy_output", last_policy_output, 12),
+                ObsItem("constant_observation", constant_observation, 441, 
+                        params={"value": -0.1 * torch.ones(441, dtype=torch.float32, device=self.device)})
                 ])
         self._observation_manager = ObservationManager(self, E2EObservationConfig, device=self.device)
 
@@ -88,7 +90,7 @@ class MujocoEnvironment(Go2Environment):
         self.num_joints = self.mj_model.nu
         self.desired_positions = [0.0] * self.num_joints
 
-        self.policy = torch.jit.load("../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/TorqueOffset/model_jit.pt")
+        self.policy = torch.jit.load("../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/CNN/model_jit.pt")
 
         self._last_policy_output = torch.zeros(self.num_joints, dtype=torch.float32, device=self.device)
 

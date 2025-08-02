@@ -50,3 +50,7 @@ def joint_velocities(env: Environment,
 def last_policy_output(env: Environment, robot_comm: RobotCommunication, offset: torch.Tensor = None):
     """Get the last action sent to the robot"""
     return env.last_policy_output
+
+def constant_observation(env: Environment, robot_comm: RobotCommunication, value: torch.Tensor):
+    """Return a constant observation tensor"""
+    return value
