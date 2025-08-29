@@ -10,11 +10,12 @@ from env.environment import Environment, Go2Environment
 from comm.unitree_sdk2py_bridge import UnitreeSdk2Bridge, ElasticBand
 from mdp.observation_manager import ObservationManager, ObservationConfig, ObsItem
 from mdp.command_manager import CommandManager, CommandManagerConfig
-from mdp.commands import Pose2dCommand, Pose2dCommandConfig, GameControllerPose2dCommandConfig, GameControllerPose2dCommand
+from mdp.commands import Pose2dCommand, Pose2dCommandConfig, \
+    GameControllerPose2dCommandConfig, GameControllerPose2dCommand, WasdKeyboardCommand, WasdKeyboardCommandConfig
 from mdp.observations import *
 from utils.mujoco_visualizer import MujocoVisualizer
 
-import config
+from config import SIMULATION_CONFIG as sim_config
 
 class MujocoEnvironment(Go2Environment):
     """Mujoco simulation specific environment"""
@@ -22,8 +23,8 @@ class MujocoEnvironment(Go2Environment):
     def last_policy_output(self):
         return self._last_policy_output
 
-    def __init__(self, device="cpu"):
-        super().__init__(device)
+    def __init__(self, robot_comm, device="cpu"):
+        super().__init__(robot_comm, device)
 
         self.locker = threading.Lock()
 
@@ -44,9 +45,10 @@ class MujocoEnvironment(Go2Environment):
                 ObsItem("base_linear_velocity", base_lin_vel, 3),
                 ObsItem("base_angular_velocity", base_ang_vel, 3),
                 ObsItem("projected_gravity", projected_gravity, 3),
-                ObsItem("pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "pose_2d_command"}),
+                # ObsItem("pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "pose_2d_command"}),
                 # ObsItem("pose_2d_command_obs", pose_2d_zero_command, 4),
-                # ObsItem("game_controller_pose_2d_command", pose_2d_command, 4, params={"command_name": "game_controller_pose_2d_command"}),
+                # ObsItem("game_controller_pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "game_controller_pose_2d_command"}),
+                ObsItem("wasd_controller_pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "wasd_controller_pose_2d_command"}),
                 ObsItem("joint_positions", joint_positions, 12, 
                     params={
                         "jointMap": self.joint_map,
@@ -62,17 +64,18 @@ class MujocoEnvironment(Go2Environment):
                 ObsItem("constant_observation", constant_observation, 32, 
                         params={"value": 10 * torch.ones(32, dtype=torch.float32, device=self.device)})
                 ])
-        self._observation_manager = ObservationManager(self, E2EObservationConfig, device=self.device)
+        self._observation_manager = ObservationManager(self, E2EObservationConfig, device=self.device, debug=False)
 
         # Command manager
         command_cfg = CommandManagerConfig(
             commands=[
-                ("pose_2d_command",
-                Pose2dCommand,
-                Pose2dCommandConfig(
-                    resample_interval=10.0, x_range=(-5, 5), y_range=(-5, 5), z_range=(0.4, 0.4), 
-                    angle_range=(-math.pi, math.pi), visualize=True
-                    ))
+                # ("pose_2d_command",
+                # Pose2dCommand,
+                # Pose2dCommandConfig(
+                #     resample_interval=10.0, x_range=(-5, 5), y_range=(-5, 5), z_range=(0.4, 0.4), 
+                #     angle_range=(-math.pi, math.pi), visualize=True
+                #     ))
+
                 # ("game_controller_pose_2d_command",
                 # GameControllerPose2dCommand,
                 # GameControllerPose2dCommandConfig(
@@ -84,6 +87,15 @@ class MujocoEnvironment(Go2Environment):
                 #     y_axis=0,  # Left stick Y axis
                 #     visualize=True
                 # ))
+
+                ("wasd_controller_pose_2d_command",
+                WasdKeyboardCommand,
+                WasdKeyboardCommandConfig(
+                    resample_interval=0.05,
+                    command_distance=2.0,  # Distance of the command point from robot
+                    input_hold_time=0.5,  # Time to hold the command before allowing changes
+                    visualize=True
+                ))
             ]
         )
         self._command_manager = CommandManager(self, command_cfg, device=self.device)
@@ -97,9 +109,9 @@ class MujocoEnvironment(Go2Environment):
         self._last_policy_output = torch.zeros(self.num_joints, dtype=torch.float32, device=self.device)
 
     def initialize_simulation(self):
-        mj_model = mujoco.MjModel.from_xml_path(config.ROBOT_SCENE)
+        mj_model = mujoco.MjModel.from_xml_path(sim_config["ROBOT_SCENE"])
         mj_data = mujoco.MjData(mj_model)
-        mj_model.opt.timestep = config.SIMULATE_DT
+        mj_model.opt.timestep = sim_config["SIMULATE_DT"]
         initial_joint_angles = np.array([
             -0.1, 0.8, -1.5,  # FR_hip, FR_thigh, FR_calf
             0.1, 0.8, -1.5,  # FL_hip, FL_thigh, FL_calf
@@ -116,7 +128,7 @@ class MujocoEnvironment(Go2Environment):
         return mj_model, mj_data
 
     def simulation_step(self):
-        if config.ENABLE_ELASTIC_BAND and self.elastic_band and self.elastic_band.enable:
+        if sim_config["ENABLE_ELASTIC_BAND"] and self.elastic_band and self.elastic_band.enable:
             self.mj_data.xfrc_applied[self.band_attached_link, :3] = self.elastic_band.Advance(
                 self.mj_data.qpos[:3], self.mj_data.qvel[:3]
             )
@@ -124,18 +136,18 @@ class MujocoEnvironment(Go2Environment):
 
     def initialize_robot_bridge(self):
         unitree = UnitreeSdk2Bridge(self.mj_model, self.mj_data)
-        if config.USE_JOYSTICK:
-            unitree.SetupJoystick(device_id=0, js_type=config.JOYSTICK_TYPE)
-        if config.PRINT_SCENE_INFORMATION:
+        if sim_config["USE_JOYSTICK"]:
+            unitree.SetupJoystick(device_id=0, js_type=sim_config["JOYSTICK_TYPE"])
+        if sim_config["PRINT_SCENE_INFORMATION"]:
             unitree.PrintSceneInformation()
         return unitree
 
     def setup_viewer(self):
         elastic_band = None
         band_attached_link = None
-        if config.ENABLE_ELASTIC_BAND:
+        if sim_config["ENABLE_ELASTIC_BAND"]:
             elastic_band = ElasticBand()
-            if config.ROBOT == "h1" or config.ROBOT == "g1":
+            if sim_config["ROBOT"] == "h1" or sim_config["ROBOT"] == "g1":
                 band_attached_link = self.mj_model.body("torso_link").id
             else:
                 band_attached_link = self.mj_model.body("base_link").id
@@ -211,7 +223,7 @@ class MujocoEnvironment(Go2Environment):
             self.visualizer.render()
             self.viewer.sync()
             self.locker.release()
-            time.sleep(config.VIEWER_DT)
+            time.sleep(sim_config["VIEWER_DT"])
 
     def run(self):
         viewer_thread = Thread(target=self.viewer_thread)

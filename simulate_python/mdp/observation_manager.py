@@ -31,7 +31,7 @@ class ObservationConfig:
         return sum(obs.dimension for obs in self.observations)
     
 class ObservationManager:
-    def __init__(self, env: Environment, observation_cfg: ObservationConfig, device: str = "cpu"):
+    def __init__(self, env: Environment, observation_cfg: ObservationConfig, device: str = "cpu", debug=False):
         """Initialize the observation constructor
         
         Args:
@@ -43,6 +43,7 @@ class ObservationManager:
         self.device = device
         self.robot_comm = env.robot_comm
         self.obs_map = {}
+        self.debug = debug
     
     def get_observation(self):
         """Construct observation by calling functions from observation config
@@ -59,6 +60,9 @@ class ObservationManager:
             obs_part = obs_item.function(self.env, self.robot_comm, **obs_item.params)
             obs_parts.append(obs_part.flatten())  # Ensure each part is flattened
             self.obs_map[obs_item.name] = obs_part
+
+            if self.debug:
+                print(f"Observation '{obs_item.name}': {obs_part.cpu().numpy()}")
         
         # Concatenate all observation parts into a single tensor
         return torch.cat(obs_parts)

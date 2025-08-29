@@ -4,7 +4,7 @@ import torch
 import math
 import utils.math_utils as math_utils
 from utils.mujoco_visualizer import MujocoVisualizer
-
+import pygame
 
 @dataclass
 class CommandConfig:
@@ -239,5 +239,144 @@ class GameControllerPose2dCommand(Pose2dCommand):
         else:
             heading = robot_yaw  # Keep current heading when no input
         
+        # Set the command in world frame
+        self.command_w = torch.tensor([x, y, z, heading, 0.0], device=self._command.device, dtype=torch.float32)
+
+@dataclass
+class WasdKeyboardCommandConfig(Pose2dCommandConfig):
+    """Configuration for WasdKeyboardCommand"""
+    command_distance: float = 2.0  # Distance of the command point from robot
+    input_hold_time: float = 0.5  # Time to hold the command before allowing changes
+    visualize: bool = True
+
+class WasdKeyboardCommand(Pose2dCommand):
+    """Pose2d command controlled by WASD keyboard keys"""
+    def __init__(self, env: Environment, cfg: WasdKeyboardCommandConfig, device: str = "cpu"):
+        super().__init__(env, cfg, device)
+        self.cfg = cfg
+        self.initialized = False
+        self.last_key = None
+        self.last_key_time = 0
+        self.keys_pressed = {
+            pygame.K_w: False,
+            pygame.K_a: False,
+            pygame.K_s: False,
+            pygame.K_d: False
+        }
+        
+        # Initialize pygame for key handling
+        self._init_pygame()
+    
+    def _init_pygame(self):
+        """Initialize pygame for keyboard input"""
+        try:
+            if not pygame.get_init():
+                pygame.init()
+            pygame.display.set_mode((100, 100))
+            pygame.display.set_caption("WASD Control")
+            self.initialized = True
+            print("Keyboard control initialized")
+        except Exception as e:
+            print(f"Error initializing pygame: {e}")
+            self.initialized = False
+    
+    def read_keyboard_input(self):
+        """Read input from keyboard"""
+        if not self.initialized:
+            self._init_pygame()
+            if not self.initialized:
+                return None
+        
+        try:
+            # Process events
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    return None
+                elif event.type == pygame.KEYDOWN:
+                    if event.key in self.keys_pressed:
+                        self.keys_pressed[event.key] = True
+                        self.last_key = event.key
+                        self.last_key_time = pygame.time.get_ticks() / 1000.0
+                elif event.type == pygame.KEYUP:
+                    if event.key in self.keys_pressed:
+                        self.keys_pressed[event.key] = False
+            
+            # Return the current active key
+            current_time = pygame.time.get_ticks() / 1000.0
+            if current_time - self.last_key_time < self.cfg.input_hold_time:
+                return self.last_key
+            
+            # Check for currently pressed keys (priority: W, A, S, D)
+            if self.keys_pressed[pygame.K_w]:
+                self.last_key = pygame.K_w
+                self.last_key_time = current_time
+                return pygame.K_w
+            elif self.keys_pressed[pygame.K_a]:
+                self.last_key = pygame.K_a
+                self.last_key_time = current_time
+                return pygame.K_a
+            elif self.keys_pressed[pygame.K_s]:
+                self.last_key = pygame.K_s
+                self.last_key_time = current_time
+                return pygame.K_s
+            elif self.keys_pressed[pygame.K_d]:
+                self.last_key = pygame.K_d
+                self.last_key_time = current_time
+                return pygame.K_d
+            
+            # Return None if no keys are currently pressed and hold time has expired
+            return None  # Changed from self.last_key to None
+        except Exception as e:
+            print(f"Error reading keyboard: {e}")
+            return None
+    
+    def resample(self):
+        """Override resample to read from keyboard instead of random sampling"""
+        # Get robot position and orientation
+        base_state = self.robot_comm.get_base_state()
+        robot_pos = base_state["position"]  # [x, y, z]
+        robot_quat = base_state["quaternion"]  # [w, x, y, z]
+        
+        # Get robot's current yaw
+        _, _, robot_yaw = math_utils.euler_xyz_from_quat(robot_quat.unsqueeze(0))
+        robot_yaw = robot_yaw[0]
+        
+        # Read keyboard input
+        key = self.read_keyboard_input()
+        
+        # Default to current position and orientation
+        x, y, z = robot_pos
+        heading = robot_yaw
+        
+        # Only process key commands if a key is pressed
+        if key is not None:
+            if key == pygame.K_w:  # Forward
+                # Command in front of robot with same orientation
+                distance = self.cfg.command_distance
+                x = robot_pos[0] + distance * math.cos(robot_yaw)
+                y = robot_pos[1] + distance * math.sin(robot_yaw)
+                heading = robot_yaw  # Keep current heading
+                
+            elif key == pygame.K_a:  # Left rotation (30 degrees)
+                # Stay at current position, but rotate heading by 30 degrees left
+                x, y, z = robot_pos  # Stay at current position
+                heading = robot_yaw + math.radians(30)  # 30 degrees left rotation
+                
+            elif key == pygame.K_s:  # Backward
+                # Command behind robot with 180 deg orientation
+                distance = self.cfg.command_distance
+                back_angle = robot_yaw + math.pi
+                x = robot_pos[0] + distance * math.cos(back_angle)
+                y = robot_pos[1] + distance * math.sin(back_angle)
+                heading = back_angle  # Turn around
+                
+            elif key == pygame.K_d:  # Right rotation (30 degrees)
+                # Stay at current position, but rotate heading by 30 degrees right
+                x, y, z = robot_pos  # Stay at current position
+                heading = robot_yaw - math.radians(30)  # 30 degrees right rotation
+        else:
+            pass
+
         # Set the command in world frame
         self.command_w = torch.tensor([x, y, z, heading, 0.0], device=self._command.device, dtype=torch.float32)

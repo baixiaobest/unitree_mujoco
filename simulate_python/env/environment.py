@@ -1,13 +1,12 @@
-from comm.robot_communication import RobotCommunication
 from utils.joint_mapping import JointMapping
 import torch
 
 
 class Environment:
-    def __init__(self, device="cpu"):
+    def __init__(self, robot_comm, device="cpu"):
         self.device = device
         # Initialize robot communication
-        self._robot_comm = RobotCommunication(device)
+        self._robot_comm = robot_comm
         self.elapsed_time = 0.0
         self.steps = 0
         self._command_manager = None
@@ -44,8 +43,8 @@ class Environment:
         raise NotImplementedError("This method should be implemented by subclasses")
 
 class Go2Environment(Environment):
-    def __init__(self, device="cpu"):
-        super().__init__(device)
+    def __init__(self, robot_comm, device="cpu"):
+        super().__init__(robot_comm, device)
         # Initialize specific configurations for Go2 robot
         self.joint_map = self.construct_policy_to_unitree_joint_order_map()
 

@@ -4,21 +4,16 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelPublisher
 import utils.math_utils as math_utils
 
-# Import the message types based on robot type
-import config
-if config.ROBOT=="g1":
-    from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
-    from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_ as LowCmd_default
-else:
-    from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_
-    from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_ as LowCmd_default
+
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_
+from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_ as LowCmd_default
 
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
 
 class RobotCommunication:
     """Handles all communication with the robot (state subscription and command publishing)"""
     
-    def __init__(self, device: str = "cpu") -> None:
+    def __init__(self, domain_id, interface, device: str = "cpu") -> None:
         """Initialize communication channels for robot control
         
         Args:
@@ -42,7 +37,7 @@ class RobotCommunication:
         }
         
         # Initialize channel factory
-        ChannelFactoryInitialize(config.DOMAIN_ID, config.INTERFACE)
+        ChannelFactoryInitialize(domain_id, interface)
         
         # Initialize subscribers for robot state
         self.low_state_subscriber: ChannelSubscriber = ChannelSubscriber("rt/lowstate", LowState_)
