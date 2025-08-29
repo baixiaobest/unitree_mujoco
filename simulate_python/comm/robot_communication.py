@@ -2,7 +2,7 @@ from typing import Dict, List, Union, Optional
 import torch
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelPublisher
-import math_utils as math_utils
+import utils.math_utils as math_utils
 
 # Import the message types based on robot type
 import config

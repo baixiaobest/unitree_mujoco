@@ -1,7 +1,7 @@
 import torch
-from robot_communication import RobotCommunication
-from observations import *
-from environment import Environment
+from comm.robot_communication import RobotCommunication
+from mdp.observations import *
+from env.environment import Environment
 from dataclasses import dataclass, field
 
 @dataclass

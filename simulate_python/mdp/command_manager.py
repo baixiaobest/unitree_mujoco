@@ -1,8 +1,8 @@
-from environment import Environment
+from env.environment import Environment
 from dataclasses import dataclass
 import torch
-from mujoco_visualizer import MujocoVisualizer
-from commands import Command, CommandConfig
+from utils.mujoco_visualizer import MujocoVisualizer
+from mdp.commands import Command, CommandConfig
 
 
 @dataclass

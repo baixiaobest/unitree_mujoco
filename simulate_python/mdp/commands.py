@@ -1,9 +1,9 @@
-from environment import Environment
+from env.environment import Environment
 from dataclasses import dataclass
 import torch
 import math
-import math_utils
-from mujoco_visualizer import MujocoVisualizer
+import utils.math_utils as math_utils
+from utils.mujoco_visualizer import MujocoVisualizer
 
 
 @dataclass

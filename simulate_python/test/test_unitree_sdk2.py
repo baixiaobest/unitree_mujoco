@@ -56,5 +56,5 @@ if __name__ == "__main__":
         cmd.crc = crc.Crc(cmd)
 
         #Publish message
-        low_cmd_puber.Write(cmd)
+        # low_cmd_puber.Write(cmd)
         time.sleep(0.002)

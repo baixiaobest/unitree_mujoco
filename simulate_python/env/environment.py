@@ -1,5 +1,5 @@
-from robot_communication import RobotCommunication
-from joint_mapping import JointMapping
+from comm.robot_communication import RobotCommunication
+from utils.joint_mapping import JointMapping
 import torch
 
 

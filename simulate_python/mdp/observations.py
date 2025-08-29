@@ -1,8 +1,8 @@
 import torch
-from robot_communication import RobotCommunication
-from environment import Environment
-import math_utils
-from joint_mapping import JointMapping
+from comm.robot_communication import RobotCommunication
+from env.environment import Environment
+import utils.math_utils as math_utils
+from utils.joint_mapping import JointMapping
 
 def base_lin_vel(env: Environment, robot_comm: RobotCommunication):
     """Extract base linear velocity from robot state"""

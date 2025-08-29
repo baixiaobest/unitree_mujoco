@@ -6,13 +6,13 @@ import threading
 import numpy as np
 import math
 
-from environment import Environment, Go2Environment
-from unitree_sdk2py_bridge import UnitreeSdk2Bridge, ElasticBand
-from observation_manager import ObservationManager, ObservationConfig, ObsItem
-from command_manager import CommandManager, CommandManagerConfig
-from commands import Pose2dCommand, Pose2dCommandConfig, GameControllerPose2dCommandConfig, GameControllerPose2dCommand
-from observations import *
-from mujoco_visualizer import MujocoVisualizer
+from env.environment import Environment, Go2Environment
+from comm.unitree_sdk2py_bridge import UnitreeSdk2Bridge, ElasticBand
+from mdp.observation_manager import ObservationManager, ObservationConfig, ObsItem
+from mdp.command_manager import CommandManager, CommandManagerConfig
+from mdp.commands import Pose2dCommand, Pose2dCommandConfig, GameControllerPose2dCommandConfig, GameControllerPose2dCommand
+from mdp.observations import *
+from utils.mujoco_visualizer import MujocoVisualizer
 
 import config
 
@@ -44,9 +44,9 @@ class MujocoEnvironment(Go2Environment):
                 ObsItem("base_linear_velocity", base_lin_vel, 3),
                 ObsItem("base_angular_velocity", base_ang_vel, 3),
                 ObsItem("projected_gravity", projected_gravity, 3),
-                # ObsItem("pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "pose_2d_command"}),
+                ObsItem("pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "pose_2d_command"}),
                 # ObsItem("pose_2d_command_obs", pose_2d_zero_command, 4),
-                ObsItem("game_controller_pose_2d_command", pose_2d_command, 4, params={"command_name": "game_controller_pose_2d_command"}),
+                # ObsItem("game_controller_pose_2d_command", pose_2d_command, 4, params={"command_name": "game_controller_pose_2d_command"}),
                 ObsItem("joint_positions", joint_positions, 12, 
                     params={
                         "jointMap": self.joint_map,
@@ -57,31 +57,33 @@ class MujocoEnvironment(Go2Environment):
                         "jointMap": self.joint_map
                     }),
                 ObsItem("last_policy_output", last_policy_output, 12),
-                ObsItem("constant_observation", constant_observation, 441, 
-                        params={"value": -0.1 * torch.ones(441, dtype=torch.float32, device=self.device)})
+                ObsItem("count_down", constant_observation, 1, 
+                        params={"value": 5 * torch.ones(1, dtype=torch.float32, device=self.device)}),
+                ObsItem("constant_observation", constant_observation, 32, 
+                        params={"value": 10 * torch.ones(32, dtype=torch.float32, device=self.device)})
                 ])
         self._observation_manager = ObservationManager(self, E2EObservationConfig, device=self.device)
 
         # Command manager
         command_cfg = CommandManagerConfig(
             commands=[
-                # ("pose_2d_command",
-                # Pose2dCommand,
-                # Pose2dCommandConfig(
-                #     resample_interval=10.0, x_range=(-5, 5), y_range=(-5, 5), z_range=(0.4, 0.4), 
-                #     angle_range=(-math.pi, math.pi), visualize=True
-                #     ))
-                ("game_controller_pose_2d_command",
-                GameControllerPose2dCommand,
-                GameControllerPose2dCommandConfig(
-                    resample_interval=0.05,
-                    max_distance=3.0,  # Maximum distance from robot position
-                    controller_index=0,  # Use the first controller
-                    joystick_deadzone=0.1,  # Deadzone for joystick input
-                    x_axis=1,  # Left stick X axis
-                    y_axis=0,  # Left stick Y axis
-                    visualize=True
-                ))
+                ("pose_2d_command",
+                Pose2dCommand,
+                Pose2dCommandConfig(
+                    resample_interval=10.0, x_range=(-5, 5), y_range=(-5, 5), z_range=(0.4, 0.4), 
+                    angle_range=(-math.pi, math.pi), visualize=True
+                    ))
+                # ("game_controller_pose_2d_command",
+                # GameControllerPose2dCommand,
+                # GameControllerPose2dCommandConfig(
+                #     resample_interval=0.05,
+                #     max_distance=3.0,  # Maximum distance from robot position
+                #     controller_index=0,  # Use the first controller
+                #     joystick_deadzone=0.1,  # Deadzone for joystick input
+                #     x_axis=1,  # Left stick X axis
+                #     y_axis=0,  # Left stick Y axis
+                #     visualize=True
+                # ))
             ]
         )
         self._command_manager = CommandManager(self, command_cfg, device=self.device)
@@ -90,7 +92,7 @@ class MujocoEnvironment(Go2Environment):
         self.num_joints = self.mj_model.nu
         self.desired_positions = [0.0] * self.num_joints
 
-        self.policy = torch.jit.load("../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/CNN/model_jit.pt")
+        self.policy = torch.jit.load("../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/MujocoModel/model_backward_jit.pt")
 
         self._last_policy_output = torch.zeros(self.num_joints, dtype=torch.float32, device=self.device)
 
