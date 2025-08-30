@@ -3,9 +3,8 @@ from mdp.observation_manager import ObservationManager, ObservationConfig, ObsIt
 from mdp.observations import *
 from mdp.command_manager import CommandManager, CommandManagerConfig
 from mdp.commands import WasdKeyboardCommand, WasdKeyboardCommandConfig
-from time import sleep
+from time import sleep, time
 import torch
-
 
 class GO2HardwareEnvironment(Go2Environment):
     @property
@@ -35,6 +34,8 @@ class GO2HardwareEnvironment(Go2Environment):
         
         self.Kp = 60.0
         self.Kd = 2.0
+
+        self.init_time = time()
     
     def _init_unitree_services(self):
         """Initialize high-level Unitree SDK services"""
@@ -172,6 +173,8 @@ class GO2HardwareEnvironment(Go2Environment):
         return True
 
     def step(self):
+        self.elapsed_time = time() - self.init_time
+
         obs = self._observation_manager.get_observation().unsqueeze(0)  # Add batch dimension
         with torch.no_grad():
             policy_action = self.policy(obs).squeeze(0)
