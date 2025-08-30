@@ -1,5 +1,6 @@
 from utils.joint_mapping import JointMapping
 import torch
+import time
 
 
 class Environment:
@@ -42,12 +43,78 @@ class Environment:
     def run(self):
         raise NotImplementedError("This method should be implemented by subclasses")
 
+
 class Go2Environment(Environment):
     def __init__(self, robot_comm, device="cpu"):
         super().__init__(robot_comm, device)
         # Initialize specific configurations for Go2 robot
         self.joint_map = self.construct_policy_to_unitree_joint_order_map()
+        
+        # Initialize stand-up and lay-down sequence parameters
+        self.init_robot_motion_sequences()
+        
+        # Status tracking
+        self.is_standing = False
+        self.is_laid_down = True
 
+    def init_robot_motion_sequences(self):
+        """Initialize parameters for stand-up and lay-down sequences"""
+        # Stand-up sequence positions (in unitree joint order)
+        self.standup_pos_1 = torch.tensor([
+            0.0, 1.36, -2.65,  # FR
+            0.0, 1.36, -2.65,  # FL
+            -0.2, 1.36, -2.65,  # RR
+            0.2, 1.36, -2.65   # RL
+        ], device=self.device, dtype=torch.float32)
+        
+        self.standup_pos_2 = torch.tensor([
+            0.0, 0.67, -1.3,  # FR
+            0.0, 0.67, -1.3,  # FL
+            0.0, 0.67, -1.3,  # RR
+            0.0, 0.67, -1.3   # RL
+        ], device=self.device, dtype=torch.float32)
+        
+        self.standup_pos_3 = torch.tensor([
+            -0.1, 0.8, -1.5,  # FR
+            0.1, 0.8, -1.5,   # FL
+            -0.1, 1.0, -1.5,  # RR
+            0.1, 1.0, -1.5    # RL
+        ], device=self.device, dtype=torch.float32)
+        
+        # Lay-down sequence positions (in unitree joint order)
+        self.laydown_pos_1 = torch.tensor([
+            0.0, 0.9, -1.8,  # FR
+            0.0, 0.9, -1.8,  # FL
+            0.0, 0.9, -1.8,  # RR
+            0.0, 0.9, -1.8   # RL
+        ], device=self.device, dtype=torch.float32)
+        
+        self.laydown_pos_2 = torch.tensor([
+            0.0, 1.2, -2.4,  # FR
+            0.0, 1.2, -2.4,  # FL
+            0.0, 1.2, -2.4,  # RR
+            0.0, 1.2, -2.4   # RL
+        ], device=self.device, dtype=torch.float32)
+        
+        self.laydown_pos_3 = torch.tensor([
+            0.0, 1.6, -2.8,  # FR
+            0.0, 1.6, -2.8,  # FL
+            0.0, 1.6, -2.8,  # RR
+            0.0, 1.6, -2.8   # RL
+        ], device=self.device, dtype=torch.float32)
+        
+        # Motion control parameters
+        self.Kp = 60.0  # Position gain
+        self.Kd = 5.0   # Velocity gain
+        
+        # Durations (in steps)
+        self.standup_duration_1 = 500
+        self.standup_duration_2 = 500
+        self.standup_duration_3 = 500
+        
+        self.laydown_duration_1 = 500
+        self.laydown_duration_2 = 500
+        self.laydown_duration_3 = 500
 
     def construct_policy_to_unitree_joint_order_map(self):
         """
@@ -66,7 +133,7 @@ class Go2Environment(Environment):
                             'RL_hip_joint', 'RL_thigh_joint', 'RL_calf_joint']
         
         self.joints_offset = torch.tensor(
-            [ 0.1000, -0.1000,  0.1000, -0.1000,  0.8000,  0.8000,  1.0000,  1.0000, -1.5000, -1.5000, -1.5000, -1.5000], 
+            [ 0.1000, -0.1000, 0.1000, -0.1000, 0.8000, 0.8000, 1.0000, 1.0000, -1.5000, -1.5000, -1.5000, -1.5000], 
             device=self.device, dtype=torch.float32)
         
         self.joint_scale = 0.5
@@ -76,3 +143,136 @@ class Go2Environment(Environment):
             unitree_joint_order=unitree_joint_order,
             device=self.device
         )
+        
+    def compute_standup_position(self, progress):
+        """
+        Compute joint position target for a point in the stand-up sequence
+        
+        Args:
+            progress: Float between 0.0 and 1.0 representing progress through the sequence
+            
+        Returns:
+            torch.Tensor: Target joint positions for the given progress point
+        """
+        # Ensure progress is between 0 and 1
+        progress = max(0.0, min(1.0, progress))
+        
+        # Get current joint positions (only needed at start)
+        if progress == 0.0:
+            joint_state = self._robot_comm.get_joint_state()
+            self.standup_start_pos = joint_state["positions"]
+        
+        # Determine which phase of the sequence we're in
+        total_phases = 3
+        phase_duration = 1.0 / total_phases
+        
+        if progress < phase_duration:  # Phase 1: initial position to first stance
+            phase_progress = progress / phase_duration
+            return (1 - phase_progress) * self.standup_start_pos + phase_progress * self.standup_pos_1
+            
+        elif progress < 2 * phase_duration:  # Phase 2: first stance to standing position
+            phase_progress = (progress - phase_duration) / phase_duration
+            return (1 - phase_progress) * self.standup_pos_1 + phase_progress * self.standup_pos_2
+            
+        else:  # Phase 3: standing position to ready pose
+            phase_progress = (progress - 2 * phase_duration) / phase_duration
+            return (1 - phase_progress) * self.standup_pos_2 + phase_progress * self.standup_pos_3
+
+    def compute_laydown_position(self, progress):
+        """
+        Compute joint position target for a point in the lay-down sequence
+        
+        Args:
+            progress: Float between 0.0 and 1.0 representing progress through the sequence
+            
+        Returns:
+            torch.Tensor: Target joint positions for the given progress point
+        """
+        # Ensure progress is between 0 and 1
+        progress = max(0.0, min(1.0, progress))
+        
+        # Get current joint positions (only needed at start)
+        if progress == 0.0:
+            joint_state = self._robot_comm.get_joint_state()
+            self.laydown_start_pos = joint_state["positions"]
+        
+        # Determine which phase of the sequence we're in
+        total_phases = 3
+        phase_duration = 1.0 / total_phases
+        
+        if progress < phase_duration:  # Phase 1: initial position to first lay-down stance
+            phase_progress = progress / phase_duration
+            return (1 - phase_progress) * self.laydown_start_pos + phase_progress * self.laydown_pos_1
+            
+        elif progress < 2 * phase_duration:  # Phase 2: lower body further
+            phase_progress = (progress - phase_duration) / phase_duration
+            return (1 - phase_progress) * self.laydown_pos_1 + phase_progress * self.laydown_pos_2
+            
+        else:  # Phase 3: final lay-down position
+            phase_progress = (progress - 2 * phase_duration) / phase_duration
+            return (1 - phase_progress) * self.laydown_pos_2 + phase_progress * self.laydown_pos_3
+
+    # Add convenience methods to execute the full sequence
+    def stand_up(self, step_fn):
+        """
+        Execute full stand-up sequence using the provided step function
+        
+        Args:
+            step_fn: Function to execute after sending position commands
+        """
+        if self.is_standing:
+            print("Robot is already standing")
+            return True
+            
+        print("Starting stand-up sequence...")
+        
+        # Store start position for the sequence
+        joint_state = self._robot_comm.get_joint_state()
+        self.standup_start_pos = joint_state["positions"]
+        
+        # Total number of steps in the sequence
+        total_steps = self.standup_duration_1 + self.standup_duration_2 + self.standup_duration_3
+        
+        # Execute each step
+        for i in range(total_steps):
+            progress = i / (total_steps - 1)
+            target_pos = self.compute_standup_position(progress)
+            self._robot_comm.send_position_commands(target_pos, len(target_pos), kp=self.Kp, kd=self.Kd)
+            step_fn()
+        
+        self.is_standing = True
+        self.is_laid_down = False
+        print("Stand-up sequence complete")
+        return True
+
+    def lay_down(self, step_fn):
+        """
+        Execute full lay-down sequence using the provided step function
+        
+        Args:
+            step_fn: Function to execute after sending position commands
+        """
+        if self.is_laid_down:
+            print("Robot is already laid down")
+            return True
+            
+        print("Starting lay-down sequence...")
+        
+        # Store start position for the sequence
+        joint_state = self._robot_comm.get_joint_state()
+        self.laydown_start_pos = joint_state["positions"]
+        
+        # Total number of steps in the sequence
+        total_steps = self.laydown_duration_1 + self.laydown_duration_2 + self.laydown_duration_3
+        
+        # Execute each step
+        for i in range(total_steps):
+            progress = i / (total_steps - 1)
+            target_pos = self.compute_laydown_position(progress)
+            self._robot_comm.send_position_commands(target_pos, len(target_pos), kp=self.Kp, kd=self.Kd)
+            step_fn()
+        
+        self.is_standing = False
+        self.is_laid_down = True
+        print("Lay-down sequence complete")
+        return True

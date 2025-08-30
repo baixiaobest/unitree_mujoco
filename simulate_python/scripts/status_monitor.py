@@ -9,7 +9,7 @@ import pyqtgraph as pg
 
 # Import the RobotCommunication class
 sys.path.append("../")
-from robot_communication import RobotCommunication
+from comm.robot_communication import RobotCommunication
 
 class StatusMonitor(QMainWindow):
     # Define joint names as a class variable
@@ -498,7 +498,7 @@ def main():
     app = QApplication(sys.argv)
     
     # Create robot communication
-    robot_comm = RobotCommunication()
+    robot_comm = RobotCommunication(domain_id=0, interface="enp108s0", device="cuda")
     
     # Create and show the status monitor
     monitor = StatusMonitor(robot_comm)

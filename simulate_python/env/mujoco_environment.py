@@ -23,8 +23,10 @@ class MujocoEnvironment(Go2Environment):
     def last_policy_output(self):
         return self._last_policy_output
 
-    def __init__(self, robot_comm, device="cpu"):
+    def __init__(self, robot_comm, model_path, device="cpu"):
         super().__init__(robot_comm, device)
+
+        self.model_path = model_path
 
         self.locker = threading.Lock()
 
@@ -38,6 +40,7 @@ class MujocoEnvironment(Go2Environment):
         self.visualizer = MujocoVisualizer(self.viewer._user_scn)
 
         self.print_debug = False
+        self.robot_initialized = False  # Track if robot has completed initialization
 
         # Observation manager
         E2EObservationConfig = ObservationConfig(
@@ -104,7 +107,7 @@ class MujocoEnvironment(Go2Environment):
         self.num_joints = self.mj_model.nu
         self.desired_positions = [0.0] * self.num_joints
 
-        self.policy = torch.jit.load("../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/MujocoModel/model_backward_jit.pt")
+        self.policy = torch.jit.load(self.model_path)
 
         self._last_policy_output = torch.zeros(self.num_joints, dtype=torch.float32, device=self.device)
 
@@ -112,18 +115,33 @@ class MujocoEnvironment(Go2Environment):
         mj_model = mujoco.MjModel.from_xml_path(sim_config["ROBOT_SCENE"])
         mj_data = mujoco.MjData(mj_model)
         mj_model.opt.timestep = sim_config["SIMULATE_DT"]
-        initial_joint_angles = np.array([
-            -0.1, 0.8, -1.5,  # FR_hip, FR_thigh, FR_calf
-            0.1, 0.8, -1.5,  # FL_hip, FL_thigh, FL_calf
-            -0.1, 0.8, -1.5,  # RR_hip, RR_thigh, RR_calf
-            0.1, 0.8, -1.5   # RL_hip, RL_thigh, RL_calf
-        ], dtype=np.float32)
+
+        INIT_TYPE = "laydown" # standup or laydown
+        
+        if INIT_TYPE == "standup":
+            initial_joint_angles = np.array([
+                -0.1, 0.8, -1.5,  # FR_hip, FR_thigh, FR_calf
+                0.1, 0.8, -1.5,  # FL_hip, FL_thigh, FL_calf
+                -0.1, 0.8, -1.5,  # RR_hip, RR_thigh, RR_calf
+                0.1, 0.8, -1.5   # RL_hip, RL_thigh, RL_calf
+            ], dtype=np.float32)
+
+            height = 0.34
+        elif INIT_TYPE == "laydown":
+            initial_joint_angles = np.array([
+                0.0, 1.6, -2.8,  # FR_hip, FR_thigh, FR_calf
+                0.0, 1.6, -2.8,  # FL_hip, FL_thigh, FL_calf
+                0.0, 1.6, -2.8,  # RR_hip, RR_thigh, RR_calf
+                0.0, 1.6, -2.8   # RL_hip, RL_thigh, RL_calf
+            ], dtype=np.float32)
+
+            height = 0.2
 
         # Make sure the length matches mj_model.nu (number of actuated joints)
         mj_data.qpos[7:7+len(initial_joint_angles)] = initial_joint_angles
 
         # Set height
-        mj_data.qpos[2] = 0.34  # Set base height
+        mj_data.qpos[2] = height # Set base height
 
         return mj_model, mj_data
 
@@ -161,6 +179,24 @@ class MujocoEnvironment(Go2Environment):
     def simulation_thread(self):
         # Wait for the viewer to initialize
         time.sleep(0.2)
+        
+        # First, run the stand-up sequence
+        if not self.robot_initialized:
+            print("Starting robot stand-up sequence...")
+            
+            # Define a thread-safe step function
+            def locked_step():
+                self.locker.acquire()
+                try:
+                    self.simulation_step()
+                finally:
+                    self.locker.release()
+            
+            # Execute stand-up with thread safety
+            self.stand_up(locked_step)
+            self.robot_initialized = True
+            print("Robot is ready for policy control")
+        
         while self.viewer.is_running():
             step_start = time.perf_counter()
             self.locker.acquire()
@@ -170,7 +206,6 @@ class MujocoEnvironment(Go2Environment):
             base_state = self._robot_comm.get_base_state()
 
             # Print robot state periodically
-            # if int(self.mj_data.time * 100) % 100 == 0:
             if self.print_debug:
                 if len(joint_state["positions"]) > 0:
                     print("Current joint positions:", joint_state["positions"].cpu().numpy())
@@ -191,7 +226,10 @@ class MujocoEnvironment(Go2Environment):
             policy_action = self.policy(obs).squeeze(0)  # Remove batch dimension
 
             self.desired_positions = self.joint_map.policy_to_unitree(policy_action, self.joint_scale, self.joints_offset)
-
+            # self.desired_positions = torch.tensor([0, 0.4, -1.3, 
+            #                                        0, 0.4, -1.3, 
+            #                                        0, 1.2, -1.5, 
+            #                                        0, 1.2, -1.5])
             self._robot_comm.send_position_commands(self.desired_positions, self.num_joints, kp=25.0, kd=1.0)
 
             self._last_policy_output = policy_action.detach()
@@ -210,6 +248,18 @@ class MujocoEnvironment(Go2Environment):
             time_until_next_step = self.mj_model.opt.timestep - (time.perf_counter() - step_start)
             if time_until_next_step > 0:
                 time.sleep(time_until_next_step)
+            
+    # Add a method to execute lay-down with proper thread safety
+    def execute_lay_down(self):
+        """Execute lay-down sequence with thread safety"""
+        def locked_step():
+            self.locker.acquire()
+            try:
+                self.simulation_step()
+            finally:
+                self.locker.release()
+            
+        self.lay_down(locked_step)
 
     def debug_visualization(self):
         """Render debug arrows in the viewer"""

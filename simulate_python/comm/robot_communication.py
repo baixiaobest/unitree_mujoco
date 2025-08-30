@@ -1,25 +1,32 @@
 from typing import Dict, List, Union, Optional
 import torch
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize
-from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelPublisher
 import utils.math_utils as math_utils
-
-
+from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelPublisher
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_ as LowCmd_default
-
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+from unitree_sdk2py.utils.crc import CRC  # Add this import
+import env.unitree_legged_const as go2  # Add this import
 
 class RobotCommunication:
     """Handles all communication with the robot (state subscription and command publishing)"""
     
-    def __init__(self, domain_id, interface, device: str = "cpu") -> None:
+    def __init__(self, domain_id=0, interface=None, device: str = "cpu") -> None:
         """Initialize communication channels for robot control
         
         Args:
             device: PyTorch device to store tensors on (default: 'cpu')
         """
+        if interface is None:
+            ChannelFactoryInitialize(domain_id)
+        else:
+            ChannelFactoryInitialize(domain_id, interface)
+
         self.device = torch.device(device)
+        
+        # Add CRC calculator
+        self.crc = CRC()
         
         # Global state storage as torch tensors
         self.robot_joint_state: Dict[str, torch.Tensor] = {
@@ -35,9 +42,6 @@ class RobotCommunication:
             "gyroscope": torch.zeros(3, dtype=torch.float32, device=self.device),
             "accelerometer": torch.zeros(3, dtype=torch.float32, device=self.device)
         }
-        
-        # Initialize channel factory
-        ChannelFactoryInitialize(domain_id, interface)
         
         # Initialize subscribers for robot state
         self.low_state_subscriber: ChannelSubscriber = ChannelSubscriber("rt/lowstate", LowState_)
@@ -155,10 +159,11 @@ class RobotCommunication:
             # Create a LowCmd message
             cmd = LowCmd_default()
             
-            # Set header and mode
+            # Set header and mode - CRITICAL: Same as working example
             cmd.head[0] = 0xFE
             cmd.head[1] = 0xEF
             cmd.level_flag = 0xFF
+            cmd.gpio = 0
             
             # Convert tensor to list if needed
             if isinstance(desired_positions, torch.Tensor):
@@ -167,16 +172,19 @@ class RobotCommunication:
             # Store previous position command
             self.previous_position_commands = desired_positions.copy()
 
-            # Set joint commands
+            # Set joint commands - CRITICAL: Use correct mode
             for i in range(min(num_joints, len(cmd.motor_cmd))):
-                cmd.motor_cmd[i].mode = 0x0A  # Position control mode
+                cmd.motor_cmd[i].mode = 0x01  # PMSM mode (not 0x0A)
                 cmd.motor_cmd[i].q = desired_positions[i]
                 cmd.motor_cmd[i].kp = kp
                 cmd.motor_cmd[i].dq = 0.0
                 cmd.motor_cmd[i].kd = kd
                 cmd.motor_cmd[i].tau = 0.0
             
-            # Publish the command - this will be received by the bridge's LowCmdHandler
+            # CRITICAL: Calculate and set CRC
+            cmd.crc = self.crc.Crc(cmd)
+            
+            # Publish the command
             self.low_cmd_publisher.Write(cmd)
             return True
             
