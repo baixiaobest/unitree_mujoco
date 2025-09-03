@@ -45,8 +45,10 @@ class Environment:
 
 
 class Go2Environment(Environment):
-    def __init__(self, robot_comm, device="cpu"):
+    def __init__(self, robot_comm, device="cpu", kp=60.0, kd=5.0):
         super().__init__(robot_comm, device)
+        self.Kp = kp
+        self.Kd = kd
         # Initialize specific configurations for Go2 robot
         self.joint_map = self.construct_policy_to_unitree_joint_order_map()
         
@@ -68,17 +70,17 @@ class Go2Environment(Environment):
         ], device=self.device, dtype=torch.float32)
         
         self.standup_pos_2 = torch.tensor([
-            0.0, 0.67, -1.3,  # FR
-            0.0, 0.67, -1.3,  # FL
-            0.0, 0.67, -1.3,  # RR
-            0.0, 0.67, -1.3   # RL
+            0.0, 0.5, -1.3,  # FR
+            0.0, 0.5, -1.3,  # FL
+            0.0, 1.0, -1.2,  # RR
+            0.0, 1.0, -1.2   # RL
         ], device=self.device, dtype=torch.float32)
         
         self.standup_pos_3 = torch.tensor([
-            -0.1, 0.8, -1.5,  # FR
-            0.1, 0.8, -1.5,   # FL
-            -0.1, 1.0, -1.5,  # RR
-            0.1, 1.0, -1.5    # RL
+            -0.1, 0.5, -1.3,  # FR
+            0.1, 0.5, -1.3,   # FL
+            -0.1, 1.0, -1.2,  # RR
+            0.1, 1.0, -1.2    # RL
         ], device=self.device, dtype=torch.float32)
         
         # Lay-down sequence positions (in unitree joint order)
@@ -90,8 +92,8 @@ class Go2Environment(Environment):
         ], device=self.device, dtype=torch.float32)
         
         self.laydown_pos_2 = torch.tensor([
-            0.0, 1.2, -2.4,  # FR
-            0.0, 1.2, -2.4,  # FL
+            0.0, 1.2, -2.0,  # FR
+            0.0, 1.2, -2.0,  # FL
             0.0, 1.2, -2.4,  # RR
             0.0, 1.2, -2.4   # RL
         ], device=self.device, dtype=torch.float32)
@@ -102,10 +104,6 @@ class Go2Environment(Environment):
             0.0, 1.6, -2.8,  # RR
             0.0, 1.6, -2.8   # RL
         ], device=self.device, dtype=torch.float32)
-        
-        # Motion control parameters
-        self.Kp = 60.0  # Position gain
-        self.Kd = 5.0   # Velocity gain
         
         # Durations (in steps)
         self.standup_duration_1 = 500
@@ -213,7 +211,7 @@ class Go2Environment(Environment):
             return (1 - phase_progress) * self.laydown_pos_2 + phase_progress * self.laydown_pos_3
 
     # Add convenience methods to execute the full sequence
-    def stand_up(self, step_fn):
+    def stand_up(self, step_fn, kp, kd):
         """
         Execute full stand-up sequence using the provided step function
         
@@ -237,7 +235,7 @@ class Go2Environment(Environment):
         for i in range(total_steps):
             progress = i / (total_steps - 1)
             target_pos = self.compute_standup_position(progress)
-            self._robot_comm.send_position_commands(target_pos, len(target_pos), kp=self.Kp, kd=self.Kd)
+            self._robot_comm.send_position_commands(target_pos, len(target_pos), kp=kp, kd=kd)
             step_fn()
         
         self.is_standing = True
@@ -245,7 +243,7 @@ class Go2Environment(Environment):
         print("Stand-up sequence complete")
         return True
 
-    def lay_down(self, step_fn):
+    def lay_down(self, step_fn, kp, kd):
         """
         Execute full lay-down sequence using the provided step function
         
@@ -269,7 +267,7 @@ class Go2Environment(Environment):
         for i in range(total_steps):
             progress = i / (total_steps - 1)
             target_pos = self.compute_laydown_position(progress)
-            self._robot_comm.send_position_commands(target_pos, len(target_pos), kp=self.Kp, kd=self.Kd)
+            self._robot_comm.send_position_commands(target_pos, len(target_pos), kp=kp, kd=kd)
             step_fn()
         
         self.is_standing = False

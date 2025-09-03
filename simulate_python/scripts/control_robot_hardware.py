@@ -6,5 +6,6 @@ if __name__ == "__main__":
 
     env = GO2HardwareEnvironment(
         robot_comm=robot_comm, device="cuda",
-        model_path="../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/MujocoModel/model_no_goal_penalty_jit.pt", )
+        model_path="../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/MujocoModel/model_1799_jit.ptrom",
+        kp=25.0, kd=1.0, up_down_test=False)
     env.run()

@@ -246,8 +246,12 @@ class GameControllerPose2dCommand(Pose2dCommand):
 class WasdKeyboardCommandConfig(Pose2dCommandConfig):
     """Configuration for WasdKeyboardCommand"""
     command_distance: float = 2.0  # Distance of the command point from robot
+    command_turn_distance: float = 1.0  # Distance for turn commands
+    standing_height: float = 0.3  # Height of the command point when standing
     input_hold_time: float = 0.5  # Time to hold the command before allowing changes
+    rotate_angle: float = 30
     visualize: bool = True
+    mode: str = "local"  # Mode of operation: "local" or "global"
 
 class WasdKeyboardCommand(Pose2dCommand):
     """Pose2d command controlled by WASD keyboard keys"""
@@ -263,6 +267,16 @@ class WasdKeyboardCommand(Pose2dCommand):
             pygame.K_s: False,
             pygame.K_d: False
         }
+        
+        # Global mode tracking
+        self.active_global_command = False
+        self.global_command_key = None
+        self.global_command_position = None
+        self.global_command_heading = None
+        
+        # Track key release to update command only on release
+        self.key_just_released = False
+        self.command_set_after_release = False
         
         # Initialize pygame for key handling
         self._init_pygame()
@@ -288,7 +302,11 @@ class WasdKeyboardCommand(Pose2dCommand):
                 return None
         
         try:
+            # Reset key_just_released flag
+            self.key_just_released = False
+            
             # Process events
+            any_key_pressed = False
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit()
@@ -298,14 +316,38 @@ class WasdKeyboardCommand(Pose2dCommand):
                         self.keys_pressed[event.key] = True
                         self.last_key = event.key
                         self.last_key_time = pygame.time.get_ticks() / 1000.0
+                        self.command_set_after_release = False
+                        if self.cfg.mode == "global":
+                            self.global_command_key = event.key
                 elif event.type == pygame.KEYUP:
                     if event.key in self.keys_pressed:
                         self.keys_pressed[event.key] = False
+                        self.key_just_released = True
+                        self.command_set_after_release = False
+                        # If in global mode and we released the active key, reset global command
+                        if self.cfg.mode == "global" and event.key == self.global_command_key:
+                            self.active_global_command = False
+                            self.global_command_key = None
+                            self.global_command_position = None
+                            self.global_command_heading = None
+        
+            # Check if any key is pressed
+            any_key_pressed = any(self.keys_pressed.values())
+            if not any_key_pressed and self.cfg.mode == "global":
+                # If no keys are pressed, reset global command
+                self.active_global_command = False
+                self.global_command_key = None
+                self.global_command_position = None
+                self.global_command_heading = None
             
             # Return the current active key
             current_time = pygame.time.get_ticks() / 1000.0
             if current_time - self.last_key_time < self.cfg.input_hold_time:
                 return self.last_key
+            
+            # If we're in global mode with an active command, return that key
+            if self.cfg.mode == "global" and self.active_global_command:
+                return self.global_command_key
             
             # Check for currently pressed keys (priority: W, A, S, D)
             if self.keys_pressed[pygame.K_w]:
@@ -326,7 +368,7 @@ class WasdKeyboardCommand(Pose2dCommand):
                 return pygame.K_d
             
             # Return None if no keys are currently pressed and hold time has expired
-            return None  # Changed from self.last_key to None
+            return None
         except Exception as e:
             print(f"Error reading keyboard: {e}")
             return None
@@ -346,37 +388,66 @@ class WasdKeyboardCommand(Pose2dCommand):
         key = self.read_keyboard_input()
         
         # Default to current position and orientation
-        x, y, z = robot_pos
+        x, y, z = robot_pos[0], robot_pos[1], self.cfg.standing_height
         heading = robot_yaw
         
-        # Only process key commands if a key is pressed
+        # Handle key presses for both modes
         if key is not None:
-            if key == pygame.K_w:  # Forward
-                # Command in front of robot with same orientation
-                distance = self.cfg.command_distance
-                x = robot_pos[0] + distance * math.cos(robot_yaw)
-                y = robot_pos[1] + distance * math.sin(robot_yaw)
-                heading = robot_yaw  # Keep current heading
-                
-            elif key == pygame.K_a:  # Left rotation (30 degrees)
-                # Stay at current position, but rotate heading by 30 degrees left
-                x, y, z = robot_pos  # Stay at current position
-                heading = robot_yaw + math.radians(30)  # 30 degrees left rotation
-                
-            elif key == pygame.K_s:  # Backward
-                # Command behind robot with 180 deg orientation
-                distance = self.cfg.command_distance
-                back_angle = robot_yaw + math.pi
-                x = robot_pos[0] + distance * math.cos(back_angle)
-                y = robot_pos[1] + distance * math.sin(back_angle)
-                heading = back_angle  # Turn around
-                
-            elif key == pygame.K_d:  # Right rotation (30 degrees)
-                # Stay at current position, but rotate heading by 30 degrees right
-                x, y, z = robot_pos  # Stay at current position
-                heading = robot_yaw - math.radians(30)  # 30 degrees right rotation
-        else:
-            pass
-
+            # Check if we need to store a new global command
+            is_new_global_command = (self.cfg.mode == "global" and 
+                                    (not self.active_global_command or 
+                                     key != self.global_command_key))
+            
+            # If in global mode with an active global command, use the stored command
+            if self.cfg.mode == "global" and self.active_global_command and self.global_command_position is not None and not is_new_global_command:
+                x, y, z = self.global_command_position
+                heading = self.global_command_heading
+            else:
+                # Calculate new command positions based on current key
+                if key == pygame.K_w:  # Forward
+                    distance = self.cfg.command_distance
+                    x = robot_pos[0] + distance * math.cos(robot_yaw)
+                    y = robot_pos[1] + distance * math.sin(robot_yaw)
+                    heading = robot_yaw  # Keep current heading
+                    
+                elif key == pygame.K_a:  # Left rotation (30 degrees)
+                    angle = math.radians(self.cfg.rotate_angle) + robot_yaw
+                    x = robot_pos[0] + self.cfg.command_turn_distance * math.cos(angle)
+                    y = robot_pos[1] + self.cfg.command_turn_distance * math.sin(angle)
+                    heading = angle  # 30 degrees left rotation
+                    
+                elif key == pygame.K_s:  # Backward
+                    distance = self.cfg.command_distance
+                    back_angle = robot_yaw + math.pi
+                    x = robot_pos[0] + distance * math.cos(back_angle)
+                    y = robot_pos[1] + distance * math.sin(back_angle)
+                    heading = back_angle  # Turn around
+                    
+                elif key == pygame.K_d:  # Right rotation (30 degrees)
+                    angle = -math.radians(self.cfg.rotate_angle) + robot_yaw
+                    x = robot_pos[0] + self.cfg.command_turn_distance * math.cos(angle)
+                    y = robot_pos[1] + self.cfg.command_turn_distance * math.sin(angle)
+                    heading = angle  # 30 degrees right rotation
+            
+            # If in global mode, store the new command
+            if is_new_global_command:
+                self.active_global_command = True
+                self.global_command_key = key
+                self.global_command_position = torch.tensor([x, y, z], device=self.device)
+                self.global_command_heading = heading
+            
+            # Mark that we've handled a key press
+            self.command_set_after_release = False
+        elif key is None and self.key_just_released and not self.command_set_after_release:
+            # Only set command to current position when a key is first released
+            if self.cfg.mode == "global":
+                x, y, z = robot_pos[0], robot_pos[1], self.cfg.standing_height
+                heading = robot_yaw
+                self.command_set_after_release = True
+        elif key is None and not self.key_just_released:
+            # If no key is pressed and it's not a new release, keep the previous command
+            if self.cfg.mode == "global":
+                return  # Don't update command
+    
         # Set the command in world frame
         self.command_w = torch.tensor([x, y, z, heading, 0.0], device=self._command.device, dtype=torch.float32)

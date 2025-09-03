@@ -11,11 +11,11 @@ class GO2HardwareEnvironment(Go2Environment):
     def last_policy_output(self):
         return self._last_policy_output
     
-    def __init__(self, robot_comm, model_path, device="cpu", rate=200):
-        super().__init__(robot_comm, device)
+    def __init__(self, robot_comm, model_path, device="cpu", up_down_test=False, rate=200, kp=60.0, kd=5.0):
+        super().__init__(robot_comm, device, kp=kp, kd=kd)
 
         self.model_path = model_path
-        
+        self.up_down_test = up_down_test
         self.rate = rate
         self.robot_initialized = False
         
@@ -31,9 +31,6 @@ class GO2HardwareEnvironment(Go2Environment):
         
         self.policy = torch.jit.load(self.model_path)
         self._last_policy_output = torch.zeros(self.num_joints, dtype=torch.float32, device=self.device)
-        
-        self.Kp = 60.0
-        self.Kd = 2.0
 
         self.init_time = time()
     
@@ -96,15 +93,18 @@ class GO2HardwareEnvironment(Go2Environment):
                 WasdKeyboardCommand,
                 WasdKeyboardCommandConfig(
                     resample_interval=0.05,
-                    command_distance=2.0,
-                    input_hold_time=0.5,
+                    command_distance=1.0,
+                    command_turn_distance=0.5,
+                    input_hold_time=0.1,
+                    rotate_angle=90,
+                    mode="global",
                     visualize=True
                 ))
             ]
         )
         self._command_manager = CommandManager(self, command_cfg, device=self.device)
 
-    def hardware_stand_up(self):
+    def hardware_stand_up(self, hold_time=2.0):
         """Execute stand-up sequence using RobotCommunication"""
         if self.is_standing:
             print("Robot is already standing")
@@ -128,15 +128,25 @@ class GO2HardwareEnvironment(Go2Environment):
         
         # Total number of steps in the sequence
         total_steps = self.standup_duration_1 + self.standup_duration_2 + self.standup_duration_3
-    
+
         # Execute each step using the inherited compute_standup_position method
         for i in range(total_steps):
             progress = i / (total_steps - 1)
             target_pos = self.compute_standup_position(progress)
             
-            self._robot_comm.send_position_commands(target_pos, self.num_joints, kp=self.Kp, kd=self.Kd)
+            self._robot_comm.send_position_commands(target_pos, self.num_joints, kp=40.0, kd=1.0)
             
             sleep(0.002)  # ~500Hz control rate
+    
+        # Get the final standing position
+        final_stand_position = self.compute_standup_position(1.0)
+        
+        # Hold the final position for the specified time
+        print(f"Holding final stand position for {hold_time} seconds...")
+        hold_start_time = time()
+        while time() - hold_start_time < hold_time:
+            self._robot_comm.send_position_commands(final_stand_position, self.num_joints, kp=40.0, kd=1.0)
+            sleep(0.002)  # Continue at the same control rate
     
         self.is_standing = True
         self.is_laid_down = False
@@ -163,7 +173,7 @@ class GO2HardwareEnvironment(Go2Environment):
             progress = i / (total_steps - 1)
             target_pos = self.compute_laydown_position(progress)
             
-            self._robot_comm.send_position_commands(target_pos, self.num_joints, kp=self.Kp, kd=self.Kd)
+            self._robot_comm.send_position_commands(target_pos, self.num_joints, kp=40.0, kd=1.0)
             
             sleep(0.002)  # ~500Hz control rate
     
@@ -197,6 +207,13 @@ class GO2HardwareEnvironment(Go2Environment):
             sleep(0.1)
             joint_state = self._robot_comm.get_joint_state()
         
+        if self.up_down_test:
+            print("Starting up-down test...")
+            self.hardware_stand_up(hold_time=5.0)
+            self.hardware_lay_down()
+            print("Up-down test complete. Exiting.")
+            return
+
         # First, stand up if not already standing
         if not self.robot_initialized:
             self.hardware_stand_up()

@@ -23,8 +23,8 @@ class MujocoEnvironment(Go2Environment):
     def last_policy_output(self):
         return self._last_policy_output
 
-    def __init__(self, robot_comm, model_path, device="cpu"):
-        super().__init__(robot_comm, device)
+    def __init__(self, robot_comm, model_path, device="cpu", kp=60.0, kd=5.0):
+        super().__init__(robot_comm, device, kp=kp, kd=kd)
 
         self.model_path = model_path
 
@@ -63,7 +63,7 @@ class MujocoEnvironment(Go2Environment):
                     }),
                 ObsItem("last_policy_output", last_policy_output, 12),
                 ObsItem("count_down", constant_observation, 1, 
-                        params={"value": 5 * torch.ones(1, dtype=torch.float32, device=self.device)}),
+                        params={"value": 4.0 * torch.ones(1, dtype=torch.float32, device=self.device)}),
                 ObsItem("constant_observation", constant_observation, 32, 
                         params={"value": 10 * torch.ones(32, dtype=torch.float32, device=self.device)})
                 ])
@@ -95,8 +95,11 @@ class MujocoEnvironment(Go2Environment):
                 WasdKeyboardCommand,
                 WasdKeyboardCommandConfig(
                     resample_interval=0.05,
-                    command_distance=2.0,  # Distance of the command point from robot
-                    input_hold_time=0.5,  # Time to hold the command before allowing changes
+                    command_distance=1.0,  # Distance of the command point from robot
+                    command_turn_distance=0.5,  # Distance for turn commands
+                    input_hold_time=0.1,  # Time to hold the command before allowing changes
+                    rotate_angle=90,
+                    mode="global",
                     visualize=True
                 ))
             ]
@@ -193,7 +196,7 @@ class MujocoEnvironment(Go2Environment):
                     self.locker.release()
             
             # Execute stand-up with thread safety
-            self.stand_up(locked_step)
+            self.stand_up(locked_step, kp=40, kd=1.0)
             self.robot_initialized = True
             print("Robot is ready for policy control")
         
@@ -259,7 +262,7 @@ class MujocoEnvironment(Go2Environment):
             finally:
                 self.locker.release()
             
-        self.lay_down(locked_step)
+        self.lay_down(locked_step, kp=40, kd=1.0)
 
     def debug_visualization(self):
         """Render debug arrows in the viewer"""
