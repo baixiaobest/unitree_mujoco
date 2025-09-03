@@ -12,16 +12,12 @@ import env.unitree_legged_const as go2  # Add this import
 class RobotCommunication:
     """Handles all communication with the robot (state subscription and command publishing)"""
     
-    def __init__(self, domain_id=0, interface=None, device: str = "cpu") -> None:
+    def __init__(self, device: str = "cpu") -> None:
         """Initialize communication channels for robot control
         
         Args:
             device: PyTorch device to store tensors on (default: 'cpu')
         """
-        if interface is None:
-            ChannelFactoryInitialize(domain_id)
-        else:
-            ChannelFactoryInitialize(domain_id, interface)
 
         self.device = torch.device(device)
         

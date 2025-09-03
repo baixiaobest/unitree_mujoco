@@ -2,7 +2,7 @@ from env.environment import Go2Environment
 from mdp.observation_manager import ObservationManager, ObservationConfig, ObsItem
 from mdp.observations import *
 from mdp.command_manager import CommandManager, CommandManagerConfig
-from mdp.commands import WasdKeyboardCommand, WasdKeyboardCommandConfig
+from mdp.commands import WasdKeyboardCommand, WasdKeyboardCommandConfig, GameControllerPose2dCommand, GameControllerPose2dCommandConfig
 from time import sleep, time
 import torch
 
@@ -67,7 +67,8 @@ class GO2HardwareEnvironment(Go2Environment):
                 ObsItem("base_linear_velocity", base_lin_vel, 3),
                 ObsItem("base_angular_velocity", base_ang_vel, 3),
                 ObsItem("projected_gravity", projected_gravity, 3),
-                ObsItem("wasd_controller_pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "wasd_controller_pose_2d_command"}),
+                ObsItem("game_controller_pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "game_controller_pose_2d_command"}),
+                # ObsItem("wasd_controller_pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "wasd_controller_pose_2d_command"}),
                 ObsItem("joint_positions", joint_positions, 12, 
                     params={
                         "jointMap": self.joint_map,
@@ -79,7 +80,7 @@ class GO2HardwareEnvironment(Go2Environment):
                     }),
                 ObsItem("last_policy_output", last_policy_output, 12),
                 ObsItem("count_down", constant_observation, 1, 
-                        params={"value": 5 * torch.ones(1, dtype=torch.float32, device=self.device)}),
+                        params={"value": 4 * torch.ones(1, dtype=torch.float32, device=self.device)}),
                 ObsItem("constant_observation", constant_observation, 32, 
                         params={"value": 10 * torch.ones(32, dtype=torch.float32, device=self.device)})
             ])
@@ -89,23 +90,40 @@ class GO2HardwareEnvironment(Go2Environment):
         """Initialize the command manager"""
         command_cfg = CommandManagerConfig(
             commands=[
-                ("wasd_controller_pose_2d_command",
-                WasdKeyboardCommand,
-                WasdKeyboardCommandConfig(
+                ("game_controller_pose_2d_command",
+                GameControllerPose2dCommand,
+                GameControllerPose2dCommandConfig(
                     resample_interval=0.05,
-                    command_distance=1.0,
-                    command_turn_distance=0.5,
-                    input_hold_time=0.1,
-                    rotate_angle=90,
-                    mode="global",
+                    max_distance=3.0,  # Maximum distance from robot position
+                    controller_index=0,  # Use the first controller
+                    joystick_deadzone=0.1,  # Deadzone for joystick input
+                    x_axis=1,  # Left stick X axis
+                    y_axis=0,  # Left stick Y axis
                     visualize=True
-                ))
+                )),
+
+                # ("wasd_controller_pose_2d_command",
+                # WasdKeyboardCommand,
+                # WasdKeyboardCommandConfig(
+                #     resample_interval=0.05,
+                #     command_distance=1.0,
+                #     command_turn_distance=0.5,
+                #     input_hold_time=0.1,
+                #     rotate_angle=90,
+                #     mode="global",
+                #     visualize=True
+                # ))
             ]
         )
         self._command_manager = CommandManager(self, command_cfg, device=self.device)
 
-    def hardware_stand_up(self, hold_time=2.0):
-        """Execute stand-up sequence using RobotCommunication"""
+    def hardware_stand_up(self, hold_time=2.0, sim_step_callback=None):
+        """Execute stand-up sequence using RobotCommunication
+        
+        Args:
+            hold_time: Time to hold the final standing position
+            sim_step_callback: Optional callback function to update simulation after each step
+        """
         if self.is_standing:
             print("Robot is already standing")
             return True
@@ -136,8 +154,12 @@ class GO2HardwareEnvironment(Go2Environment):
             
             self._robot_comm.send_position_commands(target_pos, self.num_joints, kp=40.0, kd=1.0)
             
+            # Call simulation step callback if provided
+            if sim_step_callback:
+                sim_step_callback()
+            
             sleep(0.002)  # ~500Hz control rate
-    
+
         # Get the final standing position
         final_stand_position = self.compute_standup_position(1.0)
         
@@ -146,15 +168,24 @@ class GO2HardwareEnvironment(Go2Environment):
         hold_start_time = time()
         while time() - hold_start_time < hold_time:
             self._robot_comm.send_position_commands(final_stand_position, self.num_joints, kp=40.0, kd=1.0)
+            
+            # Call simulation step callback if provided
+            if sim_step_callback:
+                sim_step_callback()
+                
             sleep(0.002)  # Continue at the same control rate
-    
+
         self.is_standing = True
         self.is_laid_down = False
         print("Stand-up sequence complete")
         return True
 
-    def hardware_lay_down(self):
-        """Execute lay-down sequence using RobotCommunication"""
+    def hardware_lay_down(self, sim_step_callback=None):
+        """Execute lay-down sequence using RobotCommunication
+        
+        Args:
+            sim_step_callback: Optional callback function to update simulation after each step
+        """
         if self.is_laid_down:
             print("Robot is already laid down")
             return True
@@ -167,7 +198,7 @@ class GO2HardwareEnvironment(Go2Environment):
         
         # Total number of steps in the sequence
         total_steps = self.laydown_duration_1 + self.laydown_duration_2 + self.laydown_duration_3
-    
+
         # Execute each step using the inherited compute_laydown_position method
         for i in range(total_steps):
             progress = i / (total_steps - 1)
@@ -175,8 +206,12 @@ class GO2HardwareEnvironment(Go2Environment):
             
             self._robot_comm.send_position_commands(target_pos, self.num_joints, kp=40.0, kd=1.0)
             
+            # Call simulation step callback if provided
+            if sim_step_callback:
+                sim_step_callback()
+                
             sleep(0.002)  # ~500Hz control rate
-    
+
         self.is_standing = False
         self.is_laid_down = True
         print("Lay-down sequence complete")
@@ -220,11 +255,27 @@ class GO2HardwareEnvironment(Go2Environment):
             self.robot_initialized = True
             print("Robot is ready for policy control")
         
+        # Calculate the desired period in seconds
+        period = 1.0 / self.rate
+        
         # Then run the main control loop
         try:
+            print(f"Running control loop at {self.rate} Hz (period: {period*1000:.2f} ms)")
             while True:
+                # Start timing this iteration
+                iteration_start = time()
+                
+                # Execute control step
                 self.step()
-                sleep(1.0 / self.rate)
+                
+                # Calculate how much time has elapsed
+                elapsed = time() - iteration_start
+                
+                # Sleep only for the remaining time to maintain desired rate
+                sleep_time = period - elapsed
+                if sleep_time > 0:
+                    sleep(sleep_time)
+                    
         except KeyboardInterrupt:
             print("Stopping and laying down the robot...")
             self.hardware_lay_down()

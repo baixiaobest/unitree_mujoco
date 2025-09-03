@@ -41,7 +41,7 @@ class CommandManager:
                 return cmd_instance.command
         raise ValueError(f"Command '{name}' not found in CommandManager")
     
-    def visulize_commands(self, visualizer: MujocoVisualizer):
+    def visualize_commands(self, visualizer: MujocoVisualizer):
         """Visualize commands in the environment"""
         for cmd_name, cmd_instance in self.command_instances:
             if hasattr(cmd_instance, 'visualize'):

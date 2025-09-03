@@ -50,8 +50,8 @@ class MujocoEnvironment(Go2Environment):
                 ObsItem("projected_gravity", projected_gravity, 3),
                 # ObsItem("pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "pose_2d_command"}),
                 # ObsItem("pose_2d_command_obs", pose_2d_zero_command, 4),
-                # ObsItem("game_controller_pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "game_controller_pose_2d_command"}),
-                ObsItem("wasd_controller_pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "wasd_controller_pose_2d_command"}),
+                ObsItem("game_controller_pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "game_controller_pose_2d_command"}),
+                # ObsItem("wasd_controller_pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "wasd_controller_pose_2d_command"}),
                 ObsItem("joint_positions", joint_positions, 12, 
                     params={
                         "jointMap": self.joint_map,
@@ -79,29 +79,29 @@ class MujocoEnvironment(Go2Environment):
                 #     angle_range=(-math.pi, math.pi), visualize=True
                 #     ))
 
-                # ("game_controller_pose_2d_command",
-                # GameControllerPose2dCommand,
-                # GameControllerPose2dCommandConfig(
-                #     resample_interval=0.05,
-                #     max_distance=3.0,  # Maximum distance from robot position
-                #     controller_index=0,  # Use the first controller
-                #     joystick_deadzone=0.1,  # Deadzone for joystick input
-                #     x_axis=1,  # Left stick X axis
-                #     y_axis=0,  # Left stick Y axis
-                #     visualize=True
-                # ))
-
-                ("wasd_controller_pose_2d_command",
-                WasdKeyboardCommand,
-                WasdKeyboardCommandConfig(
+                ("game_controller_pose_2d_command",
+                GameControllerPose2dCommand,
+                GameControllerPose2dCommandConfig(
                     resample_interval=0.05,
-                    command_distance=1.0,  # Distance of the command point from robot
-                    command_turn_distance=0.5,  # Distance for turn commands
-                    input_hold_time=0.1,  # Time to hold the command before allowing changes
-                    rotate_angle=90,
-                    mode="global",
+                    max_distance=3.0,  # Maximum distance from robot position
+                    controller_index=0,  # Use the first controller
+                    joystick_deadzone=0.1,  # Deadzone for joystick input
+                    x_axis=1,  # Left stick X axis
+                    y_axis=0,  # Left stick Y axis
                     visualize=True
                 ))
+
+                # ("wasd_controller_pose_2d_command",
+                # WasdKeyboardCommand,
+                # WasdKeyboardCommandConfig(
+                #     resample_interval=0.05,
+                #     command_distance=1.0,  # Distance of the command point from robot
+                #     command_turn_distance=0.5,  # Distance for turn commands
+                #     input_hold_time=0.1,  # Time to hold the command before allowing changes
+                #     rotate_angle=90,
+                #     mode="global",
+                #     visualize=True
+                # ))
             ]
         )
         self._command_manager = CommandManager(self, command_cfg, device=self.device)
@@ -229,10 +229,7 @@ class MujocoEnvironment(Go2Environment):
             policy_action = self.policy(obs).squeeze(0)  # Remove batch dimension
 
             self.desired_positions = self.joint_map.policy_to_unitree(policy_action, self.joint_scale, self.joints_offset)
-            # self.desired_positions = torch.tensor([0, 0.4, -1.3, 
-            #                                        0, 0.4, -1.3, 
-            #                                        0, 1.2, -1.5, 
-            #                                        0, 1.2, -1.5])
+
             self._robot_comm.send_position_commands(self.desired_positions, self.num_joints, kp=25.0, kd=1.0)
 
             self._last_policy_output = policy_action.detach()
@@ -266,7 +263,7 @@ class MujocoEnvironment(Go2Environment):
 
     def debug_visualization(self):
         """Render debug arrows in the viewer"""
-        self.command_manager.visulize_commands(self.visualizer)
+        self.command_manager.visualize_commands(self.visualizer)
 
     def viewer_thread(self):
         while self.viewer.is_running():
