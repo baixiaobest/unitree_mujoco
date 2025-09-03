@@ -7,7 +7,7 @@ import time
 # Configuration
 USE_SIMULATION = True  # Set to False to use real hardware
 DEVICE = "cuda"
-MODEL_PATH = "../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/MujocoModel/model_foot_air_jit.ptrom"
+MODEL_PATH = "../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/MujocoModel/model_2498_jit.ptrom"
 
 # Create a subclass that overrides the _init_unitree_services method for simulation
 class SimulationGO2HardwareEnvironment(GO2HardwareEnvironment):
@@ -30,16 +30,24 @@ if __name__ == "__main__":
         
         # Create robot communication that will connect to the simulation
         robot_comm = RobotCommunication(device=DEVICE)
+    else:
+        print("Connecting to real hardware")
+        # Initialize DDS communication with real hardware interface
+        ChannelFactoryInitialize(0, "enp108s0")
         
-        # Create hardware environment
-        hw_env = SimulationGO2HardwareEnvironment(
-            robot_comm=robot_comm, 
-            device=DEVICE,
-            model_path=MODEL_PATH,
-            kp=25.0, 
-            kd=1.0, 
-            up_down_test=False)
+        # Create robot communication that will connect to real hardware
+        robot_comm = RobotCommunication(device=DEVICE)
         
+    # Create hardware environment
+    hw_env = SimulationGO2HardwareEnvironment(
+        robot_comm=robot_comm, 
+        device=DEVICE,
+        model_path=MODEL_PATH,
+        kp=25.0, 
+        kd=0.5, 
+        up_down_test=False)
+        
+    if USE_SIMULATION:
         # Create simulation environment and set the hardware environment
         sim_env = HardwareSimulationEnvironment()
         sim_env.hardware_env = hw_env  # Use the setter here
@@ -54,20 +62,4 @@ if __name__ == "__main__":
         finally:
             sim_env.stop()
     else:
-        print("Connecting to real hardware")
-        # Initialize DDS communication with real hardware interface
-        ChannelFactoryInitialize(0, "enp108s0")
-        
-        # Create robot communication that will connect to real hardware
-        robot_comm = RobotCommunication(device=DEVICE)
-        
-        # Create and run hardware environment
-        hw_env = GO2HardwareEnvironment(
-            robot_comm=robot_comm, 
-            device=DEVICE,
-            model_path=MODEL_PATH,
-            kp=25.0, 
-            kd=1.0, 
-            up_down_test=False)
-        
         hw_env.run()
