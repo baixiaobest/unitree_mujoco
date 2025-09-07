@@ -13,7 +13,12 @@ from config import SIMULATION_CONFIG as sim_config
 class HardwareSimulationEnvironment:
     """Mujoco simulation environment that controls the hardware environment in lock-step"""
     
-    def __init__(self):
+    def __init__(self, simulator_update_time=None):
+        """
+        simulator_update_time: real time between two simulator step function call.
+            this is different from step dt used in the simulation, which is simulated time step.
+        """
+
         self.locker = threading.Lock()
         
         # Initialize simulation
@@ -32,6 +37,11 @@ class HardwareSimulationEnvironment:
         self.running = False
         self.elapsed_time = 0
         self.steps = 0
+
+        if simulator_update_time is None:
+            self.simulator_update_time = self.mj_model.opt.timestep
+        else:
+            self.simulator_update_time = simulator_update_time
         
         # The hardware environment will be set from the outside
         self._hardware_env = None  # Use a private attribute for encapsulation
@@ -93,7 +103,7 @@ class HardwareSimulationEnvironment:
                 mujoco.mj_step(self.mj_model, self.mj_data)
                 # Update the simulation state counter
                 self.steps += 1
-                self.elapsed_time += self.mj_model.opt.timestep
+                self.elapsed_time += self.simulator_update_time
                 # Small sleep to maintain real-time factor
                 time.sleep(self.mj_model.opt.timestep)
         return callback
@@ -134,7 +144,7 @@ class HardwareSimulationEnvironment:
             self.steps += 1
             
             # Maintain simulation timing
-            time_until_next_step = self.mj_model.opt.timestep - (time.perf_counter() - step_start)
+            time_until_next_step = self.simulator_update_time - (time.perf_counter() - step_start)
             if time_until_next_step > 0:
                 time.sleep(time_until_next_step)
     

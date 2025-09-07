@@ -5,9 +5,9 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 import time
 
 # Configuration
-USE_SIMULATION = True  # Set to False to use real hardware
+USE_SIMULATION = False  # Set to False to use real hardware
 DEVICE = "cuda"
-MODEL_PATH = "../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/MujocoModel/model_2498_jit.ptrom"
+MODEL_PATH = "../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/MujocoModel/model_finetune_obs_only_jit.ptrom"
 
 # Create a subclass that overrides the _init_unitree_services method for simulation
 class SimulationGO2HardwareEnvironment(GO2HardwareEnvironment):
@@ -38,19 +38,19 @@ if __name__ == "__main__":
         # Create robot communication that will connect to real hardware
         robot_comm = RobotCommunication(device=DEVICE)
         
-    # Create hardware environment
-    hw_env = SimulationGO2HardwareEnvironment(
-        robot_comm=robot_comm, 
-        device=DEVICE,
-        model_path=MODEL_PATH,
-        kp=25.0, 
-        kd=0.5, 
-        up_down_test=False)
-        
     if USE_SIMULATION:
+        # Create hardware environment
+        env = SimulationGO2HardwareEnvironment(
+            robot_comm=robot_comm, 
+            device=DEVICE,
+            model_path=MODEL_PATH,
+            kp=25.0, 
+            kd=0.5, 
+            up_down_test=False)
+        
         # Create simulation environment and set the hardware environment
-        sim_env = HardwareSimulationEnvironment()
-        sim_env.hardware_env = hw_env  # Use the setter here
+        sim_env = HardwareSimulationEnvironment(simulator_update_time=0.02)
+        sim_env.hardware_env = env  # Use the setter here
         
         # Start lock-step simulation
         try:
@@ -62,4 +62,12 @@ if __name__ == "__main__":
         finally:
             sim_env.stop()
     else:
-        hw_env.run()
+        env = GO2HardwareEnvironment(
+            robot_comm=robot_comm, 
+            model_path=MODEL_PATH,
+            device=DEVICE,
+            kp=25.0, 
+            kd=0.5, 
+            up_down_test=False)
+        
+        env.run()

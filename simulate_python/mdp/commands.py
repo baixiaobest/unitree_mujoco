@@ -131,6 +131,7 @@ class GameControllerPose2dCommandConfig(Pose2dCommandConfig):
     joystick_deadzone: float = 0.1  # Deadzone for joystick input
     x_axis: int = 0  # Controller axis index for X movement (typically left stick X)
     y_axis: int = 1  # Controller axis index for Y movement (typically left stick Y)
+    standing_height: float | None = None  # Optional standing height for command z
 
 class GameControllerPose2dCommand(Pose2dCommand):
     """Pose2d command controlled by an Xbox controller"""
@@ -212,7 +213,6 @@ class GameControllerPose2dCommand(Pose2dCommand):
         
         # Read controller input
         x_input, y_input = self.read_controller_input()
-        print(f"Controller input: x={x_input}, y={y_input}")
         
         # Calculate distance based on stick position (magnitude)
         magnitude = min(1.0, math.sqrt(x_input**2 + y_input**2))
@@ -221,7 +221,6 @@ class GameControllerPose2dCommand(Pose2dCommand):
         # Calculate joystick angle in robot's local frame
         if magnitude > 0:
             local_angle = math.atan2(y_input, x_input)
-            
             # Convert to world frame by adding robot's yaw
             world_angle = local_angle + robot_yaw
         else:
@@ -231,7 +230,11 @@ class GameControllerPose2dCommand(Pose2dCommand):
         # Calculate command position relative to robot position
         x = robot_pos[0] + distance * math.cos(world_angle)
         y = robot_pos[1] + distance * math.sin(world_angle)
-        z = robot_pos[2]  # Keep the same height as the robot
+        # Use standing_height if set, otherwise robot's z
+        if self.cfg.standing_height is not None:
+            z = self.cfg.standing_height
+        else:
+            z = robot_pos[2]
         
         # Calculate the heading to point from robot to commanded position
         if magnitude > 0:
