@@ -10,6 +10,7 @@ import pyqtgraph as pg
 # Import the RobotCommunication class
 sys.path.append("../")
 from comm.robot_communication import RobotCommunication
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
 class StatusMonitor(QMainWindow):
     # Define joint names as a class variable
@@ -494,11 +495,17 @@ class StatusMonitor(QMainWindow):
 
 
 def main():
+    # Initialize DDS communication with real hardware interface
+    ChannelFactoryInitialize(0, "enp108s0")
+    
+    # Create robot communication that will connect to real hardware
+    robot_comm = RobotCommunication(device="cuda")
+
     # Create application
     app = QApplication(sys.argv)
     
     # Create robot communication
-    robot_comm = RobotCommunication(domain_id=0, interface="enp108s0", device="cuda")
+    robot_comm = RobotCommunication(device="cuda")
     
     # Create and show the status monitor
     monitor = StatusMonitor(robot_comm)

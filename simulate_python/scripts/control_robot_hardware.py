@@ -7,7 +7,7 @@ import time
 # Configuration
 USE_SIMULATION = False  # Set to False to use real hardware
 DEVICE = "cuda"
-MODEL_PATH = "../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/MujocoModel/model_finetune_obs_only_jit.ptrom"
+MODEL_PATH = "../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/MujocoModel/model_2300_jit.ptrom"
 
 # Create a subclass that overrides the _init_unitree_services method for simulation
 class SimulationGO2HardwareEnvironment(GO2HardwareEnvironment):

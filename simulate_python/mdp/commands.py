@@ -31,6 +31,10 @@ class Command:
     @property
     def command(self):
         raise NotImplementedError("This method should be implemented by subclasses")
+    
+    def setup(self):
+        """Setup the command if needed"""
+        pass
 
     def update(self):
         """Update the command based on the robot's state"""
@@ -67,6 +71,14 @@ class Pose2dCommand(Command):
     def command(self):
         """Get the command in robot base frame"""
         return self._command
+    
+    def setup(self):
+        base_state = self.robot_comm.get_base_state()
+        robot_pos = base_state["position"]  # [x, y, z]
+        robot_quat = base_state["quaternion"]  # [w, x, y, z]
+        _, _, robot_yaw = math_utils.euler_xyz_from_quat(robot_quat.unsqueeze(0))
+        robot_yaw = robot_yaw[0]
+        self.command_w = torch.tensor([robot_pos[0], robot_pos[1], robot_pos[2], robot_yaw, 0.0], device=self.device, dtype=torch.float32)
 
     def resample(self):
         """Resample the 2D pose command within specified ranges"""
@@ -132,6 +144,8 @@ class GameControllerPose2dCommandConfig(Pose2dCommandConfig):
     x_axis: int = 0  # Controller axis index for X movement (typically left stick X)
     y_axis: int = 1  # Controller axis index for Y movement (typically left stick Y)
     standing_height: float | None = None  # Optional standing height for command z
+    mode: str = "local"  # Mode of operation: "local" or "global"
+    a_button_index: int = 0  # Button index for A button (to set global position)
 
 class GameControllerPose2dCommand(Pose2dCommand):
     """Pose2d command controlled by an Xbox controller"""
@@ -140,6 +154,11 @@ class GameControllerPose2dCommand(Pose2dCommand):
         self.cfg = cfg
         self.has_controller = False
         self.controller = None
+        
+        # Global mode tracking
+        self.global_position = None  # Fixed global position when set
+        self.global_heading = None   # Fixed global heading when set
+        self.a_button_pressed_prev = False  # Track button state to detect transitions
         
         # Initialize controller
         self._init_controller()
@@ -200,20 +219,19 @@ class GameControllerPose2dCommand(Pose2dCommand):
             self.has_controller = False
             return 0.0, 0.0
     
-    def resample(self):
-        """Override resample to read from controller instead of random sampling"""
-        # Get robot position and orientation
-        base_state = self.robot_comm.get_base_state()
-        robot_pos = base_state["position"]  # [x, y, z]
-        robot_quat = base_state["quaternion"]  # [w, x, y, z]
+    def is_a_button_pressed(self):
+        """Check if the A button is pressed"""
+        if not self.has_controller:
+            return False
         
-        # Get robot's current yaw
-        _, _, robot_yaw = math_utils.euler_xyz_from_quat(robot_quat.unsqueeze(0))
-        robot_yaw = robot_yaw[0]
-        
-        # Read controller input
-        x_input, y_input = self.read_controller_input()
-        
+        try:
+            return self.controller.get_button(self.cfg.a_button_index)
+        except Exception as e:
+            print(f"Error reading A button: {e}")
+            return False
+    
+    def calculate_command_position(self, robot_pos, robot_yaw, x_input, y_input):
+        """Calculate command position based on stick input relative to robot position"""
         # Calculate distance based on stick position (magnitude)
         magnitude = min(1.0, math.sqrt(x_input**2 + y_input**2))
         distance = magnitude * self.cfg.max_distance
@@ -230,20 +248,85 @@ class GameControllerPose2dCommand(Pose2dCommand):
         # Calculate command position relative to robot position
         x = robot_pos[0] + distance * math.cos(world_angle)
         y = robot_pos[1] + distance * math.sin(world_angle)
+        
         # Use standing_height if set, otherwise robot's z
         if self.cfg.standing_height is not None:
             z = self.cfg.standing_height
         else:
             z = robot_pos[2]
-        
-        # Calculate the heading to point from robot to commanded position
+            
+        # Calculate the heading
         if magnitude > 0:
             heading = world_angle  # Use same angle for heading
         else:
             heading = robot_yaw  # Keep current heading when no input
+            
+        return x, y, z, heading, magnitude > 0
+    
+    def handle_global_mode(self, robot_pos, robot_yaw, x_input, y_input):
+        """Handle global mode command generation"""
+        # Check if A button was just pressed (transition from not pressed to pressed)
+        a_button_pressed = self.is_a_button_pressed()
+        a_button_just_pressed = a_button_pressed and not self.a_button_pressed_prev
+        self.a_button_pressed_prev = a_button_pressed
         
-        # Set the command in world frame
+        # If A button was just pressed, set new global position based on stick input
+        if a_button_just_pressed:
+            x, y, z, heading, has_input = self.calculate_command_position(
+                robot_pos, robot_yaw, x_input, y_input)
+            
+            if has_input:  # Only update if there's actual stick input
+                self.global_position = torch.tensor([x, y, z], device=self.device)
+                self.global_heading = heading
+            else:
+                # If no input, set to current robot position and heading
+                self.global_position = torch.tensor(robot_pos, device=self.device)
+                self.global_heading = robot_yaw
+        
+        # If global position is set, use it; otherwise use current robot position
+        if self.global_position is not None:
+            return (
+                self.global_position[0],
+                self.global_position[1],
+                self.global_position[2],
+                self.global_heading
+            )
+        else:
+            # Default to current position if no global position is set
+            if self.cfg.standing_height is not None:
+                z = self.cfg.standing_height
+            else:
+                z = robot_pos[2]
+            return robot_pos[0], robot_pos[1], z, robot_yaw
+    
+    def handle_local_mode(self, robot_pos, robot_yaw, x_input, y_input):
+        """Handle local mode command generation"""
+        x, y, z, heading, _ = self.calculate_command_position(
+            robot_pos, robot_yaw, x_input, y_input)
+        return x, y, z, heading
+    
+    def resample(self):
+        """Override resample to read from controller instead of random sampling"""
+        # Get robot position and orientation
+        base_state = self.robot_comm.get_base_state()
+        robot_pos = base_state["position"]  # [x, y, z]
+        robot_quat = base_state["quaternion"]  # [w, x, y, z]
+        
+        # Get robot's current yaw
+        _, _, robot_yaw = math_utils.euler_xyz_from_quat(robot_quat.unsqueeze(0))
+        robot_yaw = robot_yaw[0]
+        
+        # Read controller input
+        x_input, y_input = self.read_controller_input()
+        
+        # Generate command based on mode
+        if self.cfg.mode == "global":
+            x, y, z, heading = self.handle_global_mode(robot_pos, robot_yaw, x_input, y_input)
+        else:  # local mode
+            x, y, z, heading = self.handle_local_mode(robot_pos, robot_yaw, x_input, y_input)
+        
         self.command_w = torch.tensor([x, y, z, heading, 0.0], device=self._command.device, dtype=torch.float32)
+
 
 @dataclass
 class WasdKeyboardCommandConfig(Pose2dCommandConfig):
@@ -441,16 +524,16 @@ class WasdKeyboardCommand(Pose2dCommand):
             
             # Mark that we've handled a key press
             self.command_set_after_release = False
-        elif key is None and self.key_just_released and not self.command_set_after_release:
+        elif key is None:
             # Only set command to current position when a key is first released
-            if self.cfg.mode == "global":
-                x, y, z = robot_pos[0], robot_pos[1], self.cfg.standing_height
-                heading = robot_yaw
-                self.command_set_after_release = True
-        elif key is None and not self.key_just_released:
-            # If no key is pressed and it's not a new release, keep the previous command
-            if self.cfg.mode == "global":
-                return  # Don't update command
+            # if self.cfg.mode == "global":
+            x, y, z = robot_pos[0], robot_pos[1], self.cfg.standing_height
+            heading = robot_yaw
+            self.command_set_after_release = True
+        # elif key is None and not self.key_just_released:
+        #     # If no key is pressed and it's not a new release, keep the previous command
+        #     if self.cfg.mode == "global":
+        #         return  # Don't update command
     
         # Set the command in world frame
         self.command_w = torch.tensor([x, y, z, heading, 0.0], device=self._command.device, dtype=torch.float32)

@@ -100,6 +100,8 @@ class GO2HardwareEnvironment(Go2Environment):
                     joystick_deadzone=0.1,  # Deadzone for joystick input
                     x_axis=1,  # Left stick X axis
                     y_axis=0,  # Left stick Y axis
+                    mode="global",  # "global" or "local"
+                    a_button_index=0,  # Button index for 'A' button
                     visualize=True
                 )),
 
@@ -222,6 +224,7 @@ class GO2HardwareEnvironment(Go2Environment):
     def step(self):
         self.elapsed_time = time() - self.init_time
 
+        self._command_manager.update()
         obs = self._observation_manager.get_observation().unsqueeze(0)  # Add batch dimension
         with torch.no_grad():
             policy_action = self.policy(obs).squeeze(0)
@@ -231,7 +234,6 @@ class GO2HardwareEnvironment(Go2Environment):
         self._robot_comm.send_position_commands(self.desired_positions, self.num_joints, kp=self.Kp, kd=self.Kd)
         
         self._last_policy_output = policy_action.detach()
-        self._command_manager.update()
 
     def run(self):
         print("WARNING: Please ensure there are no obstacles around the robot while running this example.")
@@ -264,6 +266,7 @@ class GO2HardwareEnvironment(Go2Environment):
             # Then run the main control loop
         
             print(f"Running control loop at {self.rate} Hz (period: {period*1000:.2f} ms)")
+            self.command_manager.setup()
             while True:
                 # Start timing this iteration
                 iteration_start = time()

@@ -25,6 +25,10 @@ class CommandManager:
 
         for _, cmd in self.command_instances:
             cmd.resample()  # Initialize each command
+
+    def setup(self):
+        for _, cmd in self.command_instances:
+            cmd.setup()
     
     def update(self):
         for i, (_, cmd) in enumerate(self.command_instances):

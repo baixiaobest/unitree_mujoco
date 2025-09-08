@@ -131,7 +131,8 @@ class HardwareSimulationEnvironment:
             if hasattr(self.hardware_env, 'hardware_stand_up') and not getattr(self.hardware_env, 'is_standing', False):
                 print("Executing stand-up sequence with simulation updates...")
                 self.hardware_env.hardware_stand_up(hold_time=2.0, sim_step_callback=step_callback)
-    
+
+        self.hardware_env.command_manager.setup()
         print("Starting lock-step simulation...")
         while self.running and self.viewer.is_running():
             step_start = time.perf_counter()
