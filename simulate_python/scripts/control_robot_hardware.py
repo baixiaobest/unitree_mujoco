@@ -46,7 +46,8 @@ if __name__ == "__main__":
             model_path=MODEL_PATH,
             kp=25.0, 
             kd=0.5, 
-            up_down_test=False)
+            up_down_test=False,
+            log_dir="../logs")
         
         # Create simulation environment and set the hardware environment
         sim_env = HardwareSimulationEnvironment(simulator_update_time=0.02)
@@ -68,6 +69,8 @@ if __name__ == "__main__":
             device=DEVICE,
             kp=25.0, 
             kd=0.5, 
-            up_down_test=False)
+            up_down_test=True,
+            enable_logging=True,
+            log_dir="../logs")
         
         env.run()

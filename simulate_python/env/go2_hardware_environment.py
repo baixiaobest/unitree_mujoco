@@ -5,13 +5,15 @@ from mdp.command_manager import CommandManager, CommandManagerConfig
 from mdp.commands import WasdKeyboardCommand, WasdKeyboardCommandConfig, GameControllerPose2dCommand, GameControllerPose2dCommandConfig
 from time import sleep, time
 import torch
+from utils.robot_logger import RobotLogger  # Import the logger
 
 class GO2HardwareEnvironment(Go2Environment):
     @property
     def last_policy_output(self):
         return self._last_policy_output
     
-    def __init__(self, robot_comm, model_path, device="cpu", up_down_test=False, rate=200, kp=25.0, kd=0.5):
+    def __init__(self, robot_comm, model_path, device="cpu", up_down_test=False, rate=200, kp=25.0, kd=0.5, 
+                 log_dir="logs", log_frequency=10, enable_logging=True):
         super().__init__(robot_comm, device, kp=kp, kd=kd)
 
         self.model_path = model_path
@@ -32,6 +34,13 @@ class GO2HardwareEnvironment(Go2Environment):
         self.policy = torch.jit.load(self.model_path)
         self._last_policy_output = torch.zeros(self.num_joints, dtype=torch.float32, device=self.device)
 
+        # Initialize logger if enabled
+        self.enable_logging = enable_logging
+        if enable_logging:
+            self.logger = RobotLogger(log_dir=log_dir, log_frequency=log_frequency)
+        else:
+            self.logger = None
+
         self.init_time = time()
     
     def _init_unitree_services(self):
@@ -51,9 +60,9 @@ class GO2HardwareEnvironment(Go2Environment):
         
         # Check and release any active modes
         status, result = self.msc.CheckMode()
+
         while result['name']:
             print(f"Releasing active mode: {result['name']}")
-            self.sc.StandDown()
             self.msc.ReleaseMode()
             status, result = self.msc.CheckMode()
             sleep(1)
@@ -81,7 +90,7 @@ class GO2HardwareEnvironment(Go2Environment):
                 ObsItem("last_policy_output", last_policy_output, 12),
                 ObsItem("count_down", constant_observation, 1, 
                         params={"value": 2 * torch.ones(1, dtype=torch.float32, device=self.device)}),
-                ObsItem("constant_observation", constant_observation, 32, 
+                ObsItem("obstacle_lidar", constant_observation, 32, 
                         params={"value": 10 * torch.ones(32, dtype=torch.float32, device=self.device)})
             ])
         self._observation_manager = ObservationManager(self, E2EObservationConfig, device=self.device, debug=False)
@@ -224,17 +233,65 @@ class GO2HardwareEnvironment(Go2Environment):
     def step(self):
         self.elapsed_time = time() - self.init_time
 
+        # Update commands
         self._command_manager.update()
-        obs = self._observation_manager.get_observation().unsqueeze(0)  # Add batch dimension
-        with torch.no_grad():
-            policy_action = self.policy(obs).squeeze(0)
         
+        # Get observation and run policy
+        obs = self._observation_manager.get_observation()  # Without batch dimension for logging
+        obs_batched = obs.unsqueeze(0)  # Add batch dimension for policy
+        
+        with torch.no_grad():
+            policy_action = self.policy(obs_batched).squeeze(0)
+        
+        # Convert policy output to robot commands
         self.desired_positions = self.joint_map.policy_to_unitree(policy_action, self.joint_scale, self.joints_offset)
         
+        # Send commands to the robot
         self._robot_comm.send_position_commands(self.desired_positions, self.num_joints, kp=self.Kp, kd=self.Kd)
         
+        # Store policy output for observation
         self._last_policy_output = policy_action.detach()
-
+        
+        # Log data if enabled
+        if self.enable_logging and self.logger:
+            # Get current state
+            base_state = self.robot_comm.get_base_state()
+            joint_state = self.robot_comm.get_joint_state()
+            command = self.command_manager.get_command("game_controller_pose_2d_command")
+            
+            # Index into observation tensor based on the observation config structure
+            # These indices match the order in _init_observation_manager
+            base_lin_vel_obs = obs[0:3]                # base_linear_velocity (3)
+            base_ang_vel_obs = obs[3:6]                # base_angular_velocity (3)
+            projected_gravity_obs = obs[6:9]           # projected_gravity (3)
+            command_obs = obs[9:13]                    # game_controller_pose_2d_command_obs (4)
+            joint_positions_obs = obs[13:25]           # joint_positions (12)
+            joint_velocities_obs = obs[25:37]          # joint_velocities (12)
+            last_policy_output_obs = obs[37:49]        # last_policy_output (12)
+            count_down_obs = obs[49:50]                # count_down (1)
+            obstacle_lidar = obs[50:82]                  # constant_observation (32)
+            
+            # Log all relevant data
+            self.logger.log(
+                # Robot state from direct sensors
+                base_position=base_state["position"],
+                base_quaternion=base_state["quaternion"],
+                
+                # Command and policy data
+                policy_output=policy_action,
+                desired_positions=self.desired_positions,
+                
+                # Actual policy inputs (observation tensor values)
+                obs_base_lin_vel=base_lin_vel_obs,
+                obs_base_ang_vel=base_ang_vel_obs,
+                obs_projected_gravity=projected_gravity_obs,
+                obs_command=command_obs,
+                obs_joint_positions=joint_positions_obs,
+                obs_joint_velocities=joint_velocities_obs,
+                obs_last_policy_output=last_policy_output_obs,
+                obs_count_down=count_down_obs,
+            )
+    
     def run(self):
         print("WARNING: Please ensure there are no obstacles around the robot while running this example.")
         input("Press Enter to continue...")
@@ -264,7 +321,6 @@ class GO2HardwareEnvironment(Go2Environment):
             period = 1.0 / self.rate
             
             # Then run the main control loop
-        
             print(f"Running control loop at {self.rate} Hz (period: {period*1000:.2f} ms)")
             self.command_manager.setup()
             while True:
@@ -287,7 +343,13 @@ class GO2HardwareEnvironment(Go2Environment):
             self.hardware_lay_down()
             print("Robot laid down safely")
             
+        finally:
+            # Always clean up resources
+            self.cleanup()
+    
     def cleanup(self):
         """Clean up resources"""
+        if self.enable_logging and self.logger:
+            self.logger.close()
         print("Resources cleaned up")
 
