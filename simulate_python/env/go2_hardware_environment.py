@@ -2,24 +2,46 @@ from env.environment import Go2Environment
 from mdp.observation_manager import ObservationManager, ObservationConfig, ObsItem
 from mdp.observations import *
 from mdp.command_manager import CommandManager, CommandManagerConfig
-from mdp.commands import WasdKeyboardCommand, WasdKeyboardCommandConfig, GameControllerPose2dCommand, GameControllerPose2dCommandConfig
+from mdp.commands import (
+    GameControllerPose2dCommand,
+    GameControllerPose2dCommandConfig,
+    GameControllerVelocityCommand,
+    GameControllerVelocityCommandConfig,
+    WasdKeyboardCommand,
+    WasdKeyboardCommandConfig,
+)
 from time import sleep, time
 import torch
 from utils.robot_logger import RobotLogger  # Import the logger
 
 class GO2HardwareEnvironment(Go2Environment):
+    POSITION_CONTROL_POLICY_LAYOUT = "position_control_policy"
+    VELOCITY_CONTROL_POLICY_LAYOUT = "velocity_control_policy"
+
     @property
     def last_policy_output(self):
         return self._last_policy_output
     
-    def __init__(self, robot_comm, model_path, device="cpu", up_down_test=False, rate=200, kp=25.0, kd=0.5, 
-                 log_dir="logs", log_frequency=10, enable_logging=True):
+    def __init__(self, robot_comm, model_path, device="cpu", up_down_test=False, rate=200, kp=25.0, kd=0.5,
+                 log_dir="logs", log_frequency=10, enable_logging=True, policy_mode="position_control",
+                 jit_history_length=10):
         super().__init__(robot_comm, device, kp=kp, kd=kd)
 
         self.model_path = model_path
         self.up_down_test = up_down_test
         self.rate = rate
+        self.policy_mode = policy_mode
+        self.policy_history_length = jit_history_length
         self.robot_initialized = False
+        self._validate_policy_mode()
+        self.policy_observation_layout = (
+            self.VELOCITY_CONTROL_POLICY_LAYOUT
+            if self.policy_mode == "velocity_control"
+            else self.POSITION_CONTROL_POLICY_LAYOUT
+        )
+        self.command_observation_name = (
+            "velocity_commands" if self.policy_mode == "velocity_control" else "pose_commands"
+        )
         
         # Initialize high-level services only
         self._init_unitree_services()
@@ -31,7 +53,7 @@ class GO2HardwareEnvironment(Go2Environment):
         self.num_joints = 12
         self.desired_positions = [0.0] * self.num_joints
         
-        self.policy = torch.jit.load(self.model_path)
+        self.policy = torch.jit.load(self.model_path, map_location=self.device)
         self._last_policy_output = torch.zeros(self.num_joints, dtype=torch.float32, device=self.device)
 
         # Initialize logger if enabled
@@ -42,6 +64,13 @@ class GO2HardwareEnvironment(Go2Environment):
             self.logger = None
 
         self.init_time = time()
+
+    def _validate_policy_mode(self):
+        if self.policy_mode not in {"position_control", "velocity_control"}:
+            raise ValueError(
+                f"Unsupported policy mode '{self.policy_mode}'. "
+                "Expected 'position_control' or 'velocity_control'."
+            )
     
     def _init_unitree_services(self):
         """Initialize high-level Unitree SDK services"""
@@ -73,26 +102,73 @@ class GO2HardwareEnvironment(Go2Environment):
         """Initialize the observation manager"""
         E2EObservationConfig = ObservationConfig(
             observations=[
-                ObsItem("base_linear_velocity", base_lin_vel, 3),
-                ObsItem("base_angular_velocity", base_ang_vel, 3),
-                ObsItem("projected_gravity", projected_gravity, 3),
-                ObsItem("game_controller_pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "game_controller_pose_2d_command"}),
-                # ObsItem("wasd_controller_pose_2d_command_obs", pose_2d_command, 4, params={"command_name": "wasd_controller_pose_2d_command"}),
-                ObsItem("joint_positions", joint_positions, 12, 
+                ObsItem("base_lin_vel", base_lin_vel, 3),
+                ObsItem("base_ang_vel", base_ang_vel, 3),
+                ObsItem("projected_gravity", projected_gravity, 3, use_history=True),
+                ObsItem(
+                    "pose_commands",
+                    pose_2d_command,
+                    4,
+                    params={"command_name": "game_controller_pose_2d_command"},
+                ),
+                ObsItem(
+                    "velocity_commands",
+                    velocity_command,
+                    3,
+                    params={"command_name": "game_controller_velocity_command"},
+                    use_history=True,
+                ),
+                ObsItem("joint_pos", joint_positions, 12,
                     params={
                         "jointMap": self.joint_map,
-                        "scale": 1.0, 
-                        "offset": self.joints_offset}),
-                ObsItem("joint_velocities", joint_velocities, 12,
+                        "scale": 1.0,
+                        "offset": self.joints_offset,
+                    },
+                    use_history=True,
+                ),
+                ObsItem("joint_vel", joint_velocities, 12,
                     params={
                         "jointMap": self.joint_map
-                    }),
-                ObsItem("last_policy_output", last_policy_output, 12),
-                ObsItem("count_down", constant_observation, 1, 
-                        params={"value": 2 * torch.ones(1, dtype=torch.float32, device=self.device)}),
-                ObsItem("obstacle_lidar", constant_observation, 32, 
-                        params={"value": 10 * torch.ones(32, dtype=torch.float32, device=self.device)})
-            ])
+                    },
+                    use_history=True,
+                ),
+                ObsItem("actions", last_policy_output, 12, use_history=True),
+                ObsItem(
+                    "count_down",
+                    constant_observation,
+                    1,
+                    params={"value": 2 * torch.ones(1, dtype=torch.float32, device=self.device)},
+                ),
+                ObsItem(
+                    "obstacle_lidar",
+                    constant_observation,
+                    32,
+                    params={"value": 10 * torch.ones(32, dtype=torch.float32, device=self.device)},
+                ),
+            ],
+            layouts={
+                self.POSITION_CONTROL_POLICY_LAYOUT: [
+                    "base_lin_vel",
+                    "base_ang_vel",
+                    "projected_gravity",
+                    "pose_commands",
+                    "joint_pos",
+                    "joint_vel",
+                    "actions",
+                    "count_down",
+                    "obstacle_lidar",
+                ],
+                self.VELOCITY_CONTROL_POLICY_LAYOUT: [
+                    "actions",
+                    "joint_pos",
+                    "joint_vel",
+                    "projected_gravity",
+                    "velocity_commands",
+                ],
+            },
+            history_length=self.policy_history_length,
+            default_layout=self.POSITION_CONTROL_POLICY_LAYOUT,
+        )
         self._observation_manager = ObservationManager(self, E2EObservationConfig, device=self.device, debug=False)
     
     def _init_command_manager(self):
@@ -111,7 +187,22 @@ class GO2HardwareEnvironment(Go2Environment):
                     y_axis=0,  # Left stick Y axis
                     mode="global",  # "global" or "local"
                     a_button_index=0,  # Button index for 'A' button
-                    visualize=True
+                    visualize=self.policy_mode == "position_control"
+                )),
+                ("game_controller_velocity_command",
+                GameControllerVelocityCommand,
+                GameControllerVelocityCommandConfig(
+                    resample_interval=0.05,
+                    max_linear_velocity=1.0,
+                    max_angular_velocity=1.0,
+                    controller_index=0,
+                    joystick_deadzone=0.1,
+                    left_x_axis=0,
+                    right_x_axis=3,
+                    right_y_axis=4,
+                    visualize=self.policy_mode == "velocity_control",
+                    visualize_height=0.35,
+                    visualize_scale=0.5,
                 )),
 
                 # ("wasd_controller_pose_2d_command",
@@ -128,6 +219,15 @@ class GO2HardwareEnvironment(Go2Environment):
             ]
         )
         self._command_manager = CommandManager(self, command_cfg, device=self.device)
+
+    def _get_policy_observation(self):
+        if self.policy_mode == "velocity_control":
+            return self._observation_manager.get_observation(
+                layout_name=self.policy_observation_layout,
+                use_history=True,
+                history_length=self.policy_history_length,
+            )
+        return self._observation_manager.get_observation(layout_name=self.policy_observation_layout)
 
     def hardware_stand_up(self, hold_time=2.0, sim_step_callback=None):
         """Execute stand-up sequence using RobotCommunication
@@ -237,8 +337,8 @@ class GO2HardwareEnvironment(Go2Environment):
         self._command_manager.update()
         
         # Get observation and run policy
-        obs = self._observation_manager.get_observation()  # Without batch dimension for logging
-        obs_batched = obs.unsqueeze(0)  # Add batch dimension for policy
+        policy_obs = self._get_policy_observation()
+        obs_batched = policy_obs.unsqueeze(0)
         
         with torch.no_grad():
             policy_action = self.policy(obs_batched).squeeze(0)
@@ -254,22 +354,8 @@ class GO2HardwareEnvironment(Go2Environment):
         
         # Log data if enabled
         if self.enable_logging and self.logger:
-            # Get current state
             base_state = self.robot_comm.get_base_state()
-            joint_state = self.robot_comm.get_joint_state()
-            command = self.command_manager.get_command("game_controller_pose_2d_command")
-            
-            # Index into observation tensor based on the observation config structure
-            # These indices match the order in _init_observation_manager
-            base_lin_vel_obs = obs[0:3]                # base_linear_velocity (3)
-            base_ang_vel_obs = obs[3:6]                # base_angular_velocity (3)
-            projected_gravity_obs = obs[6:9]           # projected_gravity (3)
-            command_obs = obs[9:13]                    # game_controller_pose_2d_command_obs (4)
-            joint_positions_obs = obs[13:25]           # joint_positions (12)
-            joint_velocities_obs = obs[25:37]          # joint_velocities (12)
-            last_policy_output_obs = obs[37:49]        # last_policy_output (12)
-            count_down_obs = obs[49:50]                # count_down (1)
-            obstacle_lidar = obs[50:82]                  # constant_observation (32)
+            current_obs = self._observation_manager.get_obs_map()
             
             # Log all relevant data
             self.logger.log(
@@ -282,14 +368,14 @@ class GO2HardwareEnvironment(Go2Environment):
                 desired_positions=self.desired_positions,
                 
                 # Actual policy inputs (observation tensor values)
-                obs_base_lin_vel=base_lin_vel_obs,
-                obs_base_ang_vel=base_ang_vel_obs,
-                obs_projected_gravity=projected_gravity_obs,
-                obs_command=command_obs,
-                obs_joint_positions=joint_positions_obs,
-                obs_joint_velocities=joint_velocities_obs,
-                obs_last_policy_output=last_policy_output_obs,
-                obs_count_down=count_down_obs,
+                obs_base_lin_vel=current_obs["base_lin_vel"],
+                obs_base_ang_vel=current_obs["base_ang_vel"],
+                obs_projected_gravity=current_obs["projected_gravity"],
+                obs_command=current_obs[self.command_observation_name],
+                obs_joint_positions=current_obs["joint_pos"],
+                obs_joint_velocities=current_obs["joint_vel"],
+                obs_last_policy_output=current_obs["actions"],
+                obs_count_down=current_obs["count_down"],
             )
     
     def run(self):
@@ -321,8 +407,13 @@ class GO2HardwareEnvironment(Go2Environment):
             period = 1.0 / self.rate
             
             # Then run the main control loop
-            print(f"Running control loop at {self.rate} Hz (period: {period*1000:.2f} ms)")
-            self.command_manager.setup()
+            print(
+                f"Running {self.policy_mode} control loop at {self.rate} Hz "
+                f"(period: {period*1000:.2f} ms)"
+            )
+            if self.command_manager is None:
+                raise RuntimeError("Command manager is not initialized.")
+            self._command_manager.setup()
             while True:
                 # Start timing this iteration
                 iteration_start = time()

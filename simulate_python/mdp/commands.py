@@ -194,6 +194,8 @@ class GameControllerPose2dCommand(Pose2dCommand):
             self._init_controller()
             if not self.has_controller:
                 return 0.0, 0.0  # Default to no movement
+        if self.controller is None:
+            return 0.0, 0.0
         
         try:
             import pygame
@@ -221,7 +223,7 @@ class GameControllerPose2dCommand(Pose2dCommand):
     
     def is_a_button_pressed(self):
         """Check if the A button is pressed"""
-        if not self.has_controller:
+        if not self.has_controller or self.controller is None:
             return False
         
         try:
@@ -326,6 +328,131 @@ class GameControllerPose2dCommand(Pose2dCommand):
             x, y, z, heading = self.handle_local_mode(robot_pos, robot_yaw, x_input, y_input)
         
         self.command_w = torch.tensor([x, y, z, heading, 0.0], device=self._command.device, dtype=torch.float32)
+
+
+@dataclass
+class GameControllerVelocityCommandConfig(CommandConfig):
+    """Configuration for GameControllerVelocityCommand."""
+
+    max_linear_velocity: float = 1.0
+    max_angular_velocity: float = 1.0
+    controller_index: int = 0
+    joystick_deadzone: float = 0.1
+    left_x_axis: int = 0
+    right_x_axis: int = 3
+    right_y_axis: int = 4
+    visualize: bool = False
+    visualize_height: float = 0.3
+    visualize_scale: float = 0.5
+
+
+class GameControllerVelocityCommand(Command):
+    """Velocity command controlled by an Xbox controller."""
+
+    def __init__(self, env: Environment, cfg: GameControllerVelocityCommandConfig, device: str = "cpu"):
+        super().__init__(env, cfg, device)
+        self.cfg = cfg
+        self._command = torch.zeros(3, device=device, dtype=torch.float32)
+        self.has_controller = False
+        self.controller = None
+        self._init_controller()
+
+    @property
+    def command(self):
+        return self._command
+
+    def _init_controller(self):
+        """Initialize the game controller."""
+        try:
+            if not pygame.get_init():
+                pygame.init()
+            if not pygame.joystick.get_init():
+                pygame.joystick.init()
+
+            if pygame.joystick.get_count() > self.cfg.controller_index:
+                self.controller = pygame.joystick.Joystick(self.cfg.controller_index)
+                self.controller.init()
+                self.has_controller = True
+                print(f"Controller initialized: {self.controller.get_name()}")
+            else:
+                print(f"No controller found at index {self.cfg.controller_index}")
+                self.has_controller = False
+        except Exception as exc:
+            print(f"Error initializing controller: {exc}")
+            self.has_controller = False
+
+    def _read_axis(self, axis_index: int):
+        if not self.has_controller:
+            self._init_controller()
+            if not self.has_controller:
+                return 0.0
+        if self.controller is None:
+            return 0.0
+
+        try:
+            pygame.event.pump()
+            value = float(self.controller.get_axis(axis_index))
+            if abs(value) < self.cfg.joystick_deadzone:
+                return 0.0
+            return value
+        except Exception as exc:
+            print(f"Error reading controller axis {axis_index}: {exc}")
+            self.has_controller = False
+            return 0.0
+
+    def setup(self):
+        self._command.zero_()
+
+    def resample(self):
+        """Read controller input and update the base-frame velocity command."""
+        yaw_rate_input = -self._read_axis(self.cfg.left_x_axis)
+        linear_y_input = -self._read_axis(self.cfg.right_x_axis)
+        linear_x_input = -self._read_axis(self.cfg.right_y_axis)
+
+        self._command = torch.tensor(
+            [
+                linear_x_input * self.cfg.max_linear_velocity,
+                linear_y_input * self.cfg.max_linear_velocity,
+                yaw_rate_input * self.cfg.max_angular_velocity,
+            ],
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+    def update(self):
+        """Velocity commands are already defined in the robot base frame."""
+        return
+
+    def visualize(self, visualizer: MujocoVisualizer):
+        """Draw the commanded planar velocity as an arrow above the robot base."""
+        if not self.cfg.visualize:
+            return
+
+        linear_velocity = self._command[:2]
+        if torch.linalg.vector_norm(linear_velocity).item() <= 1e-6:
+            return
+
+        base_state = self.robot_comm.get_base_state()
+        robot_pos = base_state["position"].detach().clone()
+        robot_quat = base_state["quaternion"]
+
+        arrow_start = robot_pos
+        arrow_start[2] += self.cfg.visualize_height
+
+        local_velocity = torch.tensor(
+            [self._command[0], self._command[1], 0.0],
+            device=self.device,
+            dtype=torch.float32,
+        )
+        world_velocity = math_utils.quat_rotate(robot_quat.unsqueeze(0), local_velocity.unsqueeze(0))[0]
+        arrow_end = arrow_start + world_velocity * self.cfg.visualize_scale
+
+        visualizer.add_arrow(
+            arrow_start.cpu().numpy(),
+            arrow_end.detach().cpu().numpy(),
+            size=MujocoVisualizer.DEFAULT_ARROW_SIZE,
+            color=MujocoVisualizer.BLUE,
+        )
 
 
 @dataclass

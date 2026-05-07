@@ -1,5 +1,7 @@
+from typing import Optional
+
 import torch
-from comm.robot_communication import RobotCommunication
+from robot_comm.robot_communication import RobotCommunication
 from env.environment import Environment
 import utils.math_utils as math_utils
 from utils.joint_mapping import JointMapping
@@ -24,6 +26,15 @@ def projected_gravity(env: Environment, robot_comm: RobotCommunication):
 
 def pose_2d_command(env: Environment, robot_comm: RobotCommunication, command_name: str):
     """Get 2D pose command (usually from external command source)"""
+    if env.command_manager is None:
+        raise ValueError("Command manager is not initialized.")
+    return env.command_manager.get_command(command_name)
+
+
+def velocity_command(env: Environment, robot_comm: RobotCommunication, command_name: str):
+    """Get a base-frame velocity command from the command manager."""
+    if env.command_manager is None:
+        raise ValueError("Command manager is not initialized.")
     return env.command_manager.get_command(command_name)
 
 def pose_2d_zero_command(env: Environment, robot_comm: RobotCommunication):
@@ -34,7 +45,7 @@ def joint_positions(env: Environment,
                     robot_comm: RobotCommunication, 
                     jointMap: JointMapping,
                     scale: float = 1.0,
-                    offset: torch.Tensor = None):
+                    offset: Optional[torch.Tensor] = None):
     """Extract joint positions from robot state"""
     return jointMap.unitree_to_policy(robot_comm.get_joint_state()["positions"], scale=scale, offset=offset)
     
@@ -43,11 +54,11 @@ def joint_velocities(env: Environment,
                     robot_comm: RobotCommunication, 
                     jointMap: JointMapping,
                     scale: float = 1.0,
-                    offset: torch.Tensor = None):
+                    offset: Optional[torch.Tensor] = None):
     """Extract joint velocities from robot state"""
     return jointMap.unitree_to_policy(robot_comm.get_joint_state()["velocities"], scale=scale, offset=offset)
 
-def last_policy_output(env: Environment, robot_comm: RobotCommunication, offset: torch.Tensor = None):
+def last_policy_output(env: Environment, robot_comm: RobotCommunication, offset: Optional[torch.Tensor] = None):
     """Get the last action sent to the robot"""
     return env.last_policy_output
 

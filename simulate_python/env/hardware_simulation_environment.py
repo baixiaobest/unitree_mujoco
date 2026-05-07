@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from threading import Thread
 
-from comm.unitree_sdk2py_bridge import UnitreeSdk2Bridge
+from robot_comm.unitree_sdk2py_bridge import UnitreeSdk2Bridge
 from utils.mujoco_visualizer import MujocoVisualizer
 from config import SIMULATION_CONFIG as sim_config
 

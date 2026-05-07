@@ -1,76 +1,118 @@
-from env.go2_hardware_environment import GO2HardwareEnvironment
-from comm.robot_communication import RobotCommunication
-from env.hardware_simulation_environment import HardwareSimulationEnvironment
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+import argparse
 import time
+from pathlib import Path
 
-# Configuration
-USE_SIMULATION = False  # Set to False to use real hardware
 DEVICE = "cuda"
-MODEL_PATH = "../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/MujocoModel/model_2300_jit.ptrom"
+SIMULATION_DOMAIN_ID = 1
+HARDWARE_DOMAIN_ID = 0
+SIMULATION_INTERFACE = "wlo1"
+HARDWARE_INTERFACE = "enp108s0"
+DEFAULT_MODEL_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "logs"
+    / "rsl_rl"
+    / "EncoderActorCriticGO2"
+    / "Locomotion"
+    / "exported"
+    / "policy_estimator.pt"
+)
 
-# Create a subclass that overrides the _init_unitree_services method for simulation
-class SimulationGO2HardwareEnvironment(GO2HardwareEnvironment):
-    def _init_unitree_services(self):
-        """Skip service initialization in simulation mode"""
-        print("Skipping Unitree service initialization (simulation mode)")
-        # No need to initialize services that don't exist in simulation
-    
-    def run(self):
-        """Override run method to allow lock-step simulation control"""
-        print("Hardware environment ready - control handed to simulation environment")
-        # In lock-step mode, we don't run the main loop here
-        # The simulation environment will call step() as needed
 
-if __name__ == "__main__":
-    if USE_SIMULATION:
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run GO2 position-control or velocity-control policy on hardware or simulation.")
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=str(DEFAULT_MODEL_PATH),
+        help="Path to the TorchScript model to run.",
+    )
+    parser.add_argument(
+        "--policy-mode",
+        type=str,
+        choices=("position_control", "velocity_control"),
+        default="velocity_control",
+        help="Select the observation/control mode for the loaded model.",
+    )
+    parser.add_argument(
+        "--run-mode",
+        type=str,
+        choices=("simulation", "hardware"),
+        default="simulation",
+        help="Choose whether to run against the simulation bridge or the real robot.",
+    )
+    return parser.parse_args()
+
+
+def resolve_model_path(model_path: str) -> str:
+    path = Path(model_path).expanduser()
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    else:
+        path = path.resolve()
+
+    if not path.exists():
+        raise FileNotFoundError(f"Model path does not exist: {path}")
+    return str(path)
+
+
+def create_simulation_env_class(base_env_cls):
+    class SimulationGO2HardwareEnvironment(base_env_cls):
+        def _init_unitree_services(self):
+            """Skip service initialization in simulation mode."""
+            print("Skipping Unitree service initialization (simulation mode)")
+
+        def run(self):
+            """Allow the simulation environment to drive the hardware step loop."""
+            print("Hardware environment ready - control handed to simulation environment")
+
+    return SimulationGO2HardwareEnvironment
+
+
+def main():
+    args = parse_args()
+
+    from env.go2_hardware_environment import GO2HardwareEnvironment
+    from env.hardware_simulation_environment import HardwareSimulationEnvironment
+    from robot_comm.robot_communication import RobotCommunication
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+
+    model_path = resolve_model_path(args.model_path)
+    is_simulation = args.run_mode == "simulation"
+
+    if is_simulation:
         print("Using simulated hardware environment")
-        # Initialize DDS communication with domain ID for simulation
-        ChannelFactoryInitialize(1, "wlo1")
-        
-        # Create robot communication that will connect to the simulation
-        robot_comm = RobotCommunication(device=DEVICE)
+        ChannelFactoryInitialize(SIMULATION_DOMAIN_ID, SIMULATION_INTERFACE)
     else:
         print("Connecting to real hardware")
-        # Initialize DDS communication with real hardware interface
-        ChannelFactoryInitialize(0, "enp108s0")
-        
-        # Create robot communication that will connect to real hardware
-        robot_comm = RobotCommunication(device=DEVICE)
-        
-    if USE_SIMULATION:
-        # Create hardware environment
-        env = SimulationGO2HardwareEnvironment(
-            robot_comm=robot_comm, 
-            device=DEVICE,
-            model_path=MODEL_PATH,
-            kp=25.0, 
-            kd=0.5, 
-            up_down_test=False,
-            log_dir="../logs")
-        
-        # Create simulation environment and set the hardware environment
+        ChannelFactoryInitialize(HARDWARE_DOMAIN_ID, HARDWARE_INTERFACE)
+
+    robot_comm = RobotCommunication(device=DEVICE)
+    env_cls = create_simulation_env_class(GO2HardwareEnvironment) if is_simulation else GO2HardwareEnvironment
+    env = env_cls(
+        robot_comm=robot_comm,
+        model_path=model_path,
+        device=DEVICE,
+        kp=25.0,
+        kd=0.5,
+        up_down_test=False,
+        enable_logging=True,
+        log_dir="../logs",
+        policy_mode=args.policy_mode,
+    )
+
+    if is_simulation:
         sim_env = HardwareSimulationEnvironment(simulator_update_time=0.02)
-        sim_env.hardware_env = env  # Use the setter here
-        
-        # Start lock-step simulation
+        sim_env.hardware_env = env
         try:
             sim_env.start()
-            
-            # Wait for simulation to finish (Ctrl+C to stop)
             while sim_env.running:
                 time.sleep(0.1)
         finally:
             sim_env.stop()
-    else:
-        env = GO2HardwareEnvironment(
-            robot_comm=robot_comm, 
-            model_path=MODEL_PATH,
-            device=DEVICE,
-            kp=25.0, 
-            kd=0.5, 
-            up_down_test=True,
-            enable_logging=True,
-            log_dir="../logs")
-        
-        env.run()
+        return
+
+    env.run()
+
+
+if __name__ == "__main__":
+    main()

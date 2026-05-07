@@ -9,7 +9,7 @@ import pyqtgraph as pg
 
 # Import the RobotCommunication class
 sys.path.append("../")
-from comm.robot_communication import RobotCommunication
+from robot_comm.robot_communication import RobotCommunication
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
 class StatusMonitor(QMainWindow):

@@ -134,7 +134,7 @@ class Go2Environment(Environment):
             [ 0.1000, -0.1000, 0.1000, -0.1000, 0.8000, 0.8000, 1.0000, 1.0000, -1.5000, -1.5000, -1.5000, -1.5000], 
             device=self.device, dtype=torch.float32)
         
-        self.joint_scale = 0.5
+        self.joint_scale = 0.25
         
         return JointMapping(
             policy_joint_order=policy_joint_order,

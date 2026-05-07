@@ -1,5 +1,5 @@
 from env.mujoco_environment import MujocoEnvironment
-from comm.robot_communication import RobotCommunication
+from robot_comm.robot_communication import RobotCommunication
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
 if __name__ == "__main__":
