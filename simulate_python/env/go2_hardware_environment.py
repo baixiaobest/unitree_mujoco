@@ -125,6 +125,8 @@ class GO2HardwareEnvironment(Go2Environment):
             observations=[
                 ObsItem("base_lin_vel", base_lin_vel, 3),
                 ObsItem("base_ang_vel", base_ang_vel, 3),
+                ObsItem("imu_ang_vel", imu_ang_vel, 3, use_history=True),
+                ObsItem("imu_lin_acc", imu_lin_acc, 3, use_history=True),
                 ObsItem("projected_gravity", projected_gravity, 3, use_history=True),
                 ObsItem(
                     "pose_commands",
@@ -183,6 +185,8 @@ class GO2HardwareEnvironment(Go2Environment):
                     "actions",
                     "joint_pos",
                     "joint_vel",
+                    "imu_ang_vel",
+                    "imu_lin_acc",
                     "projected_gravity",
                     "velocity_commands",
                 ],
@@ -393,6 +397,8 @@ class GO2HardwareEnvironment(Go2Environment):
                 # Actual policy inputs (observation tensor values)
                 obs_base_lin_vel=current_obs["base_lin_vel"],
                 obs_base_ang_vel=current_obs["base_ang_vel"],
+                obs_imu_ang_vel=current_obs["imu_ang_vel"],
+                obs_imu_lin_acc=current_obs["imu_lin_acc"],
                 obs_projected_gravity=current_obs["projected_gravity"],
                 obs_command=current_obs[self.command_observation_name],
                 obs_joint_positions=current_obs["joint_pos"],

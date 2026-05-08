@@ -17,6 +17,16 @@ def base_ang_vel(env: Environment, robot_comm: RobotCommunication):
     """Extract base angular velocity (gyroscope) from robot state"""
     return robot_comm.get_base_state()["gyroscope"]
 
+
+def imu_ang_vel(env: Environment, robot_comm: RobotCommunication):
+    """Extract IMU angular velocity in the robot body frame."""
+    return robot_comm.get_base_state()["gyroscope"]
+
+
+def imu_lin_acc(env: Environment, robot_comm: RobotCommunication):
+    """Extract IMU linear acceleration in the robot body frame."""
+    return robot_comm.get_base_state()["accelerometer"]
+
 def projected_gravity(env: Environment, robot_comm: RobotCommunication):
     """Calculate gravity vector in robot frame using quaternion"""
     quat = robot_comm.get_base_state()["quaternion"]  # (w, x, y, z)
