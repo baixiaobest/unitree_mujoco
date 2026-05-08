@@ -40,6 +40,23 @@ def parse_args():
         default="simulation",
         help="Choose whether to run against the simulation bridge or the real robot.",
     )
+    parser.add_argument(
+        "--debug-print",
+        action="store_true",
+        help="Print debug information such as the measured control update rate once per second.",
+    )
+    parser.add_argument(
+        "--kp",
+        type=float,
+        default=30.0,
+        help="Proportional gain for joint position control.",
+    )
+    parser.add_argument(
+        "--kd",
+        type=float,
+        default=0.5,
+        help="Derivative gain for joint position control.",
+    )
     return parser.parse_args()
 
 
@@ -92,12 +109,13 @@ def main():
         robot_comm=robot_comm,
         model_path=model_path,
         device=DEVICE,
-        kp=25.0,
-        kd=0.5,
+        kp=args.kp,
+        kd=args.kd,
         up_down_test=False,
         enable_logging=True,
         log_dir="../logs",
         policy_mode=args.policy_mode,
+        debug_print=args.debug_print,
     )
 
     if is_simulation:

@@ -334,11 +334,13 @@ class GameControllerPose2dCommand(Pose2dCommand):
 class GameControllerVelocityCommandConfig(CommandConfig):
     """Configuration for GameControllerVelocityCommand."""
 
-    max_linear_velocity: float = 1.0
+    max_linear_velocity: float = 0.7
     max_angular_velocity: float = 1.0
+    smoothing_time_constant: float = 0.5
     controller_index: int = 0
     joystick_deadzone: float = 0.1
     left_x_axis: int = 0
+    left_y_axis: int = 1
     right_x_axis: int = 3
     right_y_axis: int = 4
     visualize: bool = False
@@ -353,8 +355,10 @@ class GameControllerVelocityCommand(Command):
         super().__init__(env, cfg, device)
         self.cfg = cfg
         self._command = torch.zeros(3, device=device, dtype=torch.float32)
+        self._target_command = torch.zeros(3, device=device, dtype=torch.float32)
         self.has_controller = False
         self.controller = None
+        self._last_update_time = None
         self._init_controller()
 
     @property
@@ -402,14 +406,16 @@ class GameControllerVelocityCommand(Command):
 
     def setup(self):
         self._command.zero_()
+        self._target_command.zero_()
+        self._last_update_time = None
 
     def resample(self):
         """Read controller input and update the base-frame velocity command."""
-        yaw_rate_input = -self._read_axis(self.cfg.left_x_axis)
-        linear_y_input = -self._read_axis(self.cfg.right_x_axis)
-        linear_x_input = -self._read_axis(self.cfg.right_y_axis)
+        linear_y_input = -self._read_axis(self.cfg.left_x_axis)
+        linear_x_input = -self._read_axis(self.cfg.left_y_axis)
+        yaw_rate_input = -self._read_axis(self.cfg.right_x_axis)
 
-        self._command = torch.tensor(
+        self._target_command = torch.tensor(
             [
                 linear_x_input * self.cfg.max_linear_velocity,
                 linear_y_input * self.cfg.max_linear_velocity,
@@ -418,10 +424,24 @@ class GameControllerVelocityCommand(Command):
             device=self.device,
             dtype=torch.float32,
         )
+        if self.cfg.smoothing_time_constant <= 0.0:
+            self._command = self._target_command.clone()
 
     def update(self):
-        """Velocity commands are already defined in the robot base frame."""
-        return
+        """Low-pass filter the target command in the robot base frame."""
+        if self.cfg.smoothing_time_constant <= 0.0:
+            self._command = self._target_command.clone()
+            return
+
+        current_time = float(self.env.time_elapsed)
+        if self._last_update_time is None:
+            dt = max(float(self.cfg.resample_interval), 1e-6)
+        else:
+            dt = max(current_time - self._last_update_time, 1e-6)
+        self._last_update_time = current_time
+
+        alpha = min(1.0, dt / (self.cfg.smoothing_time_constant + dt))
+        self._command = torch.lerp(self._command, self._target_command, alpha)
 
     def visualize(self, visualizer: MujocoVisualizer):
         """Draw the commanded planar velocity as an arrow above the robot base."""
@@ -429,7 +449,8 @@ class GameControllerVelocityCommand(Command):
             return
 
         linear_velocity = self._command[:2]
-        if torch.linalg.vector_norm(linear_velocity).item() <= 1e-6:
+        speed = torch.linalg.vector_norm(linear_velocity).item()
+        if speed <= 1e-6:
             return
 
         base_state = self.robot_comm.get_base_state()
@@ -445,12 +466,19 @@ class GameControllerVelocityCommand(Command):
             dtype=torch.float32,
         )
         world_velocity = math_utils.quat_rotate(robot_quat.unsqueeze(0), local_velocity.unsqueeze(0))[0]
-        arrow_end = arrow_start + world_velocity * self.cfg.visualize_scale
+        direction = world_velocity / torch.linalg.vector_norm(world_velocity)
+        arrow_length = speed * self.cfg.visualize_scale
+        arrow_end = arrow_start + direction * arrow_length
+        arrow_size = [
+            MujocoVisualizer.DEFAULT_ARROW_SIZE[0],
+            MujocoVisualizer.DEFAULT_ARROW_SIZE[1],
+            max(arrow_length, 0.05),
+        ]
 
         visualizer.add_arrow(
             arrow_start.cpu().numpy(),
             arrow_end.detach().cpu().numpy(),
-            size=MujocoVisualizer.DEFAULT_ARROW_SIZE,
+            size=arrow_size,
             color=MujocoVisualizer.BLUE,
         )
 

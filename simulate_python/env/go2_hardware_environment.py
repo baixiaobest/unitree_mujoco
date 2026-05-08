@@ -24,7 +24,7 @@ class GO2HardwareEnvironment(Go2Environment):
     
     def __init__(self, robot_comm, model_path, device="cpu", up_down_test=False, rate=200, kp=25.0, kd=0.5,
                  log_dir="logs", log_frequency=10, enable_logging=True, policy_mode="position_control",
-                 jit_history_length=10):
+                 jit_history_length=10, debug_print=False):
         super().__init__(robot_comm, device, kp=kp, kd=kd)
 
         self.model_path = model_path
@@ -32,7 +32,10 @@ class GO2HardwareEnvironment(Go2Environment):
         self.rate = rate
         self.policy_mode = policy_mode
         self.policy_history_length = jit_history_length
+        self.debug_print = debug_print
         self.robot_initialized = False
+        self._rate_window_start_time = time()
+        self._rate_window_step_count = 0
         self._validate_policy_mode()
         self.policy_observation_layout = (
             self.VELOCITY_CONTROL_POLICY_LAYOUT
@@ -64,6 +67,24 @@ class GO2HardwareEnvironment(Go2Environment):
             self.logger = None
 
         self.init_time = time()
+
+    def _maybe_print_update_rate(self):
+        if not self.debug_print:
+            return
+
+        self._rate_window_step_count += 1
+        now = time()
+        elapsed = now - self._rate_window_start_time
+        if elapsed < 1.0:
+            return
+
+        actual_rate = self._rate_window_step_count / max(elapsed, 1e-6)
+        print(
+            f"Actual update rate: {actual_rate:.1f} Hz "
+            f"(target: {self.rate:.1f} Hz, samples: {self._rate_window_step_count}, window: {elapsed:.2f} s)"
+        )
+        self._rate_window_start_time = now
+        self._rate_window_step_count = 0
 
     def _validate_policy_mode(self):
         if self.policy_mode not in {"position_control", "velocity_control"}:
@@ -198,6 +219,7 @@ class GO2HardwareEnvironment(Go2Environment):
                     controller_index=0,
                     joystick_deadzone=0.1,
                     left_x_axis=0,
+                    left_y_axis=1,
                     right_x_axis=3,
                     right_y_axis=4,
                     visualize=self.policy_mode == "velocity_control",
@@ -332,6 +354,7 @@ class GO2HardwareEnvironment(Go2Environment):
 
     def step(self):
         self.elapsed_time = time() - self.init_time
+        self.steps += 1
 
         # Update commands
         self._command_manager.update()
@@ -377,6 +400,8 @@ class GO2HardwareEnvironment(Go2Environment):
                 obs_last_policy_output=current_obs["actions"],
                 obs_count_down=current_obs["count_down"],
             )
+
+            self._maybe_print_update_rate()
     
     def run(self):
         print("WARNING: Please ensure there are no obstacles around the robot while running this example.")
