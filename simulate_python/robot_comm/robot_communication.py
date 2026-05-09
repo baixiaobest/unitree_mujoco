@@ -51,6 +51,37 @@ class RobotCommunication:
         self.low_cmd_publisher.Init()
 
         self.previous_position_commands = None
+        self.joint_pos_lower_limits = torch.tensor(
+            [
+                -1.0472, -1.5708, -2.7227,
+                -1.0472, -1.5708, -2.7227,
+                -1.0472, -0.5236, -2.7227,
+                -1.0472, -0.5236, -2.7227,
+            ],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.joint_pos_upper_limits = torch.tensor(
+            [
+                1.0472, 3.4907, -0.83776,
+                1.0472, 3.4907, -0.83776,
+                1.0472, 4.5379, -0.83776,
+                1.0472, 4.5379, -0.83776,
+            ],
+            dtype=torch.float32,
+            device=self.device,
+        )
+
+    def _clamp_position_commands(self, desired_positions: Union[List[float], torch.Tensor]) -> List[float]:
+        """Clamp position commands to the GO2 joint limits in Unitree joint order."""
+        desired_positions_tensor = torch.as_tensor(desired_positions, dtype=torch.float32, device=self.device)
+
+        clamped_positions = torch.clamp(
+            desired_positions_tensor,
+            min=self.joint_pos_lower_limits[: desired_positions_tensor.numel()],
+            max=self.joint_pos_upper_limits[: desired_positions_tensor.numel()],
+        )
+        return clamped_positions.cpu().tolist()
     
     def _low_state_handler(self, msg: LowState_) -> None:
         """Handler for low state messages from the robot
@@ -161,9 +192,7 @@ class RobotCommunication:
             cmd.level_flag = 0xFF
             cmd.gpio = 0
             
-            # Convert tensor to list if needed
-            if isinstance(desired_positions, torch.Tensor):
-                desired_positions = desired_positions.cpu().tolist()
+            desired_positions = self._clamp_position_commands(desired_positions)
             
             # Store previous position command
             self.previous_position_commands = desired_positions.copy()
