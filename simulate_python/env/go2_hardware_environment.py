@@ -58,6 +58,7 @@ class GO2HardwareEnvironment(Go2Environment):
         
         self.policy = torch.jit.load(self.model_path, map_location=self.device)
         self._last_policy_output = torch.zeros(self.num_joints, dtype=torch.float32, device=self.device)
+        self._last_estimated_base_lin_vel = None
 
         # Initialize logger if enabled
         self.enable_logging = enable_logging
@@ -183,10 +184,10 @@ class GO2HardwareEnvironment(Go2Environment):
                 ],
                 self.VELOCITY_CONTROL_POLICY_LAYOUT: [
                     "actions",
-                    "joint_pos",
-                    "joint_vel",
                     "imu_ang_vel",
                     "imu_lin_acc",
+                    "joint_pos",
+                    "joint_vel",
                     "projected_gravity",
                     "velocity_commands",
                 ],
@@ -254,6 +255,16 @@ class GO2HardwareEnvironment(Go2Environment):
                 history_length=self.policy_history_length,
             )
         return self._observation_manager.get_observation(layout_name=self.policy_observation_layout)
+
+    def _estimate_base_lin_vel(self, obs_batched: torch.Tensor):
+        if self.policy_mode != "velocity_control":
+            return None
+        if not hasattr(self.policy, "estimate_velocity"):
+            return None
+
+        estimated_velocity = self.policy.estimate_velocity(obs_batched).squeeze(0).detach()
+        self._last_estimated_base_lin_vel = estimated_velocity
+        return estimated_velocity
 
     def hardware_stand_up(self, hold_time=2.0, sim_step_callback=None):
         """Execute stand-up sequence using RobotCommunication
@@ -366,8 +377,10 @@ class GO2HardwareEnvironment(Go2Environment):
         # Get observation and run policy
         policy_obs = self._get_policy_observation()
         obs_batched = policy_obs.unsqueeze(0)
+        estimated_base_lin_vel = None
         
         with torch.no_grad():
+            estimated_base_lin_vel = self._estimate_base_lin_vel(obs_batched)
             policy_action = self.policy(obs_batched).squeeze(0)
         
         # Convert policy output to robot commands
@@ -396,6 +409,7 @@ class GO2HardwareEnvironment(Go2Environment):
                 
                 # Actual policy inputs (observation tensor values)
                 obs_base_lin_vel=current_obs["base_lin_vel"],
+                estimated_base_lin_vel=estimated_base_lin_vel,
                 obs_base_ang_vel=current_obs["base_ang_vel"],
                 obs_imu_ang_vel=current_obs["imu_ang_vel"],
                 obs_imu_lin_acc=current_obs["imu_lin_acc"],

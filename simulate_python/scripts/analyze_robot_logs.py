@@ -80,6 +80,47 @@ def create_command_plot(data, output_dir, figsize=(14, 8)):
     
     return fig
 
+def create_estimator_vs_true_velocity_plot(data, output_dir, figsize=(14, 10)):
+    """Create time series plots comparing estimated and true base linear velocity."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True)
+
+    axis_labels = ["x", "y", "z"]
+    estimated_cols = [f"estimated_base_lin_vel_{index}" for index in range(3)]
+    true_cols = [f"obs_base_lin_vel_{index}" for index in range(3)]
+
+    available_axes = [
+        index for index, (estimated_col, true_col) in enumerate(zip(estimated_cols, true_cols, strict=False))
+        if estimated_col in data.columns and true_col in data.columns
+    ]
+
+    if not available_axes:
+        print("Estimated and true base linear velocity columns not found in data")
+        return None
+
+    fig, axes = plt.subplots(len(available_axes), 1, figsize=figsize, sharex=True)
+    if len(available_axes) == 1:
+        axes = [axes]
+
+    for axis, velocity_index in zip(axes, available_axes, strict=False):
+        estimated_col = estimated_cols[velocity_index]
+        true_col = true_cols[velocity_index]
+        axis_label = axis_labels[velocity_index]
+
+        axis.plot(data["time"], data[true_col], label=f"true {axis_label}", linewidth=2)
+        axis.plot(data["time"], data[estimated_col], label=f"estimated {axis_label}", linewidth=2, alpha=0.85)
+        axis.set_ylabel(f"{axis_label} vel (m/s)")
+        axis.set_title(f"Base Linear Velocity {axis_label.upper()}: estimator vs true")
+        axis.grid(True)
+        axis.legend(loc="best")
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.tight_layout()
+    plt.savefig(output_dir / "estimator_vs_true_base_lin_vel.png")
+    print("Created estimator vs true base linear velocity plot")
+
+    return fig
+
 def create_joint_plots(data, output_dir, figsize=(14, 8)):
     """Create separate time series plots for joint positions and velocities"""
     # Create output directory
@@ -372,6 +413,9 @@ def process_log_file(log_path, output_dir, show_plots=True):
     
     # Command plot
     create_command_plot(data, output_dir)
+
+    # Estimated vs true base linear velocity plot
+    create_estimator_vs_true_velocity_plot(data, output_dir)
     
     # Joint plots (separate for positions and velocities)
     # create_joint_plots(data, output_dir)
