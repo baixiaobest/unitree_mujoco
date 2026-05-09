@@ -11,7 +11,7 @@ import sys
 
 # Add the parent directory to the path to import math_utils
 sys.path.append('/home/baixiao/Desktop/IsaacLab/source/unitree_mujoco/simulate_python')
-from utils.math_utils import euler_xyz_from_quat
+from utils.math_utils import euler_xyz_from_quat, quat_rotate
 
 def load_log_data(log_path):
     """Load log data from CSV file"""
@@ -22,33 +22,122 @@ def load_metadata(metadata_path):
     with open(metadata_path, 'r') as f:
         return json.load(f)
 
-def create_base_position_plot(data, output_dir, figsize=(14, 8)):
+def infer_policy_mode(metadata, data):
+    """Infer control mode from metadata first and fall back to logged columns."""
+    if metadata is not None:
+        policy_mode = metadata.get("policy_mode")
+        if policy_mode in {"position_control", "velocity_control"}:
+            return policy_mode
+
+    if "obs_command_3" in data.columns:
+        return "position_control"
+    if any(col.startswith("estimated_base_lin_vel_") for col in data.columns):
+        return "velocity_control"
+    return "position_control"
+
+def get_vector_columns(data, prefix, size=3):
+    """Return the ordered scalar columns for a flattened vector prefix when present."""
+    columns = [f"{prefix}_{index}" for index in range(size)]
+    if all(column in data.columns for column in columns):
+        return columns
+    return None
+
+def integrate_position_from_body_velocity(data, velocity_columns, initial_position=None):
+    """Integrate body-frame linear velocity into world-frame position using logged quaternions."""
+    quat_columns = get_vector_columns(data, "base_quaternion", size=4)
+    if velocity_columns is None or quat_columns is None:
+        return None
+
+    if len(data) == 0:
+        return np.empty((0, 3), dtype=np.float32)
+
+    velocities_body = torch.tensor(data[velocity_columns].to_numpy(), dtype=torch.float32)
+    quaternions = torch.tensor(data[quat_columns].to_numpy(), dtype=torch.float32)
+    velocities_world = quat_rotate(quaternions, velocities_body).cpu().numpy()
+    dt = data["time"].diff().fillna(0.0).to_numpy(dtype=np.float64)
+
+    if initial_position is None:
+        initial_position = np.zeros(3, dtype=np.float64)
+    else:
+        initial_position = np.asarray(initial_position, dtype=np.float64)
+
+    positions = np.zeros_like(velocities_world, dtype=np.float64)
+    positions[0] = initial_position
+    if len(data) > 1:
+        trapezoid_steps = 0.5 * (velocities_world[1:] + velocities_world[:-1]) * dt[1:, None]
+        positions[1:] = initial_position + np.cumsum(trapezoid_steps, axis=0)
+    return positions
+
+def build_position_sources(data, metadata):
+    """Build one or more position series for plotting based on control mode and logged signals."""
+    policy_mode = infer_policy_mode(metadata, data)
+    pos_columns = get_vector_columns(data, "base_position", size=3)
+    measured_positions = None
+    if pos_columns is not None:
+        measured_positions = data[pos_columns].to_numpy(dtype=np.float64)
+
+    if policy_mode != "velocity_control":
+        if measured_positions is None:
+            return {}, policy_mode
+        return {"measured": measured_positions}, policy_mode
+
+    initial_position = measured_positions[0] if measured_positions is not None else np.zeros(3, dtype=np.float64)
+    position_sources = {}
+
+    true_velocity_columns = get_vector_columns(data, "obs_base_lin_vel", size=3)
+    true_positions = integrate_position_from_body_velocity(data, true_velocity_columns, initial_position)
+    if true_positions is not None:
+        position_sources["integrated_true_velocity"] = true_positions
+
+    estimated_velocity_columns = get_vector_columns(data, "estimated_base_lin_vel", size=3)
+    estimated_positions = integrate_position_from_body_velocity(data, estimated_velocity_columns, initial_position)
+    if estimated_positions is not None:
+        position_sources["integrated_estimated_velocity"] = estimated_positions
+
+    return position_sources, policy_mode
+
+def create_base_position_plot(data, output_dir, metadata=None, figsize=(14, 8)):
     """Create time series plots for base position"""
     # Create output directory
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
-    
-    # Find base position columns
-    pos_cols = [col for col in data.columns if 'base_position_' in col]
-    
-    if not pos_cols:
+
+    position_sources, policy_mode = build_position_sources(data, metadata)
+    if not position_sources:
         print("Base position columns not found in data")
         return None
-    
-    fig = plt.figure(figsize=figsize)
-    for col in sorted(pos_cols):
-        plt.plot(data['time'], data[col], label=col)
-    
-    plt.xlabel('Time (s)')
-    plt.ylabel('Position (m)')
-    plt.title('Base Position over time')
-    plt.legend(loc='best')
-    plt.grid(True)
-    
-    # Save figure
+
+    axis_labels = ["x", "y", "z"]
+    fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
+    if policy_mode == "velocity_control":
+        title = "Base Position from Integrated Velocity"
+    else:
+        title = "Base Position over time"
+
+    pretty_names = {
+        "measured": "measured",
+        "integrated_true_velocity": "integrated true velocity",
+        "integrated_estimated_velocity": "integrated estimated velocity",
+    }
+
+    for axis_index, axis in enumerate(axes):
+        for source_name, positions in position_sources.items():
+            axis.plot(
+                data['time'],
+                positions[:, axis_index],
+                label=f"{pretty_names.get(source_name, source_name)} {axis_labels[axis_index]}",
+            )
+        axis.set_ylabel(f"{axis_labels[axis_index]} pos (m)")
+        axis.grid(True)
+        axis.legend(loc='best')
+
+    axes[0].set_title(title)
+    axes[-1].set_xlabel('Time (s)')
+
+    fig.tight_layout()
     plt.savefig(output_dir / 'base_position_time_series.png')
     print("Created base position time series plot")
-    
+
     return fig
 
 def create_command_plot(data, output_dir, figsize=(14, 8)):
@@ -221,12 +310,13 @@ def create_time_series_plots(data, output_dir, figsize=(14, 8)):
     
     return figures
 
-def plot_robot_trajectory(data, output_dir, figsize=(10, 8)):
+def plot_robot_trajectory(data, output_dir, metadata=None, figsize=(10, 8)):
     """Create trajectory plot for robot position and command targets"""
-    # Check for position columns
-    pos_x_col = [col for col in data.columns if 'base_position_0' in col]
-    pos_y_col = [col for col in data.columns if 'base_position_1' in col]
-    
+    position_sources, policy_mode = build_position_sources(data, metadata)
+    if not position_sources:
+        print("Position columns not found in data")
+        return None
+
     # Check for quaternion columns
     quat_w_col = [col for col in data.columns if 'base_quaternion_0' in col]
     quat_x_col = [col for col in data.columns if 'base_quaternion_1' in col]
@@ -236,37 +326,37 @@ def plot_robot_trajectory(data, output_dir, figsize=(10, 8)):
     # Check for command columns
     cmd_x_col = [col for col in data.columns if 'command_0' in col]
     cmd_y_col = [col for col in data.columns if 'command_1' in col]
-    
-    if not pos_x_col or not pos_y_col:
-        print("Position columns not found in data")
-        return None
-    
-    pos_x_col = pos_x_col[0]
-    pos_y_col = pos_y_col[0]
-    
+
     # Create output directory
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
     
     fig = plt.figure(figsize=figsize)
-    
-    # Plot robot trajectory
-    plt.plot(data[pos_x_col], data[pos_y_col], 'b-', linewidth=2, label='Robot Path')
-    
-    # Mark start and end points
-    plt.plot(data[pos_x_col].iloc[0], data[pos_y_col].iloc[0], 'go', markersize=10, label='Start')
-    plt.plot(data[pos_x_col].iloc[-1], data[pos_y_col].iloc[-1], 'ro', markersize=10, label='End')
+
+    line_styles = {
+        "measured": ('b-', 'Measured Path'),
+        "integrated_true_velocity": ('g-', 'Integrated True-Velocity Path'),
+        "integrated_estimated_velocity": ('m-', 'Integrated Estimated-Velocity Path'),
+    }
+    first_positions = next(iter(position_sources.values()))
+
+    for source_name, positions in position_sources.items():
+        line_style, label = line_styles.get(source_name, ('b-', source_name))
+        plt.plot(positions[:, 0], positions[:, 1], line_style, linewidth=2, label=label)
+
+    plt.plot(first_positions[0, 0], first_positions[0, 1], 'go', markersize=10, label='Start')
+    plt.plot(first_positions[-1, 0], first_positions[-1, 1], 'ro', markersize=10, label='End')
     
     # Add direction arrows
     step_size = max(1, len(data) // 20)  # Add ~20 arrows along the path
-    for i in range(0, len(data) - step_size, step_size):
-        plt.arrow(data[pos_x_col].iloc[i], data[pos_y_col].iloc[i],
-                 data[pos_x_col].iloc[i+step_size] - data[pos_x_col].iloc[i],
-                 data[pos_y_col].iloc[i+step_size] - data[pos_y_col].iloc[i],
+    for i in range(0, len(first_positions) - step_size, step_size):
+        plt.arrow(first_positions[i, 0], first_positions[i, 1],
+                 first_positions[i + step_size, 0] - first_positions[i, 0],
+                 first_positions[i + step_size, 1] - first_positions[i, 1],
                  head_width=0.05, head_length=0.1, fc='b', ec='b', alpha=0.5)
     
-    # Add command positions if all required columns exist
-    if (cmd_x_col and cmd_y_col and quat_w_col and quat_x_col and 
+    # Add command positions if all required columns exist for position control
+    if (policy_mode == "position_control" and cmd_x_col and cmd_y_col and quat_w_col and quat_x_col and 
         quat_y_col and quat_z_col):
         
         cmd_x_col = cmd_x_col[0]
@@ -295,8 +385,8 @@ def plot_robot_trajectory(data, output_dir, figsize=(10, 8)):
         
         for i in range(len(data)):
             # Extract robot position
-            robot_x = data[pos_x_col].iloc[i]
-            robot_y = data[pos_y_col].iloc[i]
+            robot_x = first_positions[i, 0]
+            robot_y = first_positions[i, 1]
             
             # Get the pre-computed yaw
             yaw = yaws[i].item()
@@ -317,8 +407,8 @@ def plot_robot_trajectory(data, output_dir, figsize=(10, 8)):
             plt.plot(global_cmd_x[i], global_cmd_y[i], 'mx', markersize=8)
             
             # Draw lines connecting robot to command targets
-            plt.plot([data[pos_x_col].iloc[i], global_cmd_x[i]], 
-                    [data[pos_y_col].iloc[i], global_cmd_y[i]], 
+            plt.plot([first_positions[i, 0], global_cmd_x[i]], 
+                    [first_positions[i, 1], global_cmd_y[i]], 
                     'g--', alpha=0.3)
         
         # Add legend entry for command targets
@@ -326,14 +416,20 @@ def plot_robot_trajectory(data, output_dir, figsize=(10, 8)):
     
     plt.xlabel('X Position (m)')
     plt.ylabel('Y Position (m)')
-    plt.title('Robot Trajectory with Command Targets')
+    if policy_mode == "velocity_control":
+        plt.title('Robot Trajectory from Integrated Velocity')
+    else:
+        plt.title('Robot Trajectory with Command Targets')
     plt.legend(loc='best')
     plt.grid(True)
     plt.axis('equal')  # Equal scaling for x and y
     
     # Save figure
     plt.savefig(output_dir / 'robot_trajectory.png')
-    print("Created robot trajectory plot with command targets")
+    if policy_mode == "velocity_control":
+        print("Created robot trajectory plot from integrated velocity")
+    else:
+        print("Created robot trajectory plot with command targets")
     
     return fig
 
@@ -397,9 +493,13 @@ def process_log_file(log_path, output_dir, show_plots=True):
     if metadata_path.exists():
         metadata = load_metadata(metadata_path)
         print(f"Log contains {len(data)} entries from {metadata.get('total_steps', 'unknown')} steps")
+        policy_mode = infer_policy_mode(metadata, data)
+        print(f"Detected policy mode: {policy_mode}")
     else:
         print(f"Metadata file not found: {metadata_path}")
         metadata = None
+        policy_mode = infer_policy_mode(metadata, data)
+        print(f"Inferred policy mode: {policy_mode}")
     
     # Create output directory
     output_dir = Path(output_dir)
@@ -409,7 +509,7 @@ def process_log_file(log_path, output_dir, show_plots=True):
     print(f"Creating plots in {output_dir}...")
     
     # Base position plot
-    create_base_position_plot(data, output_dir)
+    create_base_position_plot(data, output_dir, metadata=metadata)
     
     # Command plot
     create_command_plot(data, output_dir)
@@ -424,7 +524,7 @@ def process_log_file(log_path, output_dir, show_plots=True):
     # create_time_series_plots(data, output_dir)
     
     # Trajectory plot
-    plot_robot_trajectory(data, output_dir)
+    plot_robot_trajectory(data, output_dir, metadata=metadata)
 
     plt.show() if show_plots else plt.close('all')
     

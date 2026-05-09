@@ -8,7 +8,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 class RobotLogger:
-    def __init__(self, log_dir="logs", log_frequency=1, flush_frequency=50):
+    def __init__(self, log_dir="logs", log_frequency=1, flush_frequency=50, metadata=None):
         """
         Initialize a data logger for robot data
         
@@ -16,6 +16,7 @@ class RobotLogger:
             log_dir: Directory to save log files
             log_frequency: How often to log data (every N steps)
             flush_frequency: How often to flush data to disk (every N logs)
+            metadata: Optional metadata dictionary to include in the sidecar JSON file
         """
         self.log_dir = Path(log_dir)
         self.log_frequency = log_frequency
@@ -46,6 +47,8 @@ class RobotLogger:
             "columns": [],
             "log_frequency": log_frequency,
         }
+        if metadata:
+            self.metadata.update(metadata)
         
         print(f"Logger initialized. Data will be saved to {self.log_path}")
     

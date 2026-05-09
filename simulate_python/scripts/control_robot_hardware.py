@@ -115,6 +115,7 @@ def main():
         enable_logging=True,
         log_dir="../logs",
         policy_mode=args.policy_mode,
+        runtime_mode=args.run_mode,
         debug_print=args.debug_print,
     )
 
