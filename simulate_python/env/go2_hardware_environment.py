@@ -12,6 +12,7 @@ from mdp.commands import (
 )
 from time import sleep, time
 import torch
+from utils.odometry_publisher import EstimatedOdometryPublisher
 from utils.robot_logger import RobotLogger  # Import the logger
 from utils.status_monitor_commands import TOPIC_STATUS_MONITOR_COMMAND, decode_status_monitor_command
 from unitree_sdk2py.core.channel import ChannelSubscriber
@@ -69,6 +70,9 @@ class GO2HardwareEnvironment(Go2Environment):
         self._pending_remote_command = None
         self._posture_motion_step_callback = None
         self._control_session_initialized = False
+        self._estimated_odometry_publisher = (
+            EstimatedOdometryPublisher(device=self.device) if self.policy_mode == "velocity_control" else None
+        )
 
         self.status_monitor_command_subscriber: ChannelSubscriber = ChannelSubscriber(
             TOPIC_STATUS_MONITOR_COMMAND, WirelessController_
@@ -132,6 +136,8 @@ class GO2HardwareEnvironment(Go2Environment):
                         sim_step_callback=self._posture_motion_step_callback,
                     )
             self.robot_initialized = True
+            if self._estimated_odometry_publisher is not None:
+                self._estimated_odometry_publisher.reset_time_reference()
             return True
 
         if command_name == "lay_down":
@@ -139,6 +145,8 @@ class GO2HardwareEnvironment(Go2Environment):
             if not self.is_laid_down:
                 self.hardware_lay_down(sim_step_callback=self._posture_motion_step_callback)
             self.robot_initialized = False
+            if self._estimated_odometry_publisher is not None:
+                self._estimated_odometry_publisher.reset_time_reference()
             return True
 
         raise ValueError(f"Unsupported posture command: {command_name}")
@@ -510,10 +518,17 @@ class GO2HardwareEnvironment(Go2Environment):
         
         # Store policy output for observation
         self._last_policy_output = policy_action.detach()
+
+        base_state = self.robot_comm.get_base_state()
+        if self._estimated_odometry_publisher is not None:
+            self._estimated_odometry_publisher.publish(
+                estimated_linear_velocity=estimated_base_lin_vel,
+                base_quaternion=base_state["quaternion"],
+                angular_velocity=base_state["gyroscope"],
+            )
         
         # Log data if enabled
         if self.enable_logging and self.logger:
-            base_state = self.robot_comm.get_base_state()
             current_obs = self._observation_manager.get_obs_map()
             
             # Log all relevant data
