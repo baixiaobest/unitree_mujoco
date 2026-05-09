@@ -99,8 +99,8 @@ class Go2Environment(Environment):
         ], device=self.device, dtype=torch.float32)
         
         self.laydown_pos_3 = torch.tensor([
-            0.0, 1.6, -2.8,  # FR
-            0.0, 1.6, -2.8,  # FL
+            0.0, 1.45, -2.55,  # FR
+            0.0, 1.45, -2.55,  # FL
             0.0, 1.6, -2.8,  # RR
             0.0, 1.6, -2.8   # RL
         ], device=self.device, dtype=torch.float32)
