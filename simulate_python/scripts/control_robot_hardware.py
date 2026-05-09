@@ -1,4 +1,6 @@
 import argparse
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -57,6 +59,11 @@ def parse_args():
         default=0.5,
         help="Derivative gain for joint position control.",
     )
+    parser.add_argument(
+        "--no-status-monitor",
+        action="store_true",
+        help="Do not launch the status monitor GUI alongside the control loop.",
+    )
     return parser.parse_args()
 
 
@@ -85,6 +92,30 @@ def create_simulation_env_class(base_env_cls):
     return SimulationGO2HardwareEnvironment
 
 
+def launch_status_monitor(run_mode: str) -> subprocess.Popen[bytes] | None:
+    """Launch the status monitor as a companion process for the selected DDS domain."""
+    monitor_script = Path(__file__).resolve().parent / "status_monitor.py"
+    command = [sys.executable, str(monitor_script), "--run-mode", run_mode, "--device", DEVICE]
+    try:
+        print(f"Launching status monitor: {' '.join(command)}")
+        return subprocess.Popen(command, cwd=str(monitor_script.parent))
+    except Exception as error:  # noqa: BLE001 - control loop should still run if the monitor cannot launch.
+        print(f"Warning: failed to launch status monitor: {error}")
+        return None
+
+
+def stop_status_monitor(monitor_process: subprocess.Popen[bytes] | None) -> None:
+    """Terminate the status monitor process if it is still running."""
+    if monitor_process is None or monitor_process.poll() is not None:
+        return
+    monitor_process.terminate()
+    try:
+        monitor_process.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        monitor_process.kill()
+        monitor_process.wait(timeout=5.0)
+
+
 def main():
     args = parse_args()
 
@@ -95,6 +126,7 @@ def main():
 
     model_path = resolve_model_path(args.model_path)
     is_simulation = args.run_mode == "simulation"
+    status_monitor_process = None
 
     if is_simulation:
         print("Using simulated hardware environment")
@@ -119,18 +151,24 @@ def main():
         debug_print=args.debug_print,
     )
 
-    if is_simulation:
-        sim_env = HardwareSimulationEnvironment(simulator_update_time=0.02)
-        sim_env.hardware_env = env
-        try:
-            sim_env.start()
-            while sim_env.running:
-                time.sleep(0.1)
-        finally:
-            sim_env.stop()
-        return
+    if not args.no_status_monitor:
+        status_monitor_process = launch_status_monitor(args.run_mode)
 
-    env.run()
+    try:
+        if is_simulation:
+            sim_env = HardwareSimulationEnvironment(simulator_update_time=0.02)
+            sim_env.hardware_env = env
+            try:
+                sim_env.start()
+                while sim_env.running:
+                    time.sleep(0.1)
+            finally:
+                sim_env.stop()
+            return
+
+        env.run()
+    finally:
+        stop_status_monitor(status_monitor_process)
 
 
 if __name__ == "__main__":

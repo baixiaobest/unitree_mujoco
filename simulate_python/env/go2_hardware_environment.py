@@ -13,10 +13,15 @@ from mdp.commands import (
 from time import sleep, time
 import torch
 from utils.robot_logger import RobotLogger  # Import the logger
+from utils.status_monitor_commands import TOPIC_STATUS_MONITOR_COMMAND, decode_status_monitor_command
+from unitree_sdk2py.core.channel import ChannelSubscriber
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_
 
 class GO2HardwareEnvironment(Go2Environment):
     POSITION_CONTROL_POLICY_LAYOUT = "position_control_policy"
     VELOCITY_CONTROL_POLICY_LAYOUT = "velocity_control_policy"
+    REMOTE_COMMAND_MAX_LINEAR_SPEED = 0.15
+    REMOTE_COMMAND_MAX_ANGULAR_SPEED = 0.35
 
     @property
     def last_policy_output(self):
@@ -61,6 +66,14 @@ class GO2HardwareEnvironment(Go2Environment):
         self.policy = torch.jit.load(self.model_path, map_location=self.device)
         self._last_policy_output = torch.zeros(self.num_joints, dtype=torch.float32, device=self.device)
         self._last_estimated_base_lin_vel = None
+        self._pending_remote_command = None
+        self._posture_motion_step_callback = None
+        self._control_session_initialized = False
+
+        self.status_monitor_command_subscriber: ChannelSubscriber = ChannelSubscriber(
+            TOPIC_STATUS_MONITOR_COMMAND, WirelessController_
+        )
+        self.status_monitor_command_subscriber.Init(self._status_monitor_command_handler, 10)
 
         # Initialize logger if enabled
         self.enable_logging = enable_logging
@@ -79,6 +92,97 @@ class GO2HardwareEnvironment(Go2Environment):
             self.logger = None
 
         self.init_time = time()
+
+    def _status_monitor_command_handler(self, msg: WirelessController_) -> None:
+        """Handle stand-up / lay-down commands coming from the status monitor over DDS."""
+        command_name = decode_status_monitor_command(msg.keys)
+        if command_name is not None:
+            self._pending_remote_command = command_name
+
+    def set_posture_motion_step_callback(self, callback) -> None:
+        """Set an optional simulation-step callback used during stand-up and lay-down sequences."""
+        self._posture_motion_step_callback = callback
+
+    def _wait_for_robot_state(self):
+        """Block until the joint-state subscriber has received the first valid state."""
+        print("Waiting for robot state...")
+        joint_state = self._robot_comm.get_joint_state()
+        while len(joint_state["positions"]) == 0:
+            sleep(0.1)
+            joint_state = self._robot_comm.get_joint_state()
+
+    def execute_posture_command(
+        self,
+        command_name: str,
+        require_stationary: bool = False,
+        stand_up_hold_time: float | None = None,
+    ):
+        """Execute a posture command through the shared hardware-environment path."""
+        if require_stationary and not self._is_stationary_for_remote_command():
+            return False
+
+        if command_name == "stand_up":
+            print("Received remote stand-up command from status monitor" if require_stationary else "Starting stand-up command")
+            if not self.is_standing:
+                if stand_up_hold_time is None:
+                    self.hardware_stand_up(sim_step_callback=self._posture_motion_step_callback)
+                else:
+                    self.hardware_stand_up(
+                        hold_time=stand_up_hold_time,
+                        sim_step_callback=self._posture_motion_step_callback,
+                    )
+            self.robot_initialized = True
+            return True
+
+        if command_name == "lay_down":
+            print("Received remote lay-down command from status monitor" if require_stationary else "Starting lay-down command")
+            if not self.is_laid_down:
+                self.hardware_lay_down(sim_step_callback=self._posture_motion_step_callback)
+            self.robot_initialized = False
+            return True
+
+        raise ValueError(f"Unsupported posture command: {command_name}")
+
+    def initialize_control_session(self):
+        """Prepare the environment for policy control using the shared hardware path."""
+        if self._control_session_initialized:
+            return
+
+        self._wait_for_robot_state()
+        if not self.robot_initialized:
+            self.execute_posture_command("stand_up")
+            print("Robot is ready for policy control")
+
+        if self.command_manager is None:
+            raise RuntimeError("Command manager is not initialized.")
+        self._command_manager.setup()
+        self._control_session_initialized = True
+
+    def _process_pending_remote_command(self):
+        """Execute the latest status-monitor command, if any."""
+        command_name = self._pending_remote_command
+        if command_name is None:
+            return
+
+        self._pending_remote_command = None
+        self.execute_posture_command(command_name, require_stationary=True)
+
+    def _is_stationary_for_remote_command(self) -> bool:
+        """Return whether the robot is stationary enough to safely accept remote posture commands."""
+        base_state = self._robot_comm.get_base_state()
+        linear_speed = float(torch.linalg.vector_norm(base_state["velocity"]).item())
+        angular_speed = float(torch.linalg.vector_norm(base_state["gyroscope"]).item())
+
+        is_stationary = (
+            linear_speed <= self.REMOTE_COMMAND_MAX_LINEAR_SPEED
+            and angular_speed <= self.REMOTE_COMMAND_MAX_ANGULAR_SPEED
+        )
+        if not is_stationary:
+            print(
+                "Ignoring remote posture command because robot is not stationary "
+                f"(linear_speed={linear_speed:.3f} m/s, angular_speed={angular_speed:.3f} rad/s)"
+            )
+        return is_stationary
 
     def _maybe_print_update_rate(self):
         if not self.debug_print:
@@ -379,6 +483,10 @@ class GO2HardwareEnvironment(Go2Environment):
         return True
 
     def step(self):
+        self._process_pending_remote_command()
+        if not self.robot_initialized:
+            return False
+
         self.elapsed_time = time() - self.init_time
         self.steps += 1
 
@@ -433,31 +541,22 @@ class GO2HardwareEnvironment(Go2Environment):
             )
 
             self._maybe_print_update_rate()
+        return True
     
     def run(self):
         print("WARNING: Please ensure there are no obstacles around the robot while running this example.")
         input("Press Enter to continue...")
-        
-        # Wait for robot communication to be ready
-        print("Waiting for robot state...")
-        joint_state = self._robot_comm.get_joint_state()
-        while len(joint_state["positions"]) == 0:
-            sleep(0.1)
-            joint_state = self._robot_comm.get_joint_state()
 
         try:
             if self.up_down_test:
                 print("Starting up-down test...")
-                self.hardware_stand_up(hold_time=5.0)
-                self.hardware_lay_down()
+                self._wait_for_robot_state()
+                self.execute_posture_command("stand_up", stand_up_hold_time=5.0)
+                self.execute_posture_command("lay_down")
                 print("Up-down test complete. Exiting.")
                 return
 
-            # First, stand up if not already standing
-            if not self.robot_initialized:
-                self.hardware_stand_up()
-                self.robot_initialized = True
-                print("Robot is ready for policy control")
+            self.initialize_control_session()
             
             # Calculate the desired period in seconds
             period = 1.0 / self.rate
@@ -467,9 +566,6 @@ class GO2HardwareEnvironment(Go2Environment):
                 f"Running {self.policy_mode} control loop at {self.rate} Hz "
                 f"(period: {period*1000:.2f} ms)"
             )
-            if self.command_manager is None:
-                raise RuntimeError("Command manager is not initialized.")
-            self._command_manager.setup()
             while True:
                 # Start timing this iteration
                 iteration_start = time()
@@ -487,7 +583,7 @@ class GO2HardwareEnvironment(Go2Environment):
 
         except KeyboardInterrupt:
             print("Stopping and laying down the robot...")
-            self.hardware_lay_down()
+            self.execute_posture_command("lay_down")
             print("Robot laid down safely")
             
         finally:

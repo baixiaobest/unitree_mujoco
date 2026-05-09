@@ -19,7 +19,7 @@ class HardwareSimulationEnvironment:
             this is different from step dt used in the simulation, which is simulated time step.
         """
 
-        self.locker = threading.Lock()
+        self.locker = threading.RLock()
         
         # Initialize simulation
         self.mj_model, self.mj_data = self.initialize_simulation()
@@ -91,10 +91,11 @@ class HardwareSimulationEnvironment:
         with self.locker:
             # First, step MuJoCo simulation
             mujoco.mj_step(self.mj_model, self.mj_data)
-            
-            # If hardware environment is available, step it too
-            if self.hardware_env:
-                self.hardware_env.step()  # This will read state from MuJoCo via RobotCommunication
+
+        # Run the hardware-environment control logic outside the MuJoCo lock so
+        # remote stand-up / lay-down sequences can yield intermediate viewer updates.
+        if self.hardware_env:
+            self.hardware_env.step()  # This will read state from MuJoCo via RobotCommunication
     
     def create_step_callback(self):
         """Create a callback function that steps the simulation safely"""
@@ -104,8 +105,8 @@ class HardwareSimulationEnvironment:
                 # Update the simulation state counter
                 self.steps += 1
                 self.elapsed_time += self.simulator_update_time
-                # Small sleep to maintain real-time factor
-                time.sleep(self.mj_model.opt.timestep)
+            # Yield outside the simulation lock so the viewer thread can render the intermediate pose.
+            time.sleep(self.mj_model.opt.timestep)
         return callback
         
     def simulation_thread(self):
@@ -116,23 +117,10 @@ class HardwareSimulationEnvironment:
         self.elapsed_time = 0.0
         self.steps = 0
         
-        # If hardware environment exists and isn't initialized, do initial setup
-        if self.hardware_env and not self.hardware_env.robot_initialized:
+        if self.hardware_env:
             print("Initializing hardware environment...")
-            self.hardware_env.robot_initialized = True
-            
-            # Wait a moment to ensure communication is established
-            time.sleep(1.0)
-            
-            # Create a callback for the stand-up sequence
-            step_callback = self.create_step_callback()
-            
-            # Run the stand-up sequence if needed
-            if hasattr(self.hardware_env, 'hardware_stand_up') and not getattr(self.hardware_env, 'is_standing', False):
-                print("Executing stand-up sequence with simulation updates...")
-                self.hardware_env.hardware_stand_up(hold_time=2.0, sim_step_callback=step_callback)
-
-        self.hardware_env.command_manager.setup()
+            self.hardware_env.set_posture_motion_step_callback(self.create_step_callback())
+            self.hardware_env.initialize_control_session()
         print("Starting lock-step simulation...")
         while self.running and self.viewer.is_running():
             step_start = time.perf_counter()
@@ -168,19 +156,19 @@ class HardwareSimulationEnvironment:
     
     def lay_down_robot(self):
         """Execute lay-down sequence with simulation updates"""
-        if self.hardware_env and hasattr(self.hardware_env, 'hardware_lay_down'):
+        if self.hardware_env and hasattr(self.hardware_env, 'execute_posture_command'):
             print("Executing lay-down sequence with simulation updates...")
-            step_callback = self.create_step_callback()
-            self.hardware_env.hardware_lay_down(sim_step_callback=step_callback)
+            self.hardware_env.set_posture_motion_step_callback(self.create_step_callback())
+            self.hardware_env.execute_posture_command("lay_down")
             return True
         return False
     
     def stand_up_robot(self):
         """Execute stand-up sequence with simulation updates"""
-        if self.hardware_env and hasattr(self.hardware_env, 'hardware_stand_up'):
+        if self.hardware_env and hasattr(self.hardware_env, 'execute_posture_command'):
             print("Executing stand-up sequence with simulation updates...")
-            step_callback = self.create_step_callback()
-            self.hardware_env.hardware_stand_up(hold_time=2.0, sim_step_callback=step_callback)
+            self.hardware_env.set_posture_motion_step_callback(self.create_step_callback())
+            self.hardware_env.execute_posture_command("stand_up")
             return True
         return False
     

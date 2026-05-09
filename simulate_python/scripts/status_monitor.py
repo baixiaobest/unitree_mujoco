@@ -1,4 +1,7 @@
+import argparse
 import sys
+from pathlib import Path
+
 import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, 
                              QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, 
@@ -8,9 +11,40 @@ from PyQt5.QtGui import QFont
 import pyqtgraph as pg
 
 # Import the RobotCommunication class
-sys.path.append("../")
+SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.append(str(SCRIPT_DIR.parent))
 from robot_comm.robot_communication import RobotCommunication
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_
+from utils.status_monitor_commands import (
+    COMMAND_LAY_DOWN,
+    COMMAND_STAND_UP,
+    TOPIC_STATUS_MONITOR_COMMAND,
+    create_status_monitor_command,
+)
+
+SIMULATION_DOMAIN_ID = 1
+HARDWARE_DOMAIN_ID = 0
+SIMULATION_INTERFACE = "wlo1"
+HARDWARE_INTERFACE = "enp108s0"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Monitor Unitree joint, base, and IMU status over DDS.")
+    parser.add_argument(
+        "--run-mode",
+        type=str,
+        choices=("simulation", "hardware"),
+        default="hardware",
+        help="Choose whether to monitor the simulation bridge or the real robot DDS topics.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        help="Torch device used by the RobotCommunication subscriber.",
+    )
+    return parser.parse_args()
 
 class StatusMonitor(QMainWindow):
     # Define joint names as a class variable
@@ -25,6 +59,8 @@ class StatusMonitor(QMainWindow):
         super().__init__()
         
         self.robot_comm = robot_comm
+        self.monitor_command_publisher = ChannelPublisher(TOPIC_STATUS_MONITOR_COMMAND, WirelessController_)
+        self.monitor_command_publisher.Init()
         self.init_ui()
         
         # Timer for updating the GUI
@@ -67,9 +103,17 @@ class StatusMonitor(QMainWindow):
         self.refresh_rate_label = QLabel("Refresh Rate: 10 Hz")
         self.toggle_button = QPushButton("Pause Updates")
         self.toggle_button.clicked.connect(self.toggle_updates)
+        self.stand_button = QPushButton("Stand Up")
+        self.stand_button.clicked.connect(self.send_stand_up_command)
+        self.laydown_button = QPushButton("Lay Down")
+        self.laydown_button.clicked.connect(self.send_lay_down_command)
+        self.remote_command_status = QLabel("Remote command: idle")
         
         control_layout.addWidget(self.refresh_rate_label)
         control_layout.addWidget(self.toggle_button)
+        control_layout.addWidget(self.stand_button)
+        control_layout.addWidget(self.laydown_button)
+        control_layout.addWidget(self.remote_command_status)
         main_layout.addLayout(control_layout)
         
         self.show()
@@ -79,7 +123,7 @@ class StatusMonitor(QMainWindow):
         scroll_area = QScrollArea()
         scroll_area.setWidget(widget)
         scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         return scroll_area
     
     def create_joint_tab(self):
@@ -306,9 +350,9 @@ class StatusMonitor(QMainWindow):
         ]
         
         self.accel_curves = [
-            self.imu_plot.plot(pen=pg.mkPen('r', width=2, style=Qt.DashLine), name="Accel X"),
-            self.imu_plot.plot(pen=pg.mkPen('g', width=2, style=Qt.DashLine), name="Accel Y"),
-            self.imu_plot.plot(pen=pg.mkPen('b', width=2, style=Qt.DashLine), name="Accel Z"),
+            self.imu_plot.plot(pen=pg.mkPen('r', width=2, style=Qt.PenStyle.DashLine), name="Accel X"),
+            self.imu_plot.plot(pen=pg.mkPen('g', width=2, style=Qt.PenStyle.DashLine), name="Accel Y"),
+            self.imu_plot.plot(pen=pg.mkPen('b', width=2, style=Qt.PenStyle.DashLine), name="Accel Z"),
         ]
         
         self.imu_data_time = np.array([])
@@ -493,19 +537,32 @@ class StatusMonitor(QMainWindow):
             self.timer.start(100)
             self.toggle_button.setText("Pause Updates")
 
+    def _publish_remote_command(self, command_name: str):
+        """Publish a stand-up or lay-down request over the DDS monitor command topic."""
+        command_msg = create_status_monitor_command(command_name)
+        self.monitor_command_publisher.Write(command_msg)
+        self.remote_command_status.setText(f"Remote command: {command_name}")
+
+    def send_stand_up_command(self):
+        self._publish_remote_command(COMMAND_STAND_UP)
+
+    def send_lay_down_command(self):
+        self._publish_remote_command(COMMAND_LAY_DOWN)
+
 
 def main():
-    # Initialize DDS communication with real hardware interface
-    ChannelFactoryInitialize(0, "enp108s0")
-    
-    # Create robot communication that will connect to real hardware
-    robot_comm = RobotCommunication(device="cuda")
+    args = parse_args()
+
+    if args.run_mode == "simulation":
+        ChannelFactoryInitialize(SIMULATION_DOMAIN_ID, SIMULATION_INTERFACE)
+    else:
+        ChannelFactoryInitialize(HARDWARE_DOMAIN_ID, HARDWARE_INTERFACE)
 
     # Create application
     app = QApplication(sys.argv)
     
     # Create robot communication
-    robot_comm = RobotCommunication(device="cuda")
+    robot_comm = RobotCommunication(device=args.device)
     
     # Create and show the status monitor
     monitor = StatusMonitor(robot_comm)
