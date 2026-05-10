@@ -7,9 +7,11 @@ import os
 import threading
 from dataclasses import dataclass
 
+from geometry_msgs.msg import TransformStamped
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from tf2_ros import TransformBroadcaster
 
 
 SIMULATION_DOMAIN_ID = 1
@@ -28,6 +30,7 @@ class BridgeConfig:
     dds_domain_id: int
     dds_interface: str
     publish_hz: float
+    publish_tf: bool
 
 
 def import_raw_dds_dependencies():
@@ -59,7 +62,7 @@ def parse_args() -> BridgeConfig:
     parser.add_argument(
         "--run-mode",
         choices=("simulation", "hardware"),
-        default="simulation",
+        default="hardware",
         help="Select the default DDS domain/interface pair.",
     )
     parser.add_argument(
@@ -92,6 +95,12 @@ def parse_args() -> BridgeConfig:
         default=100.0,
         help="Maximum ROS2 publish rate for forwarding odometry messages.",
     )
+    parser.add_argument(
+        "--publish-tf",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Publish an odom-to-base_link TF using the bridged odometry pose.",
+    )
 
     args = parser.parse_args()
     default_domain = SIMULATION_DOMAIN_ID if args.run_mode == "simulation" else HARDWARE_DOMAIN_ID
@@ -103,6 +112,7 @@ def parse_args() -> BridgeConfig:
         dds_domain_id=default_domain if args.dds_domain_id is None else args.dds_domain_id,
         dds_interface=default_interface if args.dds_interface is None else args.dds_interface,
         publish_hz=max(args.publish_hz, 1.0),
+        publish_tf=args.publish_tf,
     )
 
 
@@ -111,6 +121,8 @@ class DdsOdometryBridge(Node):
         super().__init__("go2_odometry_bridge")
         self._config = config
         self._publisher = self.create_publisher(Odometry, self._config.ros_topic, 10)
+        self._tf_broadcaster = TransformBroadcaster(self) if self._config.publish_tf else None
+        self._tf_publish_error_logged = False
         self._message_lock = threading.Lock()
         self._pending_message: Odometry | None = None
         self._message_version = 0
@@ -122,13 +134,14 @@ class DdsOdometryBridge(Node):
 
         ros_domain_id = os.environ.get("ROS_DOMAIN_ID", "<unset>")
         self.get_logger().info(
-            "Bridging raw DDS odometry '%s' (domain=%d, interface=%s) to ROS2 topic '%s' (ROS_DOMAIN_ID=%s)"
+            "Bridging raw DDS odometry '%s' (domain=%d, interface=%s) to ROS2 topic '%s' (ROS_DOMAIN_ID=%s, publish_tf=%s)"
             % (
                 self._config.dds_topic,
                 self._config.dds_domain_id,
                 self._config.dds_interface,
                 self._config.ros_topic,
                 ros_domain_id,
+                self._config.publish_tf,
             )
         )
 
@@ -168,7 +181,29 @@ class DdsOdometryBridge(Node):
             message_version = self._message_version
 
         self._publisher.publish(ros_msg)
+        if self._tf_broadcaster is not None:
+            try:
+                self._tf_broadcaster.sendTransform(self._make_transform(ros_msg))
+            except Exception as error:
+                if not self._tf_publish_error_logged:
+                    self.get_logger().error(f"Failed to publish TF from bridged odometry: {error}")
+                    self._tf_publish_error_logged = True
         self._last_published_version = message_version
+
+    def _make_transform(self, odometry: Odometry) -> TransformStamped:
+        transform = TransformStamped()
+        transform.header.stamp.sec = odometry.header.stamp.sec
+        transform.header.stamp.nanosec = odometry.header.stamp.nanosec
+        transform.header.frame_id = odometry.header.frame_id
+        transform.child_frame_id = odometry.child_frame_id
+        transform.transform.translation.x = odometry.pose.pose.position.x
+        transform.transform.translation.y = odometry.pose.pose.position.y
+        transform.transform.translation.z = odometry.pose.pose.position.z
+        transform.transform.rotation.x = odometry.pose.pose.orientation.x
+        transform.transform.rotation.y = odometry.pose.pose.orientation.y
+        transform.transform.rotation.z = odometry.pose.pose.orientation.z
+        transform.transform.rotation.w = odometry.pose.pose.orientation.w
+        return transform
 
 
 def main() -> None:
