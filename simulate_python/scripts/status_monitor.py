@@ -1,6 +1,7 @@
 import argparse
 import sys
 from pathlib import Path
+from threading import Lock
 
 import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget, 
@@ -14,8 +15,10 @@ import pyqtgraph as pg
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(SCRIPT_DIR.parent))
 from robot_comm.robot_communication import RobotCommunication
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
+from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_
+from utils.odometry_publisher import TOPIC_ESTIMATED_ODOMETRY
 from utils.status_monitor_commands import (
     COMMAND_LAY_DOWN,
     COMMAND_STAND_UP,
@@ -59,6 +62,11 @@ class StatusMonitor(QMainWindow):
         super().__init__()
         
         self.robot_comm = robot_comm
+        self._odometry_lock = Lock()
+        self._latest_odometry_position: np.ndarray | None = None
+        self._latest_odometry_velocity: np.ndarray | None = None
+        self.odometry_subscriber = ChannelSubscriber(TOPIC_ESTIMATED_ODOMETRY, Odometry_)
+        self.odometry_subscriber.Init(self._estimated_odometry_handler, 10)
         self.monitor_command_publisher = ChannelPublisher(TOPIC_STATUS_MONITOR_COMMAND, WirelessController_)
         self.monitor_command_publisher.Init()
         self.init_ui()
@@ -67,6 +75,23 @@ class StatusMonitor(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_status)
         self.timer.start(100)  # Update every 100ms (10Hz)
+
+    def _estimated_odometry_handler(self, msg: Odometry_):
+        position = np.array(
+            [msg.pose.pose.position.x, msg.pose.pose.position.y, msg.pose.pose.position.z], dtype=np.float32
+        )
+        velocity = np.array(
+            [msg.twist.twist.linear.x, msg.twist.twist.linear.y, msg.twist.twist.linear.z], dtype=np.float32
+        )
+        with self._odometry_lock:
+            self._latest_odometry_position = position
+            self._latest_odometry_velocity = velocity
+
+    def _get_latest_odometry(self) -> tuple[np.ndarray | None, np.ndarray | None]:
+        with self._odometry_lock:
+            if self._latest_odometry_position is None or self._latest_odometry_velocity is None:
+                return None, None
+            return self._latest_odometry_position.copy(), self._latest_odometry_velocity.copy()
         
     def init_ui(self):
         """Initialize the user interface"""
@@ -422,6 +447,7 @@ class StatusMonitor(QMainWindow):
         base_state = self.robot_comm.get_base_state()
         euler_angles = self.robot_comm.get_euler_angles()
         prev_commands = self.robot_comm.get_previous_position_commands()
+        odom_position, odom_velocity = self._get_latest_odometry()
         
         # Update joint status tab
         if joint_state["positions"].numel() > 0:
@@ -446,9 +472,17 @@ class StatusMonitor(QMainWindow):
                 self.joint_torque_bars[i].setValue(int(torque_scaled * 10))
         
         # Update base status tab
-        if base_state["position"].numel() > 0:
+        if odom_position is not None and odom_velocity is not None:
+            position = odom_position
+            velocity = odom_velocity
+        elif base_state["position"].numel() > 0:
             position = base_state["position"].cpu().numpy()
             velocity = base_state["velocity"].cpu().numpy()
+        else:
+            position = None
+            velocity = None
+
+        if position is not None and velocity is not None:
             
             self.pos_x_value.setText(f"{position[0]:.3f} m")
             self.pos_y_value.setText(f"{position[1]:.3f} m")

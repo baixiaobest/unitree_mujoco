@@ -157,14 +157,12 @@ class GO2HardwareEnvironment(Go2Environment):
             return
 
         self._wait_for_robot_state()
-        if not self.robot_initialized:
-            self.execute_posture_command("stand_up")
-            print("Robot is ready for policy control")
 
         if self.command_manager is None:
             raise RuntimeError("Command manager is not initialized.")
         self._command_manager.setup()
         self._control_session_initialized = True
+        print("Control session initialized. Use the status monitor to stand up the robot.")
 
     def _process_pending_remote_command(self):
         """Execute the latest status-monitor command, if any."""
@@ -560,7 +558,6 @@ class GO2HardwareEnvironment(Go2Environment):
     
     def run(self):
         print("WARNING: Please ensure there are no obstacles around the robot while running this example.")
-        input("Press Enter to continue...")
 
         try:
             if self.up_down_test:
