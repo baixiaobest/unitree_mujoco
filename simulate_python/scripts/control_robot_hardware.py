@@ -64,6 +64,11 @@ def parse_args():
         action="store_true",
         help="Do not launch the status monitor GUI alongside the control loop.",
     )
+    parser.add_argument(
+        "--logging",
+        action="store_true",
+        help="Enable robot data logging in the control loop.",
+    )
     return parser.parse_args()
 
 
@@ -144,7 +149,7 @@ def main():
         kp=args.kp,
         kd=args.kd,
         up_down_test=False,
-        enable_logging=True,
+        enable_logging=args.logging,
         log_dir="../logs",
         policy_mode=args.policy_mode,
         runtime_mode=args.run_mode,
