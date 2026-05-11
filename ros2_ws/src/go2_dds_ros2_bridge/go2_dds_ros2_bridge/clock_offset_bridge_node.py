@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import threading
 from dataclasses import dataclass
@@ -11,11 +12,13 @@ from time import time_ns
 import rclpy
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import TransformStamped
+from rcl_interfaces.msg import SetParametersResult
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Float64
-from tf2_ros import StaticTransformBroadcaster
+from tf2_ros import TransformBroadcaster
 
 from go2_dds_ros2_bridge.tf_utils import quaternion_from_rpy
 
@@ -31,7 +34,8 @@ DEFAULT_OUTPUT_TOPIC = "/utlidar/time_corrected/cloud"
 DEFAULT_TF_PARENT_FRAME = "base_link"
 DEFAULT_TF_CHILD_FRAME = "utlidar_lidar"
 DEFAULT_LIDAR_TF_XYZ = (0.2929999828338623, 0.0, -0.06000000238418579)
-DEFAULT_LIDAR_TF_RPY = (0.0, 0.0, 0.0)
+# Position comes from Head_lower; orientation is manually tuned in RViz with the robot standing flat.
+DEFAULT_LIDAR_TF_RPY_DEG = (192.0, -8.0, -60.0)
 OUTPUT_CLOUD_QOS = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
     history=HistoryPolicy.KEEP_LAST,
@@ -154,18 +158,25 @@ class Go2ClockOffsetBridge(Node):
         self._sample_count = 0
         self._last_log_time_ns = 0
         self._frame_warning_emitted = False
+        self._tf_lock = threading.Lock()
+        self._lidar_tf_rpy_deg = DEFAULT_LIDAR_TF_RPY_DEG
 
         self._dds_subscriber = channel_subscriber_cls(self._config.dds_topic, point_cloud_type)
         self._dds_subscriber.Init(self._dds_state_handler, 10)
         self._publish_timer = self.create_timer(1.0 / self._config.publish_hz, self._publish_pending_offset)
-        self._static_tf_broadcaster = StaticTransformBroadcaster(self)
-        self._publish_static_tf()
+        self._tf_broadcaster = TransformBroadcaster(self)
+        self.declare_parameter("lidar_roll_deg", DEFAULT_LIDAR_TF_RPY_DEG[0])
+        self.declare_parameter("lidar_pitch_deg", DEFAULT_LIDAR_TF_RPY_DEG[1])
+        self.declare_parameter("lidar_yaw_deg", DEFAULT_LIDAR_TF_RPY_DEG[2])
+        self._lidar_tf_rpy_deg = self._read_lidar_tf_rpy_parameters_deg()
+        self.add_on_set_parameters_callback(self._handle_parameter_update)
+        self._publish_lidar_tf()
 
         ros_domain_id = os.environ.get("ROS_DOMAIN_ID", "<unset>")
         self.get_logger().info(
             "Estimating GO2 clock offset from DDS topic '%s' (domain=%d, interface=%s, using cloud header stamp) "
             "and re-publishing corrected clouds on '%s' (ROS_DOMAIN_ID=%s, alpha=%.4f). "
-            "Publishing static TF %s -> %s with xyz=(%.4f, %.4f, %.4f) rpy=(%.4f, %.4f, %.4f)"
+            "Publishing LiDAR TF %s -> %s with fixed xyz=(%.4f, %.4f, %.4f) and configurable rpy_deg=(%.2f, %.2f, %.2f)"
             % (
                 self._config.dds_topic,
                 self._config.dds_domain_id,
@@ -178,27 +189,71 @@ class Go2ClockOffsetBridge(Node):
                 DEFAULT_LIDAR_TF_XYZ[0],
                 DEFAULT_LIDAR_TF_XYZ[1],
                 DEFAULT_LIDAR_TF_XYZ[2],
-                DEFAULT_LIDAR_TF_RPY[0],
-                DEFAULT_LIDAR_TF_RPY[1],
-                DEFAULT_LIDAR_TF_RPY[2],
+                self._lidar_tf_rpy_deg[0],
+                self._lidar_tf_rpy_deg[1],
+                self._lidar_tf_rpy_deg[2],
             )
         )
 
-    def _publish_static_tf(self) -> None:
+    def _read_lidar_tf_rpy_parameters_deg(self) -> tuple[float, float, float]:
+        return (
+            float(self.get_parameter("lidar_roll_deg").value),
+            float(self.get_parameter("lidar_pitch_deg").value),
+            float(self.get_parameter("lidar_yaw_deg").value),
+        )
+
+    def _handle_parameter_update(self, parameters: list[Parameter]) -> SetParametersResult:
+        updated_rpy_deg = list(self._lidar_tf_rpy_deg)
+        name_to_index = {"lidar_roll_deg": 0, "lidar_pitch_deg": 1, "lidar_yaw_deg": 2}
+
+        for parameter in parameters:
+            if parameter.name not in name_to_index:
+                continue
+            if parameter.type_ not in (Parameter.Type.DOUBLE, Parameter.Type.INTEGER):
+                return SetParametersResult(
+                    successful=False,
+                    reason=f"{parameter.name} must be numeric",
+                )
+            value = float(parameter.value)
+            if not math.isfinite(value):
+                return SetParametersResult(
+                    successful=False,
+                    reason=f"{parameter.name} must be finite",
+                )
+            updated_rpy_deg[name_to_index[parameter.name]] = value
+
+        new_rpy_deg = tuple(updated_rpy_deg)
+        with self._tf_lock:
+            old_rpy_deg = self._lidar_tf_rpy_deg
+            self._lidar_tf_rpy_deg = new_rpy_deg
+
+        if new_rpy_deg != old_rpy_deg:
+            self.get_logger().info(
+                "Updated LiDAR TF rpy_deg to (%.2f, %.2f, %.2f)"
+                % (new_rpy_deg[0], new_rpy_deg[1], new_rpy_deg[2])
+            )
+            self._publish_lidar_tf()
+
+        return SetParametersResult(successful=True)
+
+    def _publish_lidar_tf(self, stamp: Time | None = None) -> None:
         transform = TransformStamped()
-        transform.header.stamp = self.get_clock().now().to_msg()
+        transform.header.stamp = self.get_clock().now().to_msg() if stamp is None else stamp
         transform.header.frame_id = DEFAULT_TF_PARENT_FRAME
         transform.child_frame_id = DEFAULT_TF_CHILD_FRAME
         transform.transform.translation.x = DEFAULT_LIDAR_TF_XYZ[0]
         transform.transform.translation.y = DEFAULT_LIDAR_TF_XYZ[1]
         transform.transform.translation.z = DEFAULT_LIDAR_TF_XYZ[2]
 
-        qx, qy, qz, qw = quaternion_from_rpy(*DEFAULT_LIDAR_TF_RPY)
+        with self._tf_lock:
+            lidar_tf_rpy_deg = self._lidar_tf_rpy_deg
+
+        qx, qy, qz, qw = quaternion_from_rpy(*(math.radians(value) for value in lidar_tf_rpy_deg))
         transform.transform.rotation.x = qx
         transform.transform.rotation.y = qy
         transform.transform.rotation.z = qz
         transform.transform.rotation.w = qw
-        self._static_tf_broadcaster.sendTransform(transform)
+        self._tf_broadcaster.sendTransform(transform)
 
     def _dds_state_handler(self, msg) -> None:
         if not self._frame_warning_emitted and msg.header.frame_id != DEFAULT_TF_CHILD_FRAME:
@@ -237,6 +292,7 @@ class Go2ClockOffsetBridge(Node):
                 % (filtered_offset_sec, sample_count)
             )
 
+        self._publish_lidar_tf(self._ns_to_stamp(corrected_stamp_ns))
         self._cloud_publisher.publish(self._make_corrected_cloud_message(msg, corrected_stamp_ns))
 
     @staticmethod

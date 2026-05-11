@@ -61,13 +61,29 @@ ros2 run go2_dds_ros2_bridge clock_offset_bridge \
 ```
 
 If you want RViz to visualize the corrected cloud in `odom` or `base_link`, the same node now
-publishes a static transform from `base_link` to `utlidar_lidar`. The transform is taken from the
-GO2 USD model `Head_lower` mount, which is used here as the LiDAR location:
+publishes a transform from `base_link` to `utlidar_lidar`. The position is taken from the
+GO2 USD model `Head_lower` mount. The orientation is manually tuned in RViz by standing the robot
+flat, using the baseline-centered view to flatten the observed ground plane, and then aligning yaw
+with an object placed in front of the robot:
 
 ```text
 xyz = (0.2929999828338623, 0.0, -0.06000000238418579)
-rpy = (0.0, 0.0, 0.0)
+rpy_deg = (192.0, -8.0, -60.0)
 ```
+
+Only the orientation is intended for live tuning. The node now republishes the LiDAR TF on `/tf`
+with fixed xyz and configurable ROS parameters. The TF is published at the LiDAR sample rate and
+uses the same corrected timestamp as each republished cloud sample, so downstream consumers like
+SLAM see a time-aligned transform stream:
+
+```bash
+ros2 param set /go2_clock_offset_bridge lidar_roll_deg 180.0
+ros2 param set /go2_clock_offset_bridge lidar_pitch_deg 0.0
+ros2 param set /go2_clock_offset_bridge lidar_yaw_deg -60.0
+```
+
+This lets you adjust roll, pitch, and yaw visually in RViz without restarting the bridge. The xyz
+offset remains fixed to the GO2 USD mount position.
 
 Simulation:
 
