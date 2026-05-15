@@ -10,6 +10,7 @@ import threading
 from dataclasses import dataclass
 from time import time_ns
 
+import numpy as np
 import rclpy
 from builtin_interfaces.msg import Time
 from geometry_msgs.msg import TransformStamped
@@ -21,7 +22,12 @@ from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Float64
 from tf2_ros import TransformBroadcaster
 
-from go2_dds_ros2_bridge.tf_utils import DEFAULT_LIDAR_TF_RPY_DEG, DEFAULT_LIDAR_TF_XYZ, quaternion_from_rpy
+from go2_dds_ros2_bridge.tf_utils import (
+    DEFAULT_LIDAR_TF_RPY_DEG,
+    DEFAULT_LIDAR_TF_XYZ,
+    quaternion_from_rpy,
+    transform_matrix_from_xyz_rpy_degrees,
+)
 
 
 SIMULATION_DOMAIN_ID = 1
@@ -40,6 +46,21 @@ OUTPUT_CLOUD_QOS = QoSProfile(
     depth=10,
 )
 
+# Coarse front exclusion region in base_link that removes both front legs and nearby self-returns.
+FRONT_LEG_FILTER_BOXES_BASE_LINK = (
+    ((-0.4, 0.38), (-0.4, 0.4), (-0.38, 0.3)),
+)
+POINT_FIELD_DTYPES = {
+    PointField.INT8: np.dtype(np.int8),
+    PointField.UINT8: np.dtype(np.uint8),
+    PointField.INT16: np.dtype(np.int16),
+    PointField.UINT16: np.dtype(np.uint16),
+    PointField.INT32: np.dtype(np.int32),
+    PointField.UINT32: np.dtype(np.uint32),
+    PointField.FLOAT32: np.dtype(np.float32),
+    PointField.FLOAT64: np.dtype(np.float64),
+}
+
 
 @dataclass(frozen=True)
 class BridgeConfig:
@@ -51,6 +72,7 @@ class BridgeConfig:
     publish_hz: float
     filter_alpha: float
     publish_tf: bool
+    filter_front_legs: bool
 
 
 def import_raw_dds_dependencies():
@@ -133,6 +155,12 @@ def parse_args() -> BridgeConfig:
         default=True,
         help="Publish the base_link to utlidar_lidar transform.",
     )
+    parser.add_argument(
+        "--filter-front-legs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Remove returns from the robot's front legs by masking points inside front-leg boxes in the base_link frame.",
+    )
 
     non_ros_args = rclpy.utilities.remove_ros_args(args=sys.argv)[1:]
     args = parser.parse_args(non_ros_args)
@@ -149,6 +177,34 @@ def parse_args() -> BridgeConfig:
         publish_hz=max(args.publish_hz, 1.0),
         filter_alpha=filter_alpha,
         publish_tf=args.publish_tf,
+        filter_front_legs=args.filter_front_legs,
+    )
+
+
+def dtype_from_fields(fields: list[PointField], point_step: int, is_bigendian: bool) -> np.dtype:
+    names: list[str] = []
+    formats: list[np.dtype] = []
+    offsets: list[int] = []
+    byte_order = ">" if is_bigendian else "<"
+
+    for index, field in enumerate(fields):
+        base_dtype = POINT_FIELD_DTYPES.get(field.datatype)
+        if base_dtype is None:
+            raise ValueError(f"Unsupported PointField datatype: {field.datatype}")
+        field_dtype = base_dtype.newbyteorder(byte_order)
+        if field.count > 1:
+            field_dtype = np.dtype((field_dtype, field.count))
+        names.append(field.name or f"unnamed_field_{index}")
+        formats.append(field_dtype)
+        offsets.append(int(field.offset))
+
+    return np.dtype(
+        {
+            "names": names,
+            "formats": formats,
+            "offsets": offsets,
+            "itemsize": int(point_step),
+        }
     )
 
 
@@ -165,6 +221,7 @@ class Go2ClockOffsetBridge(Node):
         self._sample_count = 0
         self._last_log_time_ns = 0
         self._frame_warning_emitted = False
+        self._front_leg_filter_log_count = 0
         self._tf_lock = threading.Lock()
         self._lidar_tf_rpy_deg = DEFAULT_LIDAR_TF_RPY_DEG
 
@@ -182,7 +239,7 @@ class Go2ClockOffsetBridge(Node):
         ros_domain_id = os.environ.get("ROS_DOMAIN_ID", "<unset>")
         self.get_logger().info(
             "Estimating GO2 clock offset from DDS topic '%s' (domain=%d, interface=%s, using cloud header stamp) "
-            "and re-publishing corrected clouds on '%s' (ROS_DOMAIN_ID=%s, alpha=%.4f, publish_tf=%s). "
+            "and re-publishing corrected clouds on '%s' (ROS_DOMAIN_ID=%s, alpha=%.4f, publish_tf=%s, filter_front_legs=%s). "
             "Publishing LiDAR TF %s -> %s with fixed xyz=(%.4f, %.4f, %.4f) and configurable rpy_deg=(%.2f, %.2f, %.2f)"
             % (
                 self._config.dds_topic,
@@ -192,6 +249,7 @@ class Go2ClockOffsetBridge(Node):
                 ros_domain_id,
                 self._config.filter_alpha,
                 self._config.publish_tf,
+                self._config.filter_front_legs,
                 DEFAULT_TF_PARENT_FRAME,
                 DEFAULT_TF_CHILD_FRAME,
                 DEFAULT_LIDAR_TF_XYZ[0],
@@ -324,8 +382,6 @@ class Go2ClockOffsetBridge(Node):
         ros_msg = PointCloud2()
         ros_msg.header.stamp = self._ns_to_stamp(corrected_stamp_ns)
         ros_msg.header.frame_id = dds_msg.header.frame_id
-        ros_msg.height = int(dds_msg.height)
-        ros_msg.width = int(dds_msg.width)
         ros_msg.fields = [
             PointField(
                 name=field.name,
@@ -337,10 +393,125 @@ class Go2ClockOffsetBridge(Node):
         ]
         ros_msg.is_bigendian = bool(dds_msg.is_bigendian)
         ros_msg.point_step = int(dds_msg.point_step)
-        ros_msg.row_step = int(dds_msg.row_step)
-        ros_msg.data = bytes(dds_msg.data)
+        if self._config.filter_front_legs:
+            try:
+                filtered_data, filtered_width, removed_count = self._filter_front_leg_points(
+                    fields=ros_msg.fields,
+                    is_bigendian=ros_msg.is_bigendian,
+                    point_step=ros_msg.point_step,
+                    row_step=int(dds_msg.row_step),
+                    width=int(dds_msg.width),
+                    height=int(dds_msg.height),
+                    data=bytes(dds_msg.data),
+                )
+            except ValueError as error:
+                self.get_logger().warning(
+                    f"Failed to filter front-leg points from LiDAR cloud; publishing unfiltered cloud instead: {error}"
+                )
+                filtered_data = bytes(dds_msg.data)
+                filtered_width = int(dds_msg.width)
+                removed_count = 0
+                ros_msg.height = int(dds_msg.height)
+                ros_msg.row_step = int(dds_msg.row_step)
+            else:
+                ros_msg.height = 1
+                ros_msg.row_step = ros_msg.point_step * filtered_width
+                if removed_count > 0 and self._front_leg_filter_log_count < 3:
+                    self._front_leg_filter_log_count += 1
+                    self.get_logger().info(
+                        "Removed %d front-leg points from the corrected cloud after masking in base_link coordinates."
+                        % removed_count
+                    )
+
+            ros_msg.width = filtered_width
+            ros_msg.data = filtered_data
+        else:
+            ros_msg.height = int(dds_msg.height)
+            ros_msg.width = int(dds_msg.width)
+            ros_msg.row_step = int(dds_msg.row_step)
+            ros_msg.data = bytes(dds_msg.data)
         ros_msg.is_dense = bool(dds_msg.is_dense)
         return ros_msg
+
+    def _filter_front_leg_points(
+        self,
+        *,
+        fields: list[PointField],
+        is_bigendian: bool,
+        point_step: int,
+        row_step: int,
+        width: int,
+        height: int,
+        data: bytes,
+    ) -> tuple[bytes, int, int]:
+        cloud_dtype = dtype_from_fields(fields, point_step, is_bigendian)
+        packed_row_step = width * point_step
+        if row_step <= 0:
+            row_step = packed_row_step
+        if row_step < packed_row_step:
+            raise ValueError(f"row_step={row_step} is smaller than width * point_step={packed_row_step}")
+
+        expected_buffer_size = row_step * height
+        if len(data) < expected_buffer_size:
+            raise ValueError(
+                f"PointCloud2 data buffer is too small: len(data)={len(data)} expected>={expected_buffer_size}"
+            )
+
+        cloud = np.ndarray(
+            shape=(height, width),
+            dtype=cloud_dtype,
+            buffer=data,
+            strides=(row_step, point_step),
+        )
+        packed_cloud = np.array(cloud.reshape(-1), copy=True)
+        field_names = packed_cloud.dtype.names or ()
+        for field_name in ("x", "y", "z"):
+            if field_name not in field_names:
+                raise ValueError(f"Point cloud is missing required '{field_name}' field")
+
+        x_values = np.asarray(packed_cloud["x"], dtype=np.float64)
+        y_values = np.asarray(packed_cloud["y"], dtype=np.float64)
+        z_values = np.asarray(packed_cloud["z"], dtype=np.float64)
+        finite_mask = np.isfinite(x_values) & np.isfinite(y_values) & np.isfinite(z_values)
+        if not np.any(finite_mask):
+            return packed_cloud.tobytes(), packed_cloud.shape[0], 0
+
+        lidar_points = np.column_stack((x_values[finite_mask], y_values[finite_mask], z_values[finite_mask]))
+        remove_mask = self._compute_front_leg_mask(lidar_points)
+        if not np.any(remove_mask):
+            return packed_cloud.tobytes(), packed_cloud.shape[0], 0
+
+        keep_mask = np.ones(packed_cloud.shape[0], dtype=bool)
+        finite_indices = np.nonzero(finite_mask)[0]
+        keep_mask[finite_indices[remove_mask]] = False
+        filtered_cloud = packed_cloud[keep_mask]
+        return filtered_cloud.tobytes(), int(filtered_cloud.shape[0]), int(np.count_nonzero(remove_mask))
+
+    def _compute_front_leg_mask(self, lidar_points: np.ndarray) -> np.ndarray:
+        with self._tf_lock:
+            lidar_tf_rpy_deg = self._lidar_tf_rpy_deg
+
+        base_to_lidar_transform = transform_matrix_from_xyz_rpy_degrees(
+            *DEFAULT_LIDAR_TF_XYZ,
+            *lidar_tf_rpy_deg,
+        )
+        rotation = base_to_lidar_transform[:3, :3]
+        translation = base_to_lidar_transform[:3, 3]
+        # The configured static transform is base_link -> utlidar_lidar, so convert
+        # incoming lidar-frame points into base_link coordinates before masking.
+        base_link_points = lidar_points @ rotation.T + translation
+
+        remove_mask = np.zeros(lidar_points.shape[0], dtype=bool)
+        for x_limits, y_limits, z_limits in FRONT_LEG_FILTER_BOXES_BASE_LINK:
+            remove_mask |= (
+                (base_link_points[:, 0] >= x_limits[0])
+                & (base_link_points[:, 0] <= x_limits[1])
+                & (base_link_points[:, 1] >= y_limits[0])
+                & (base_link_points[:, 1] <= y_limits[1])
+                & (base_link_points[:, 2] >= z_limits[0])
+                & (base_link_points[:, 2] <= z_limits[1])
+            )
+        return remove_mask
 
     def _publish_pending_offset(self) -> None:
         with self._sample_lock:
