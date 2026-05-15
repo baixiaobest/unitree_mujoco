@@ -20,7 +20,7 @@ from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Float64
 from tf2_ros import TransformBroadcaster
 
-from go2_dds_ros2_bridge.tf_utils import quaternion_from_rpy
+from go2_dds_ros2_bridge.tf_utils import DEFAULT_LIDAR_TF_RPY_DEG, quaternion_from_rpy
 
 
 SIMULATION_DOMAIN_ID = 1
@@ -34,8 +34,6 @@ DEFAULT_OUTPUT_TOPIC = "/utlidar/time_corrected/cloud"
 DEFAULT_TF_PARENT_FRAME = "base_link"
 DEFAULT_TF_CHILD_FRAME = "utlidar_lidar"
 DEFAULT_LIDAR_TF_XYZ = (0.2929999828338623, 0.0, -0.06000000238418579)
-# Position comes from Head_lower; orientation is manually tuned in RViz with the robot standing flat.
-DEFAULT_LIDAR_TF_RPY_DEG = (192.0, -8.0, -60.0)
 OUTPUT_CLOUD_QOS = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
     history=HistoryPolicy.KEEP_LAST,

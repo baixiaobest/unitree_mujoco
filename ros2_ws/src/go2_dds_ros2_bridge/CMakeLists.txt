@@ -20,4 +20,11 @@ install(
   RENAME odom_bridge
 )
 
+install(
+  PROGRAMS
+    go2_dds_ros2_bridge/kiss_odom_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME kiss_odom_node
+)
+
 ament_package()
