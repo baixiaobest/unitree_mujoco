@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 
-from geometry_msgs.msg import TransformStamped
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from tf2_ros import TransformBroadcaster
+
+from go2_dds_ros2_bridge.covariance_utils import build_pose_covariance, build_twist_covariance, load_state_variances
 
 
 SIMULATION_DOMAIN_ID = 1
@@ -21,6 +23,20 @@ HARDWARE_INTERFACE = "enp108s0"
 
 DEFAULT_DDS_ODOM_TOPIC = "rt/odom"
 DEFAULT_ROS_ODOM_TOPIC = "/odom"
+ODOM_BRIDGE_DEFAULT_VARIANCES = {
+    "x": 1.0,
+    "y": 1.0,
+    "z": 1.0,
+    "roll": 1.0,
+    "pitch": 1.0,
+    "yaw": 1.0,
+    "vx": 0.1,
+    "vy": 0.1,
+    "vz": 0.1,
+    "roll_dt": 0.1,
+    "pitch_dt": 0.1,
+    "yaw_dt": 0.1,
+}
 
 
 @dataclass(frozen=True)
@@ -30,7 +46,7 @@ class BridgeConfig:
     dds_domain_id: int
     dds_interface: str
     publish_hz: float
-    publish_tf: bool
+    covariance_file: Path | None
 
 
 def import_raw_dds_dependencies():
@@ -96,13 +112,13 @@ def parse_args() -> BridgeConfig:
         help="Maximum ROS2 publish rate for forwarding odometry messages.",
     )
     parser.add_argument(
-        "--publish-tf",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Publish an odom-to-base_link TF using the bridged odometry pose.",
+        "--covariance-file",
+        type=Path,
+        default=None,
+        help="Optional YAML file containing diagonal variances for the published odometry covariance fields.",
     )
-
-    args = parser.parse_args()
+    non_ros_args = rclpy.utilities.remove_ros_args(args=sys.argv)[1:]
+    args = parser.parse_args(non_ros_args)
     default_domain = SIMULATION_DOMAIN_ID if args.run_mode == "simulation" else HARDWARE_DOMAIN_ID
     default_interface = SIMULATION_INTERFACE if args.run_mode == "simulation" else HARDWARE_INTERFACE
 
@@ -112,7 +128,7 @@ def parse_args() -> BridgeConfig:
         dds_domain_id=default_domain if args.dds_domain_id is None else args.dds_domain_id,
         dds_interface=default_interface if args.dds_interface is None else args.dds_interface,
         publish_hz=max(args.publish_hz, 1.0),
-        publish_tf=args.publish_tf,
+        covariance_file=args.covariance_file,
     )
 
 
@@ -121,8 +137,12 @@ class DdsOdometryBridge(Node):
         super().__init__("go2_odometry_bridge")
         self._config = config
         self._publisher = self.create_publisher(Odometry, self._config.ros_topic, 10)
-        self._tf_broadcaster = TransformBroadcaster(self) if self._config.publish_tf else None
-        self._tf_publish_error_logged = False
+        covariance_variances, covariance_source = load_state_variances(
+            self._config.covariance_file,
+            ODOM_BRIDGE_DEFAULT_VARIANCES,
+        )
+        self._pose_covariance = build_pose_covariance(covariance_variances)
+        self._twist_covariance = build_twist_covariance(covariance_variances)
         self._message_lock = threading.Lock()
         self._pending_message: Odometry | None = None
         self._message_version = 0
@@ -134,14 +154,14 @@ class DdsOdometryBridge(Node):
 
         ros_domain_id = os.environ.get("ROS_DOMAIN_ID", "<unset>")
         self.get_logger().info(
-            "Bridging raw DDS odometry '%s' (domain=%d, interface=%s) to ROS2 topic '%s' (ROS_DOMAIN_ID=%s, publish_tf=%s)"
+            "Bridging raw DDS odometry '%s' (domain=%d, interface=%s) to ROS2 topic '%s' (ROS_DOMAIN_ID=%s, covariance_source=%s)"
             % (
                 self._config.dds_topic,
                 self._config.dds_domain_id,
                 self._config.dds_interface,
                 self._config.ros_topic,
                 ros_domain_id,
-                self._config.publish_tf,
+                covariance_source,
             )
         )
 
@@ -159,7 +179,7 @@ class DdsOdometryBridge(Node):
         ros_msg.pose.pose.orientation.x = msg.pose.pose.orientation.x
         ros_msg.pose.pose.orientation.y = msg.pose.pose.orientation.y
         ros_msg.pose.pose.orientation.z = msg.pose.pose.orientation.z
-        ros_msg.pose.covariance = list(msg.pose.covariance)
+        ros_msg.pose.covariance = list(self._pose_covariance)
 
         ros_msg.twist.twist.linear.x = msg.twist.twist.linear.x
         ros_msg.twist.twist.linear.y = msg.twist.twist.linear.y
@@ -167,7 +187,7 @@ class DdsOdometryBridge(Node):
         ros_msg.twist.twist.angular.x = msg.twist.twist.angular.x
         ros_msg.twist.twist.angular.y = msg.twist.twist.angular.y
         ros_msg.twist.twist.angular.z = msg.twist.twist.angular.z
-        ros_msg.twist.covariance = list(msg.twist.covariance)
+        ros_msg.twist.covariance = list(self._twist_covariance)
 
         with self._message_lock:
             self._pending_message = ros_msg
@@ -181,29 +201,7 @@ class DdsOdometryBridge(Node):
             message_version = self._message_version
 
         self._publisher.publish(ros_msg)
-        if self._tf_broadcaster is not None:
-            try:
-                self._tf_broadcaster.sendTransform(self._make_transform(ros_msg))
-            except Exception as error:
-                if not self._tf_publish_error_logged:
-                    self.get_logger().error(f"Failed to publish TF from bridged odometry: {error}")
-                    self._tf_publish_error_logged = True
         self._last_published_version = message_version
-
-    def _make_transform(self, odometry: Odometry) -> TransformStamped:
-        transform = TransformStamped()
-        transform.header.stamp.sec = odometry.header.stamp.sec
-        transform.header.stamp.nanosec = odometry.header.stamp.nanosec
-        transform.header.frame_id = odometry.header.frame_id
-        transform.child_frame_id = odometry.child_frame_id
-        transform.transform.translation.x = odometry.pose.pose.position.x
-        transform.transform.translation.y = odometry.pose.pose.position.y
-        transform.transform.translation.z = odometry.pose.pose.position.z
-        transform.transform.rotation.x = odometry.pose.pose.orientation.x
-        transform.transform.rotation.y = odometry.pose.pose.orientation.y
-        transform.transform.rotation.z = odometry.pose.pose.orientation.z
-        transform.transform.rotation.w = odometry.pose.pose.orientation.w
-        return transform
 
 
 def main() -> None:

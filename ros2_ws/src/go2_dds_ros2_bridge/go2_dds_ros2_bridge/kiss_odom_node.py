@@ -4,30 +4,46 @@ from __future__ import annotations
 
 import argparse
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2, PointField
-from tf2_ros import TransformBroadcaster
 
+from go2_dds_ros2_bridge.covariance_utils import build_pose_covariance, build_twist_covariance, load_state_variances
 from go2_dds_ros2_bridge.tf_utils import (
+    DEFAULT_LIDAR_TF_XYZ,
     DEFAULT_LIDAR_TF_RPY_DEG,
     quaternion_from_rotation_matrix,
     rotation_matrix_from_rpy_degrees,
     rotation_vector_from_matrix,
+    transform_matrix_from_xyz_rpy_degrees,
 )
 
 
 DEFAULT_INPUT_TOPIC = "/utlidar/time_corrected/cloud"
 DEFAULT_ODOM_TOPIC = "/kiss/odom"
-DEFAULT_ODOM_FRAME = "kiss_odom"
-DEFAULT_CHILD_FRAME = "kiss_lidar"
+DEFAULT_ODOM_FRAME = "odom"
+DEFAULT_CHILD_FRAME = "base_link"
+KISS_DEFAULT_VARIANCES = {
+    "x": 0.1,
+    "y": 0.1,
+    "z": 0.1,
+    "roll": 0.1,
+    "pitch": 0.1,
+    "yaw": 0.1,
+    "vx": 10.0,
+    "vy": 10.0,
+    "vz": 10.0,
+    "roll_dt": 10.0,
+    "pitch_dt": 10.0,
+    "yaw_dt": 10.0,
+}
 
 TIMESTAMP_FIELD_NAMES = ("t", "timestamp", "timestamps", "time", "time_stamp")
 POINT_FIELD_DTYPES = {
@@ -60,13 +76,10 @@ class BridgeConfig:
     odom_frame: str
     child_frame: str
     config_file: Path | None
+    covariance_file: Path | None
     accumulate_frames: int
     reset_after_registrations: int
-    publish_tf: bool
     deskew: bool
-    position_covariance: float
-    orientation_covariance: float
-    twist_covariance: float
 
 
 def import_kiss_icp_dependencies():
@@ -111,13 +124,19 @@ def parse_args() -> BridgeConfig:
         "--child-frame",
         type=str,
         default=DEFAULT_CHILD_FRAME,
-        help="Child frame id used for the published KISS odometry and TF.",
+        help="Child frame id used for the published KISS odometry.",
     )
     parser.add_argument(
         "--config-file",
         type=Path,
         default=None,
         help="Optional KISS-ICP YAML config file.",
+    )
+    parser.add_argument(
+        "--covariance-file",
+        type=Path,
+        default=None,
+        help="Optional YAML file containing diagonal variances for the published odometry covariance fields.",
     )
     parser.add_argument(
         "--accumulate-frames",
@@ -132,50 +151,23 @@ def parse_args() -> BridgeConfig:
         help="Reinitialize KISS-ICP after this many registered frames. Use 0 to disable periodic resets.",
     )
     parser.add_argument(
-        "--publish-tf",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Publish a TF from odom-frame to child-frame.",
-    )
-    parser.add_argument(
         "--deskew",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Enable KISS-ICP scan deskewing when the point cloud contains a timestamp field.",
     )
-    parser.add_argument(
-        "--position-covariance",
-        type=float,
-        default=0.1,
-        help="Diagonal covariance value used for published odometry position.",
-    )
-    parser.add_argument(
-        "--orientation-covariance",
-        type=float,
-        default=0.1,
-        help="Diagonal covariance value used for published odometry orientation.",
-    )
-    parser.add_argument(
-        "--twist-covariance",
-        type=float,
-        default=10.0,
-        help="Diagonal covariance value used for published odometry twist.",
-    )
-
-    args = parser.parse_args()
+    non_ros_args = rclpy.utilities.remove_ros_args(args=sys.argv)[1:]
+    args = parser.parse_args(non_ros_args)
     return BridgeConfig(
         input_topic=args.input_topic,
         odom_topic=args.odom_topic,
         odom_frame=args.odom_frame,
         child_frame=args.child_frame,
         config_file=args.config_file,
+        covariance_file=args.covariance_file,
         accumulate_frames=max(args.accumulate_frames, 1),
         reset_after_registrations=max(args.reset_after_registrations, 0),
-        publish_tf=args.publish_tf,
         deskew=args.deskew,
-        position_covariance=max(args.position_covariance, 0.0),
-        orientation_covariance=max(args.orientation_covariance, 0.0),
-        twist_covariance=max(args.twist_covariance, 0.0),
     )
 
 
@@ -226,6 +218,18 @@ class KissOdometryNode(Node):
         self._kiss_config.data.deskew = self._config.deskew
         self._kiss_icp = self._kiss_icp_cls(self._kiss_config)
         self._lidar_unrotation = rotation_matrix_from_rpy_degrees(*DEFAULT_LIDAR_TF_RPY_DEG).T
+        self._lidar_to_base_transform = np.linalg.inv(
+            transform_matrix_from_xyz_rpy_degrees(
+                *DEFAULT_LIDAR_TF_XYZ,
+                *DEFAULT_LIDAR_TF_RPY_DEG,
+            )
+        )
+        covariance_variances, covariance_source = load_state_variances(
+            self._config.covariance_file,
+            KISS_DEFAULT_VARIANCES,
+        )
+        self._pose_covariance = build_pose_covariance(covariance_variances)
+        self._twist_covariance = build_twist_covariance(covariance_variances)
         self._publisher = self.create_publisher(Odometry, self._config.odom_topic, 10)
         self._subscription = self.create_subscription(
             PointCloud2,
@@ -233,7 +237,6 @@ class KissOdometryNode(Node):
             self._cloud_callback,
             qos_profile_sensor_data,
         )
-        self._tf_broadcaster = TransformBroadcaster(self) if self._config.publish_tf else None
         self._last_pose: np.ndarray | None = None
         self._last_stamp_ns: int | None = None
         self._timestamp_warning_emitted = False
@@ -248,7 +251,7 @@ class KissOdometryNode(Node):
         self._registered_frame_count = 0
 
         self.get_logger().info(
-            "Running KISS-ICP on '%s' and publishing odometry on '%s' with TF %s -> %s (deskew=%s, accumulate_frames=%d, reset_after_registrations=%d, unrotating child frame by lidar rpy_deg=(%.2f, %.2f, %.2f))"
+            "Running KISS-ICP on '%s' and publishing odometry on '%s' as %s -> %s (deskew=%s, accumulate_frames=%d, reset_after_registrations=%d, covariance_source=%s, lidar xyz=(%.3f, %.3f, %.3f), lidar rpy_deg=(%.2f, %.2f, %.2f))"
             % (
                 self._config.input_topic,
                 self._config.odom_topic,
@@ -257,6 +260,10 @@ class KissOdometryNode(Node):
                 self._config.deskew,
                 self._config.accumulate_frames,
                 self._config.reset_after_registrations,
+                covariance_source,
+                DEFAULT_LIDAR_TF_XYZ[0],
+                DEFAULT_LIDAR_TF_XYZ[1],
+                DEFAULT_LIDAR_TF_XYZ[2],
                 DEFAULT_LIDAR_TF_RPY_DEG[0],
                 DEFAULT_LIDAR_TF_RPY_DEG[1],
                 DEFAULT_LIDAR_TF_RPY_DEG[2],
@@ -267,7 +274,7 @@ class KissOdometryNode(Node):
         if msg.header.frame_id and not self._input_frame_info_emitted:
             self._input_frame_info_emitted = True
             self.get_logger().info(
-                "Incoming cloud frame_id is '%s'. Publishing KISS odometry in virtual child frame '%s' after removing the fixed LiDAR mount rotation."
+                "Incoming cloud frame_id is '%s'. Publishing KISS odometry in '%s' after converting the LiDAR-origin pose to the base_link origin with the fixed LiDAR extrinsic."
                 % (msg.header.frame_id, self._config.child_frame)
             )
 
@@ -309,12 +316,10 @@ class KissOdometryNode(Node):
             return
 
         local_pose = np.asarray(self._kiss_icp.last_pose, dtype=np.float64)
-        pose = self._make_unrotated_pose(self._pose_anchor @ local_pose)
+        pose = self._make_output_pose(self._pose_anchor @ local_pose)
         current_stamp_ns = int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
         odom_msg = self._make_odometry_message(msg, pose, current_stamp_ns)
         self._publisher.publish(odom_msg)
-        if self._tf_broadcaster is not None:
-            self._tf_broadcaster.sendTransform(self._make_transform_message(odom_msg))
 
         self._last_pose = pose
         self._last_stamp_ns = current_stamp_ns
@@ -468,10 +473,8 @@ class KissOdometryNode(Node):
             % reset_after_registrations
         )
 
-    def _make_unrotated_pose(self, pose: np.ndarray) -> np.ndarray:
-        corrected_pose = np.array(pose, dtype=np.float64, copy=True)
-        corrected_pose[:3, :3] = corrected_pose[:3, :3] @ self._lidar_unrotation
-        return corrected_pose
+    def _make_output_pose(self, pose: np.ndarray) -> np.ndarray:
+        return np.array(pose @ self._lidar_to_base_transform, dtype=np.float64, copy=True)
 
     def _make_odometry_message(self, msg: PointCloud2, pose: np.ndarray, stamp_ns: int) -> Odometry:
         odom_msg = Odometry()
@@ -490,17 +493,8 @@ class KissOdometryNode(Node):
         odom_msg.pose.pose.orientation.z = qz
         odom_msg.pose.pose.orientation.w = qw
 
-        pose_covariance = [0.0] * 36
-        for index in (0, 7, 14):
-            pose_covariance[index] = self._config.position_covariance
-        for index in (21, 28, 35):
-            pose_covariance[index] = self._config.orientation_covariance
-        odom_msg.pose.covariance = pose_covariance
-
-        twist_covariance = [0.0] * 36
-        for index in (0, 7, 14, 21, 28, 35):
-            twist_covariance[index] = self._config.twist_covariance
-        odom_msg.twist.covariance = twist_covariance
+        odom_msg.pose.covariance = list(self._pose_covariance)
+        odom_msg.twist.covariance = list(self._twist_covariance)
 
         if self._last_pose is not None and self._last_stamp_ns is not None and stamp_ns > self._last_stamp_ns:
             dt = (stamp_ns - self._last_stamp_ns) * 1e-9
@@ -515,18 +509,6 @@ class KissOdometryNode(Node):
             odom_msg.twist.twist.angular.z = float(angular_velocity[2])
 
         return odom_msg
-
-    @staticmethod
-    def _make_transform_message(odometry: Odometry) -> TransformStamped:
-        transform = TransformStamped()
-        transform.header = odometry.header
-        transform.child_frame_id = odometry.child_frame_id
-        transform.transform.translation.x = odometry.pose.pose.position.x
-        transform.transform.translation.y = odometry.pose.pose.position.y
-        transform.transform.translation.z = odometry.pose.pose.position.z
-        transform.transform.rotation = odometry.pose.pose.orientation
-        return transform
-
 
 def main() -> None:
     config = parse_args()

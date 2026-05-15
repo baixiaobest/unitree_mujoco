@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import sys
 import threading
 from dataclasses import dataclass
 from time import time_ns
@@ -20,7 +21,7 @@ from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Float64
 from tf2_ros import TransformBroadcaster
 
-from go2_dds_ros2_bridge.tf_utils import DEFAULT_LIDAR_TF_RPY_DEG, quaternion_from_rpy
+from go2_dds_ros2_bridge.tf_utils import DEFAULT_LIDAR_TF_RPY_DEG, DEFAULT_LIDAR_TF_XYZ, quaternion_from_rpy
 
 
 SIMULATION_DOMAIN_ID = 1
@@ -33,7 +34,6 @@ DEFAULT_ROS_TOPIC = "/go2_clock_offset_sec"
 DEFAULT_OUTPUT_TOPIC = "/utlidar/time_corrected/cloud"
 DEFAULT_TF_PARENT_FRAME = "base_link"
 DEFAULT_TF_CHILD_FRAME = "utlidar_lidar"
-DEFAULT_LIDAR_TF_XYZ = (0.2929999828338623, 0.0, -0.06000000238418579)
 OUTPUT_CLOUD_QOS = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
     history=HistoryPolicy.KEEP_LAST,
@@ -50,6 +50,7 @@ class BridgeConfig:
     dds_interface: str
     publish_hz: float
     filter_alpha: float
+    publish_tf: bool
 
 
 def import_raw_dds_dependencies():
@@ -126,8 +127,15 @@ def parse_args() -> BridgeConfig:
         default=0.05,
         help="Low-pass filter alpha applied to each new offset sample, in (0, 1].",
     )
+    parser.add_argument(
+        "--publish-tf",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Publish the base_link to utlidar_lidar transform.",
+    )
 
-    args = parser.parse_args()
+    non_ros_args = rclpy.utilities.remove_ros_args(args=sys.argv)[1:]
+    args = parser.parse_args(non_ros_args)
     default_domain = SIMULATION_DOMAIN_ID if args.run_mode == "simulation" else HARDWARE_DOMAIN_ID
     default_interface = SIMULATION_INTERFACE if args.run_mode == "simulation" else HARDWARE_INTERFACE
     filter_alpha = min(max(args.filter_alpha, 1e-4), 1.0)
@@ -140,6 +148,7 @@ def parse_args() -> BridgeConfig:
         dds_interface=default_interface if args.dds_interface is None else args.dds_interface,
         publish_hz=max(args.publish_hz, 1.0),
         filter_alpha=filter_alpha,
+        publish_tf=args.publish_tf,
     )
 
 
@@ -162,7 +171,7 @@ class Go2ClockOffsetBridge(Node):
         self._dds_subscriber = channel_subscriber_cls(self._config.dds_topic, point_cloud_type)
         self._dds_subscriber.Init(self._dds_state_handler, 10)
         self._publish_timer = self.create_timer(1.0 / self._config.publish_hz, self._publish_pending_offset)
-        self._tf_broadcaster = TransformBroadcaster(self)
+        self._tf_broadcaster = TransformBroadcaster(self) if self._config.publish_tf else None
         self.declare_parameter("lidar_roll_deg", DEFAULT_LIDAR_TF_RPY_DEG[0])
         self.declare_parameter("lidar_pitch_deg", DEFAULT_LIDAR_TF_RPY_DEG[1])
         self.declare_parameter("lidar_yaw_deg", DEFAULT_LIDAR_TF_RPY_DEG[2])
@@ -173,7 +182,7 @@ class Go2ClockOffsetBridge(Node):
         ros_domain_id = os.environ.get("ROS_DOMAIN_ID", "<unset>")
         self.get_logger().info(
             "Estimating GO2 clock offset from DDS topic '%s' (domain=%d, interface=%s, using cloud header stamp) "
-            "and re-publishing corrected clouds on '%s' (ROS_DOMAIN_ID=%s, alpha=%.4f). "
+            "and re-publishing corrected clouds on '%s' (ROS_DOMAIN_ID=%s, alpha=%.4f, publish_tf=%s). "
             "Publishing LiDAR TF %s -> %s with fixed xyz=(%.4f, %.4f, %.4f) and configurable rpy_deg=(%.2f, %.2f, %.2f)"
             % (
                 self._config.dds_topic,
@@ -182,6 +191,7 @@ class Go2ClockOffsetBridge(Node):
                 self._config.output_topic,
                 ros_domain_id,
                 self._config.filter_alpha,
+                self._config.publish_tf,
                 DEFAULT_TF_PARENT_FRAME,
                 DEFAULT_TF_CHILD_FRAME,
                 DEFAULT_LIDAR_TF_XYZ[0],
@@ -235,6 +245,8 @@ class Go2ClockOffsetBridge(Node):
         return SetParametersResult(successful=True)
 
     def _publish_lidar_tf(self, stamp: Time | None = None) -> None:
+        if self._tf_broadcaster is None:
+            return
         transform = TransformStamped()
         transform.header.stamp = self.get_clock().now().to_msg() if stamp is None else stamp
         transform.header.frame_id = DEFAULT_TF_PARENT_FRAME

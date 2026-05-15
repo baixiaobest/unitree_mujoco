@@ -6,6 +6,7 @@ import numpy as np
 
 
 DEFAULT_LIDAR_TF_RPY_DEG = (192.0, -8.0, -60.0)
+DEFAULT_LIDAR_TF_XYZ = (0.2929999828338623, 0.0, -0.06000000238418579)
 
 
 def quaternion_from_rpy(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
@@ -49,6 +50,20 @@ def rotation_matrix_from_rpy_degrees(roll_deg: float, pitch_deg: float, yaw_deg:
         math.radians(pitch_deg),
         math.radians(yaw_deg),
     )
+
+
+def transform_matrix_from_xyz_rpy_degrees(
+    x: float,
+    y: float,
+    z: float,
+    roll_deg: float,
+    pitch_deg: float,
+    yaw_deg: float,
+) -> np.ndarray:
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = rotation_matrix_from_rpy_degrees(roll_deg, pitch_deg, yaw_deg)
+    transform[:3, 3] = np.array((x, y, z), dtype=np.float64)
+    return transform
 
 
 def quaternion_from_rotation_matrix(rotation: np.ndarray) -> tuple[float, float, float, float]:

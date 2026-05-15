@@ -27,4 +27,11 @@ install(
   RENAME kiss_odom_node
 )
 
+install(
+  DIRECTORY
+    launch
+    config
+  DESTINATION share/${PROJECT_NAME}
+)
+
 ament_package()

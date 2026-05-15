@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GO2 DDS / ROS2 Architecture</title>
+  <title>GO2 DDS / ROS2 Fusion Architecture</title>
   <style>
     :root {
       --bg: #f3efe5;
@@ -229,18 +229,18 @@
   <main class="page">
     <section class="hero">
       <div class="panel hero-copy">
-        <h1>GO2 DDS / ROS2 Architecture</h1>
+        <h1>GO2 DDS / ROS2 Fusion Architecture</h1>
         <p class="lede">
           This page shows how the physical GO2, the <span class="mono">simulate_python</span> runtime,
-          and the ROS2 bridge package fit together. The main paths are the raw DDS transport,
-          the bridge nodes that translate DDS into ROS2 topics and TF, and the optional KISS-ICP odometry branch.
+          and the ROS2 bridge package fit together in the current fusion setup. The main paths are the raw DDS transport,
+          the bridge nodes that translate DDS into ROS2 topics, the KISS-ICP odometry branch, and the local EKF that owns the runtime frame tree.
         </p>
         <div class="chips">
-          <div class="chip">Hardware DDS: domain 0 via <span class="mono">enp108s0</span></div>
-          <div class="chip">Simulation DDS: domain 1 via <span class="mono">wlo1</span></div>
+          <div class="chip">Recommended entry point: <span class="mono">ekf_fusion.launch.py</span></div>
+          <div class="chip">Raw DDS side: <span class="mono">run_mode</span> plus optional <span class="mono">dds_domain_id</span> / <span class="mono">dds_interface</span></div>
           <div class="chip">Raw topics: <span class="mono">rt/odom</span>, <span class="mono">rt/utlidar/cloud</span></div>
-          <div class="chip">ROS2 outputs: <span class="mono">/odom</span>, <span class="mono">/utlidar/time_corrected/cloud</span>, <span class="mono">/kiss/odom</span></div>
-          <div class="chip">KISS input: accumulated clouds with header-shifted point time</div>
+          <div class="chip">ROS2 outputs: <span class="mono">/odom</span>, <span class="mono">/utlidar/time_corrected/cloud</span>, <span class="mono">/kiss/odom</span>, <span class="mono">/odometry/filtered</span></div>
+          <div class="chip">KISS input: accumulated clouds, header-shifted point time, periodic reset at 100 registrations</div>
         </div>
       </div>
 
@@ -249,7 +249,7 @@
         <div class="legend-item"><span class="swatch" style="background:#2b6a6c;"></span> simulate_python scripts and MuJoCo-side runtime</div>
         <div class="legend-item"><span class="swatch" style="background:#355c7d;"></span> go2_dds_ros2_bridge ROS2 executables</div>
         <div class="legend-item"><span class="swatch" style="background:#5f4b8b;"></span> ROS2 topics consumed by RViz, SLAM, or other ROS tools</div>
-        <div class="legend-item"><span class="swatch" style="background:#d9a441;"></span> TF frames published into the ROS2 frame tree</div>
+        <div class="legend-item"><span class="swatch" style="background:#d9a441;"></span> TF ownership in the current fusion launch</div>
         <div class="legend-item"><span class="swatch" style="background:#fffaf0;"></span> Browser-only document: no build step, no external assets</div>
       </aside>
     </section>
@@ -257,7 +257,7 @@
     <section class="section-grid single">
       <div class="panel diagram-card">
         <h2>1. End-to-End Map</h2>
-        <svg viewBox="0 0 1240 600" role="img" aria-label="End-to-end GO2 DDS and ROS2 architecture diagram">
+        <svg viewBox="0 0 1240 680" role="img" aria-label="End-to-end GO2 DDS and ROS2 fusion architecture diagram">
           <defs>
             <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="#6c5d4b"></path>
@@ -267,70 +267,83 @@
             </filter>
           </defs>
 
-          <rect x="26" y="28" width="1188" height="544" rx="28" fill="rgba(255,250,240,0.55)" stroke="#c1b39a"></rect>
+          <rect x="26" y="28" width="1188" height="624" rx="28" fill="rgba(255,250,240,0.55)" stroke="#c1b39a"></rect>
 
-          <text x="60" y="70" font-size="27" font-weight="700" fill="#1d2a32">Two raw DDS sources feed one ROS2 bridge package</text>
-          <text x="60" y="102" font-size="17" fill="#566670">Left lane: physical GO2 over Ethernet. Right lane: simulate_python over the simulation DDS domain.</text>
+          <text x="60" y="70" font-size="27" font-weight="700" fill="#1d2a32">Two raw DDS sources feed one ROS2 fusion launch</text>
+          <text x="60" y="102" font-size="17" fill="#566670">Both hardware and simulation publish the same DDS contract. The fusion launch turns that into ROS topics, one static LiDAR extrinsic, and one fused odom frame.</text>
 
           <rect x="60" y="145" width="300" height="150" rx="24" fill="#b85c38" opacity="0.94" filter="url(#softShadow)"></rect>
           <text x="84" y="184" font-size="28" font-weight="700" fill="#fffaf0">Physical GO2</text>
           <text x="84" y="218" font-size="18" fill="#fffaf0">Onboard LiDAR and state estimator</text>
           <text x="84" y="250" font-size="18" fill="#fffaf0">Ethernet DDS on domain 0</text>
-          <text x="84" y="280" font-size="18" fill="#fffaf0">Host NIC: enp108s0</text>
+          <text x="84" y="280" font-size="18" fill="#fffaf0">Interface overridable at launch</text>
 
           <rect x="60" y="355" width="300" height="150" rx="24" fill="#2b6a6c" opacity="0.94" filter="url(#softShadow)"></rect>
           <text x="84" y="394" font-size="28" font-weight="700" fill="#fffaf0">simulate_python</text>
           <text x="84" y="426" font-size="18" fill="#fffaf0">unitree_mujoco.py</text>
           <text x="84" y="452" font-size="18" fill="#fffaf0">and hardware env</text>
           <text x="84" y="478" font-size="18" fill="#fffaf0">EstimatedOdometryPublisher</text>
-          <text x="84" y="488" font-size="16" fill="#fffaf0">DDS on domain 1 via wlo1</text>
+          <text x="84" y="488" font-size="16" fill="#fffaf0">DDS domain/interface can differ from ROS domain</text>
 
-          <rect x="450" y="110" width="345" height="405" rx="28" fill="#355c7d" opacity="0.96" filter="url(#softShadow)"></rect>
-          <text x="476" y="153" font-size="30" font-weight="700" fill="#fffaf0">go2_dds_ros2_bridge</text>
+          <rect x="420" y="88" width="390" height="500" rx="28" fill="#355c7d" opacity="0.96" filter="url(#softShadow)"></rect>
+          <text x="448" y="131" font-size="30" font-weight="700" fill="#fffaf0">ekf_fusion.launch.py</text>
 
-          <rect x="478" y="182" width="288" height="88" rx="18" fill="#fffaf0"></rect>
-          <text x="500" y="214" font-size="23" font-weight="700" fill="#355c7d">clock_offset_bridge</text>
-          <text x="500" y="238" font-size="15" fill="#566670">DDS rt/utlidar/cloud</text>
-          <text x="500" y="257" font-size="13" fill="#566670">ROS /utlidar/time_corrected/cloud</text>
-          <text x="500" y="274" font-size="13" fill="#566670">TF base_link-&gt;utlidar_lidar</text>
+          <rect x="448" y="160" width="334" height="70" rx="18" fill="#fffaf0"></rect>
+          <text x="470" y="188" font-size="22" font-weight="700" fill="#355c7d">clock_offset_bridge</text>
+          <text x="470" y="209" font-size="13" fill="#566670">DDS rt/utlidar/cloud -&gt; ROS /utlidar/time_corrected/cloud</text>
+          <text x="470" y="225" font-size="13" fill="#566670">publishes offset topic, TF disabled in fusion launch</text>
 
-          <rect x="478" y="291" width="288" height="88" rx="18" fill="#fffaf0"></rect>
-          <text x="500" y="323" font-size="23" font-weight="700" fill="#355c7d">odom_bridge</text>
-          <text x="500" y="349" font-size="16" fill="#566670">DDS rt/odom</text>
-          <text x="500" y="371" font-size="16" fill="#566670">ROS /odom + TF odom->base_link</text>
+          <rect x="448" y="244" width="334" height="70" rx="18" fill="#fffaf0"></rect>
+          <text x="470" y="272" font-size="22" font-weight="700" fill="#355c7d">odom_bridge</text>
+          <text x="470" y="293" font-size="13" fill="#566670">DDS rt/odom -&gt; ROS /odom with configured diagonal covariance</text>
+          <text x="470" y="309" font-size="13" fill="#566670">topic only in fusion launch, no TF publication</text>
 
-          <rect x="478" y="400" width="288" height="88" rx="18" fill="#fffaf0"></rect>
-          <text x="500" y="432" font-size="23" font-weight="700" fill="#355c7d">kiss_odom_node</text>
-          <text x="500" y="454" font-size="13" fill="#566670">accumulates corrected clouds</text>
-          <text x="500" y="471" font-size="13" fill="#566670">shifts point time by header</text>
-          <text x="500" y="488" font-size="13" fill="#566670">ROS /kiss/odom + TF kiss_odom-&gt;kiss_lidar</text>
+          <rect x="448" y="328" width="334" height="88" rx="18" fill="#fffaf0"></rect>
+          <text x="470" y="356" font-size="22" font-weight="700" fill="#355c7d">kiss_odom_node</text>
+          <text x="470" y="377" font-size="13" fill="#566670">accumulates corrected clouds, shifts point time by header</text>
+          <text x="470" y="393" font-size="13" fill="#566670">publishes base_link-origin /kiss/odom, resets every 100 registrations</text>
+          <text x="470" y="409" font-size="13" fill="#566670">topic only in fusion launch, no TF publication</text>
 
-          <rect x="890" y="160" width="285" height="310" rx="28" fill="#5f4b8b" opacity="0.96" filter="url(#softShadow)"></rect>
-          <text x="918" y="203" font-size="29" font-weight="700" fill="#fffaf0">ROS2 Graph</text>
-          <text x="918" y="239" font-size="18" fill="#fffaf0">RViz</text>
-          <text x="918" y="270" font-size="18" fill="#fffaf0">SLAM / localization consumers</text>
-          <text x="918" y="301" font-size="18" fill="#fffaf0">Debug tools</text>
-          <text x="918" y="342" font-size="18" fill="#fffaf0">/odom</text>
-          <text x="918" y="373" font-size="18" fill="#fffaf0">/utlidar/time_corrected/cloud</text>
-          <text x="918" y="404" font-size="18" fill="#fffaf0">/kiss/odom</text>
-          <text x="918" y="435" font-size="18" fill="#fffaf0">/tf</text>
+          <rect x="448" y="430" width="334" height="70" rx="18" fill="#fffaf0"></rect>
+          <text x="470" y="458" font-size="22" font-weight="700" fill="#355c7d">static_transform_publisher</text>
+          <text x="470" y="479" font-size="13" fill="#566670">fixed LiDAR extrinsic</text>
+          <text x="470" y="495" font-size="13" fill="#566670">TF base_link-&gt;utlidar_lidar</text>
 
-          <line x1="360" y1="220" x2="450" y2="220" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
+          <rect x="448" y="514" width="334" height="58" rx="18" fill="#fffaf0"></rect>
+          <text x="470" y="541" font-size="21" font-weight="700" fill="#355c7d">robot_localization/ekf_node</text>
+          <text x="470" y="561" font-size="13" fill="#566670">twist from /odom plus pose from /kiss/odom -&gt; /odometry/filtered and TF odom-&gt;base_link</text>
+
+          <rect x="890" y="142" width="285" height="368" rx="28" fill="#5f4b8b" opacity="0.96" filter="url(#softShadow)"></rect>
+          <text x="918" y="185" font-size="29" font-weight="700" fill="#fffaf0">ROS2 Graph</text>
+          <text x="918" y="221" font-size="18" fill="#fffaf0">RViz</text>
+          <text x="918" y="252" font-size="18" fill="#fffaf0">bagging / debug tools</text>
+          <text x="918" y="283" font-size="18" fill="#fffaf0">localization consumers</text>
+          <text x="918" y="324" font-size="18" fill="#fffaf0">/odom</text>
+          <text x="918" y="355" font-size="18" fill="#fffaf0">/utlidar/time_corrected/cloud</text>
+          <text x="918" y="386" font-size="18" fill="#fffaf0">/kiss/odom</text>
+          <text x="918" y="417" font-size="18" fill="#fffaf0">/odometry/filtered</text>
+          <text x="918" y="448" font-size="18" fill="#fffaf0">/go2_clock_offset_sec</text>
+          <text x="918" y="479" font-size="18" fill="#fffaf0">/tf</text>
+
+          <line x1="360" y1="220" x2="420" y2="195" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
           <text x="376" y="205" font-size="16" fill="#566670">raw LiDAR</text>
 
-          <line x1="360" y1="410" x2="450" y2="335" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
+          <line x1="360" y1="410" x2="420" y2="279" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
           <text x="364" y="374" font-size="16" fill="#566670">rt/odom</text>
 
-          <line x1="795" y1="226" x2="890" y2="226" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
-          <line x1="795" y1="335" x2="890" y2="335" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
-          <line x1="795" y1="444" x2="890" y2="444" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
+          <line x1="782" y1="195" x2="890" y2="355" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
+          <line x1="782" y1="279" x2="890" y2="324" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
+          <line x1="782" y1="372" x2="890" y2="386" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
+          <line x1="782" y1="465" x2="890" y2="479" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
+          <line x1="782" y1="543" x2="890" y2="417" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
 
-          <path d="M 622 270 C 622 300 622 315 622 291" fill="none" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></path>
-          <path d="M 622 379 C 622 390 622 395 622 400" fill="none" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></path>
-          <text x="646" y="389" font-size="16" fill="#566670">corrected cloud feeds KISS-ICP</text>
+          <path d="M 615 230 C 615 260 615 282 615 328" fill="none" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></path>
+          <path d="M 615 314 C 615 338 615 348 615 430" fill="none" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></path>
+          <path d="M 615 416 C 615 450 615 478 615 514" fill="none" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></path>
+          <text x="638" y="322" font-size="16" fill="#566670">corrected cloud feeds KISS, KISS and estimator feed the EKF</text>
         </svg>
         <p class="caption">
-          The package does not import <span class="mono">simulate_python</span>. Both sides stay decoupled and meet only through shared DDS topics, and the KISS branch now runs on accumulated ROS clouds rather than one transport message at a time.
+          The package does not import <span class="mono">simulate_python</span>. Both sides stay decoupled and meet only through shared DDS topics. In the recommended launch, the bridge nodes publish ROS topics, the static publisher owns the LiDAR extrinsic, and the EKF publishes the only dynamic odometry transform.
         </p>
       </div>
     </section>
@@ -362,14 +375,14 @@
           <text x="402" y="140" font-size="17" fill="#fffaf0">reads rt/utlidar/cloud</text>
           <text x="402" y="166" font-size="17" fill="#fffaf0">estimates clock offset</text>
           <text x="402" y="188" font-size="15" fill="#fffaf0">publishes corrected cloud</text>
-          <text x="402" y="210" font-size="15" fill="#fffaf0">and LiDAR TF</text>
+          <text x="402" y="210" font-size="15" fill="#fffaf0">TF optional standalone, disabled in fusion launch</text>
 
           <rect x="378" y="276" width="256" height="160" rx="22" fill="#355c7d"></rect>
           <text x="402" y="318" font-size="25" font-weight="700" fill="#fffaf0">odom_bridge</text>
           <text x="402" y="350" font-size="17" fill="#fffaf0">reads rt/odom</text>
           <text x="402" y="376" font-size="17" fill="#fffaf0">converts DDS Odometry</text>
           <text x="402" y="398" font-size="15" fill="#fffaf0">publishes /odom</text>
-          <text x="402" y="420" font-size="15" fill="#fffaf0">and odom-&gt;base_link</text>
+          <text x="402" y="420" font-size="15" fill="#fffaf0">no TF in fusion launch</text>
 
           <rect x="728" y="146" width="186" height="210" rx="22" fill="#5f4b8b"></rect>
           <text x="752" y="186" font-size="25" font-weight="700" fill="#fffaf0">ROS2</text>
@@ -377,7 +390,8 @@
           <text x="752" y="238" font-size="14" fill="#fffaf0">time_corrected/cloud</text>
           <text x="748" y="262" font-size="16" fill="#fffaf0">/go2_clock_offset_sec</text>
           <text x="752" y="292" font-size="17" fill="#fffaf0">/odom</text>
-          <text x="752" y="320" font-size="17" fill="#fffaf0">/tf</text>
+          <text x="752" y="320" font-size="17" fill="#fffaf0">/odometry/filtered</text>
+          <text x="752" y="346" font-size="17" fill="#fffaf0">/tf comes from fusion launch ownership</text>
 
           <line x1="282" y1="146" x2="378" y2="146" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-hw)"></line>
           <text x="292" y="128" font-size="16" fill="#566670">domain 0 DDS</text>
@@ -396,10 +410,10 @@
       <aside class="panel notes-card">
         <h2>What matters here</h2>
         <ul>
-          <li>The bridge executable chooses hardware defaults with DDS domain 0 and interface <span class="mono">enp108s0</span>.</li>
+          <li>The raw DDS side still has hardware defaults, but the fusion launch can override them with <span class="mono">dds_domain_id</span> and <span class="mono">dds_interface</span>.</li>
           <li><span class="mono">clock_offset_bridge</span> is the LiDAR cleanup step. It aligns timestamps to local ROS time before anything downstream uses the cloud.</li>
           <li><span class="mono">odom_bridge</span> is the low-friction path for robot odometry into standard ROS2 tools.</li>
-          <li>The LiDAR TF published here is <span class="mono">base_link -> utlidar_lidar</span>, so RViz and SLAM can place the cloud correctly.</li>
+          <li>In the current fusion runtime, <span class="mono">base_link -> utlidar_lidar</span> comes from <span class="mono">static_transform_publisher</span>, not from <span class="mono">clock_offset_bridge</span>.</li>
         </ul>
       </aside>
     </section>
@@ -443,8 +457,8 @@
           <rect x="650" y="286" width="248" height="144" rx="22" fill="#5f4b8b"></rect>
           <text x="676" y="328" font-size="25" font-weight="700" fill="#fffaf0">ROS2 consumers</text>
           <text x="670" y="358" font-size="16" fill="#fffaf0">RViz, plots, bagging, debugging</text>
-          <text x="676" y="382" font-size="15" fill="#fffaf0">same view as hardware,</text>
-          <text x="676" y="404" font-size="15" fill="#fffaf0">different DDS source</text>
+          <text x="676" y="382" font-size="15" fill="#fffaf0">same fusion graph as hardware,</text>
+          <text x="676" y="404" font-size="15" fill="#fffaf0">different DDS producer and ROS domain</text>
 
           <line x1="340" y1="150" x2="412" y2="226" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-sim)"></line>
           <line x1="340" y1="370" x2="412" y2="302" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-sim)"></line>
@@ -464,15 +478,16 @@
           <li><span class="mono">unitree_mujoco.py</span> and the control scripts initialize Unitree DDS channels for the simulator side.</li>
           <li><span class="mono">GO2HardwareEnvironment</span> creates <span class="mono">EstimatedOdometryPublisher</span> when velocity control is active.</li>
           <li>That publisher writes DDS <span class="mono">rt/odom</span>, which the ROS2 <span class="mono">odom_bridge</span> can consume exactly like hardware odometry.</li>
-          <li>This symmetry is the key design choice: same bridge, same ROS2 outputs, different DDS producer.</li>
+          <li>The ROS domain is still selected separately with <span class="mono">ROS_DOMAIN_ID</span>; the bridge DDS side is controlled by <span class="mono">run_mode</span> and optional launch overrides.</li>
+          <li>This symmetry is the key design choice: same launch, same ROS2 outputs, different DDS producer.</li>
         </ul>
       </aside>
     </section>
 
     <section class="section-grid">
       <div class="panel diagram-card">
-        <h2>4. ROS2 LiDAR and KISS-ICP Branch</h2>
-        <svg viewBox="0 0 980 500" role="img" aria-label="LiDAR corrected cloud and KISS-ICP branch">
+        <h2>4. Fusion Inputs and EKF Split</h2>
+        <svg viewBox="0 0 980 500" role="img" aria-label="Fusion inputs from corrected cloud, KISS odometry, and estimator odometry">
           <defs>
             <marker id="arrow-kiss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="#6c5d4b"></path>
@@ -492,52 +507,70 @@
           <text x="392" y="228" font-size="16" fill="#fffaf0">/utlidar/time_corrected/cloud</text>
           <text x="392" y="252" font-size="15" fill="#fffaf0">time-aligned with LiDAR TF</text>
 
-          <rect x="692" y="98" width="226" height="144" rx="22" fill="#355c7d"></rect>
-          <text x="718" y="140" font-size="25" font-weight="700" fill="#fffaf0">kiss_odom_node</text>
-          <text x="718" y="170" font-size="14" fill="#fffaf0">runs KISS-ICP on</text>
-          <text x="718" y="190" font-size="14" fill="#fffaf0">accumulated clouds</text>
-          <text x="718" y="210" font-size="14" fill="#fffaf0">shifts point time by header</text>
+          <rect x="676" y="74" width="242" height="144" rx="22" fill="#355c7d"></rect>
+          <text x="702" y="116" font-size="25" font-weight="700" fill="#fffaf0">kiss_odom_node</text>
+          <text x="702" y="146" font-size="14" fill="#fffaf0">runs KISS-ICP on</text>
+          <text x="702" y="166" font-size="14" fill="#fffaf0">accumulated corrected clouds</text>
+          <text x="702" y="186" font-size="14" fill="#fffaf0">header-shifted point time</text>
+          <text x="702" y="206" font-size="14" fill="#fffaf0">reset-after-registrations = 100</text>
 
-          <rect x="692" y="290" width="226" height="144" rx="22" fill="#5f4b8b"></rect>
-          <text x="718" y="332" font-size="25" font-weight="700" fill="#fffaf0">ROS2 outputs</text>
-          <text x="718" y="364" font-size="17" fill="#fffaf0">/kiss/odom</text>
-          <text x="718" y="390" font-size="17" fill="#fffaf0">TF kiss_odom->kiss_lidar</text>
+          <rect x="346" y="332" width="256" height="106" rx="22" fill="#355c7d"></rect>
+          <text x="372" y="368" font-size="24" font-weight="700" fill="#fffaf0">odom_bridge</text>
+          <text x="372" y="396" font-size="15" fill="#fffaf0">/odom contributes twist only</text>
+          <text x="372" y="418" font-size="15" fill="#fffaf0">vx, vy, yaw_rate</text>
+
+          <rect x="676" y="270" width="242" height="106" rx="22" fill="#5f4b8b"></rect>
+          <text x="702" y="306" font-size="24" font-weight="700" fill="#fffaf0">/kiss/odom</text>
+          <text x="702" y="334" font-size="15" fill="#fffaf0">base_link-origin pose</text>
+          <text x="702" y="356" font-size="15" fill="#fffaf0">x, y, yaw only</text>
+
+          <rect x="676" y="392" width="242" height="58" rx="18" fill="#355c7d"></rect>
+          <text x="698" y="427" font-size="22" font-weight="700" fill="#fffaf0">robot_localization EKF</text>
+
+          <rect x="56" y="332" width="222" height="106" rx="22" fill="#5f4b8b"></rect>
+          <text x="80" y="368" font-size="24" font-weight="700" fill="#fffaf0">Corrected cloud</text>
+          <text x="80" y="396" font-size="15" fill="#fffaf0">/utlidar/time_corrected/cloud</text>
+          <text x="80" y="418" font-size="15" fill="#fffaf0">time-aligned handoff point</text>
 
           <line x1="278" y1="228" x2="370" y2="228" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
-          <line x1="600" y1="228" x2="692" y2="170" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
-          <line x1="805" y1="242" x2="805" y2="290" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
+          <line x1="486" y1="300" x2="486" y2="332" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
+          <line x1="278" y1="384" x2="346" y2="384" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
+          <line x1="600" y1="228" x2="676" y2="146" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
+          <line x1="797" y1="218" x2="797" y2="270" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
+          <line x1="602" y1="384" x2="676" y2="421" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
+          <line x1="797" y1="376" x2="797" y2="392" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
 
-          <text x="420" y="118" font-size="18" font-weight="700" fill="#1d2a32">The corrected cloud is the handoff point between raw sensor timing and scan-matching odometry.</text>
+          <text x="332" y="118" font-size="18" font-weight="700" fill="#1d2a32">The EKF fuses estimator twist with KISS pose. Raw odometry and KISS stay as topics; TF comes from the fused state only.</text>
         </svg>
         <p class="caption">
-          KISS-ICP deliberately subscribes to the corrected ROS2 cloud instead of raw DDS so it can reuse the timestamp fix and LiDAR frame alignment from one place. Because the per-point <span class="mono">time</span> field resets every message, the node rebuilds a batch-global time axis from message headers before normalizing timestamps for deskew.
+          KISS-ICP deliberately subscribes to the corrected ROS2 cloud instead of raw DDS so it can reuse the timestamp fix from one place. The EKF then takes pose from <span class="mono">/kiss/odom</span> and twist from <span class="mono">/odom</span>. That is the current runtime split configured in <span class="mono">ekf_localization.yaml</span>.
         </p>
       </div>
 
       <aside class="panel notes-card">
         <h2>Why this split is useful</h2>
         <ul>
-          <li>The timestamp correction and LiDAR mounting TF are handled once in the bridge.</li>
+          <li>The timestamp correction happens once in <span class="mono">clock_offset_bridge</span>, and both KISS and other ROS tools reuse the corrected cloud.</li>
           <li><span class="mono">kiss_odom_node</span> stays focused on scan registration rather than DDS transport details.</li>
           <li>The node accumulates multiple incoming clouds before each KISS registration because single-message registration was too unstable on the GO2 stream.</li>
-          <li>The published KISS pose is stamped with the newest message header in the accumulated batch, while deskew uses the oldest-to-newest per-point time ordering inside that batch.</li>
-          <li><span class="mono">--reset-after-registrations</span> can periodically reinitialize KISS to bound local-map history while keeping the published pose continuous.</li>
-          <li>If you disable KISS-ICP, the rest of the bridge still works and ROS2 still has the corrected cloud and proprioceptive odometry.</li>
+          <li>The published KISS pose is expressed at the <span class="mono">base_link</span> origin in the <span class="mono">odom</span> frame, so the EKF can fuse it directly.</li>
+          <li><span class="mono">--reset-after-registrations</span> bounds KISS map history while keeping the published pose continuous.</li>
+          <li>If you disable KISS-ICP, the rest of the bridge still works, but the fused launch loses its pose measurement source.</li>
         </ul>
       </aside>
     </section>
 
     <section class="section-grid">
       <div class="panel diagram-card">
-        <h2>5. TF View</h2>
-        <svg viewBox="0 0 980 360" role="img" aria-label="TF tree diagram">
+        <h2>5. TF Ownership in the Fusion Launch</h2>
+        <svg viewBox="0 0 980 400" role="img" aria-label="Current TF ownership in the fusion launch">
           <defs>
             <marker id="arrow-tf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="#d9a441"></path>
             </marker>
           </defs>
 
-          <rect x="24" y="24" width="932" height="312" rx="28" fill="#fffaf0" stroke="#c1b39a"></rect>
+          <rect x="24" y="24" width="932" height="352" rx="28" fill="#fffaf0" stroke="#c1b39a"></rect>
 
           <rect x="82" y="126" width="160" height="84" rx="18" fill="#d9a441"></rect>
           <text x="130" y="176" font-size="28" font-weight="700" fill="#1d2a32">odom</text>
@@ -549,31 +582,35 @@
           <text x="736" y="176" font-size="28" font-weight="700" fill="#1d2a32">utlidar_lidar</text>
 
           <line x1="242" y1="168" x2="382" y2="168" stroke="#d9a441" stroke-width="5" marker-end="url(#arrow-tf)"></line>
-          <text x="274" y="146" font-size="18" fill="#8c6b1d">odom_bridge</text>
+          <text x="304" y="146" font-size="18" fill="#8c6b1d">ekf_node</text>
 
           <line x1="568" y1="168" x2="708" y2="168" stroke="#d9a441" stroke-width="5" marker-end="url(#arrow-tf)"></line>
-          <text x="596" y="146" font-size="18" fill="#8c6b1d">clock_offset_bridge</text>
+          <text x="576" y="146" font-size="18" fill="#8c6b1d">static_transform_publisher</text>
 
-          <rect x="382" y="252" width="186" height="54" rx="16" fill="#f4e3b2"></rect>
-          <text x="412" y="286" font-size="22" font-weight="700" fill="#7a5c12">kiss_odom</text>
-          <rect x="708" y="252" width="198" height="54" rx="16" fill="#f4e3b2"></rect>
-          <text x="740" y="286" font-size="22" font-weight="700" fill="#7a5c12">kiss_lidar</text>
-          <line x1="568" y1="278" x2="708" y2="278" stroke="#d9a441" stroke-width="5" marker-end="url(#arrow-tf)"></line>
-          <text x="578" y="252" font-size="18" fill="#8c6b1d">kiss_odom_node</text>
+          <rect x="120" y="270" width="188" height="54" rx="16" fill="#f4e3b2"></rect>
+          <text x="154" y="304" font-size="22" font-weight="700" fill="#7a5c12">/odom topic</text>
+          <rect x="392" y="270" width="188" height="54" rx="16" fill="#f4e3b2"></rect>
+          <text x="414" y="304" font-size="22" font-weight="700" fill="#7a5c12">/kiss/odom</text>
+          <rect x="688" y="270" width="218" height="54" rx="16" fill="#f4e3b2"></rect>
+          <text x="710" y="304" font-size="22" font-weight="700" fill="#7a5c12">/odometry/filtered</text>
+
+          <line x1="308" y1="297" x2="392" y2="297" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-tf)"></line>
+          <line x1="580" y1="297" x2="688" y2="297" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-tf)"></line>
+          <text x="330" y="256" font-size="18" fill="#566670">topics feeding the filter, not extra TF branches</text>
         </svg>
         <p class="caption">
-          Two odometry reference frames can exist at the same time: <span class="mono">odom</span> from the Unitree odometry path, and <span class="mono">kiss_odom</span> from LiDAR scan matching. They are intentionally separate trees.
+          The current fusion launch has a single runtime TF chain: <span class="mono">odom -> base_link -> utlidar_lidar</span>. Raw estimator odometry and KISS remain ROS topics that feed the filter; they do not own extra TF branches.
         </p>
       </div>
 
       <aside class="panel notes-card">
         <h2>Reading the frame tree</h2>
         <ul>
-          <li><span class="mono">odom -> base_link</span> comes from the odometry bridge.</li>
-          <li><span class="mono">base_link -> utlidar_lidar</span> comes from the LiDAR bridge.</li>
-          <li><span class="mono">kiss_odom -> kiss_lidar</span> is a separate branch produced by KISS-ICP.</li>
-          <li><span class="mono">kiss_lidar</span> is virtual on purpose, so KISS does not compete with the bridge for ownership of <span class="mono">utlidar_lidar</span>.</li>
-          <li>Consumers choose which odometry frame they trust for their use case.</li>
+          <li><span class="mono">odom -> base_link</span> comes from <span class="mono">robot_localization/ekf_node</span>.</li>
+          <li><span class="mono">base_link -> utlidar_lidar</span> comes from <span class="mono">static_transform_publisher</span>.</li>
+          <li><span class="mono">odom_bridge</span> does not publish TF in the fusion launch.</li>
+          <li><span class="mono">kiss_odom_node</span> does not publish TF in the fusion launch.</li>
+          <li><span class="mono">clock_offset_bridge</span> can still publish TF when run standalone, but the launch disables it so TF ownership stays unambiguous.</li>
         </ul>
       </aside>
     </section>
