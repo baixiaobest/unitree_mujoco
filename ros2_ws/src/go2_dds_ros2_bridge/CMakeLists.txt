@@ -49,6 +49,13 @@ install(
 )
 
 install(
+  PROGRAMS
+    go2_dds_ros2_bridge/imu_experiment_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME imu_experiment_node
+)
+
+install(
   DIRECTORY
     launch
     config
