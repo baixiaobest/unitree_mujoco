@@ -7,10 +7,10 @@ import math
 import os
 from pathlib import Path
 import sys
-import threading
 from dataclasses import dataclass
 
 import rclpy
+from builtin_interfaces.msg import Time
 from rclpy.node import Node
 from sensor_msgs.msg import Imu
 
@@ -24,6 +24,8 @@ DEFAULT_DDS_IMU_TOPIC = "rt/lowstate"
 DEFAULT_ROS_IMU_TOPIC = "/imu/data_raw"
 DEFAULT_IMU_FRAME_ID = "imu_link"
 DEFAULT_IMU_CONFIG_FILE = "imu_bridge.yaml"
+LOWSTATE_TICK_NS = 1_000_000
+TIMESTAMP_RESYNC_THRESHOLD_NS = 1.0 * LOWSTATE_TICK_NS
 IMU_DEFAULT_VARIANCES = {
     "orientation": 0.05,
     "angular_velocity": 0.02,
@@ -38,7 +40,6 @@ class BridgeConfig:
     frame_id: str
     dds_domain_id: int
     dds_interface: str
-    publish_hz: float
     orientation_variance: float
     angular_velocity_variance: float
     linear_acceleration_variance: float
@@ -181,12 +182,6 @@ def parse_args() -> BridgeConfig:
         default=default_config_file(),
         help="YAML file containing IMU bridge variances.",
     )
-    parser.add_argument(
-        "--publish-hz",
-        type=float,
-        default=200.0,
-        help="Maximum ROS2 publish rate for forwarding IMU messages.",
-    )
     non_ros_args = rclpy.utilities.remove_ros_args(args=sys.argv)[1:]
     args = parser.parse_args(non_ros_args)
     default_domain = SIMULATION_DOMAIN_ID if args.run_mode == "simulation" else HARDWARE_DOMAIN_ID
@@ -203,7 +198,6 @@ def parse_args() -> BridgeConfig:
         frame_id=args.frame_id,
         dds_domain_id=default_domain if args.dds_domain_id is None else args.dds_domain_id,
         dds_interface=default_interface if args.dds_interface is None else args.dds_interface,
-        publish_hz=max(args.publish_hz, 1.0),
         orientation_variance=max(orientation_variance, 0.0),
         angular_velocity_variance=max(angular_velocity_variance, 0.0),
         linear_acceleration_variance=max(linear_acceleration_variance, 0.0),
@@ -219,6 +213,13 @@ def diagonal_covariance(variance: float) -> list[float]:
     return covariance
 
 
+def stamp_from_ns(stamp_ns: int) -> Time:
+    stamp = Time()
+    stamp.sec = int(stamp_ns // 1_000_000_000)
+    stamp.nanosec = int(stamp_ns % 1_000_000_000)
+    return stamp
+
+
 class DdsImuBridge(Node):
     def __init__(self, config: BridgeConfig, channel_subscriber_cls, dds_lowstate_type) -> None:
         super().__init__("go2_imu_bridge")
@@ -227,19 +228,17 @@ class DdsImuBridge(Node):
         self._orientation_covariance = diagonal_covariance(self._config.orientation_variance)
         self._angular_velocity_covariance = diagonal_covariance(self._config.angular_velocity_variance)
         self._linear_acceleration_covariance = diagonal_covariance(self._config.linear_acceleration_variance)
-        self._message_lock = threading.Lock()
-        self._pending_message: Imu | None = None
-        self._message_version = 0
-        self._last_published_version = 0
+        self._last_receive_time_ns: int | None = None
+        self._last_reconstructed_stamp_ns: int | None = None
+        self._timestamp_resync_count = 0
 
         self._dds_subscriber = channel_subscriber_cls(self._config.dds_topic, dds_lowstate_type)
         self._dds_subscriber.Init(self._dds_lowstate_handler, 10)
-        self._publish_timer = self.create_timer(1.0 / self._config.publish_hz, self._publish_pending_message)
 
         ros_domain_id = os.environ.get("ROS_DOMAIN_ID", "<unset>")
         self.get_logger().info(
-            "Bridging raw DDS lowstate '%s' (domain=%d, interface=%s) to ROS2 topic '%s' as frame '%s' (ROS_DOMAIN_ID=%s, publish_hz=%.1f). "
-            "This first implementation stamps IMU messages at ROS receive time. Variances source: %s."
+            "Bridging raw DDS lowstate '%s' (domain=%d, interface=%s) to ROS2 topic '%s' as frame '%s' (ROS_DOMAIN_ID=%s). "
+            "IMU timestamps are reconstructed from the known 1 ms LowState cadence and locally re-anchored when timing error grows too large. Variances source: %s."
             % (
                 self._config.dds_topic,
                 self._config.dds_domain_id,
@@ -247,7 +246,6 @@ class DdsImuBridge(Node):
                 self._config.ros_topic,
                 self._config.frame_id,
                 ros_domain_id,
-                self._config.publish_hz,
                 self._config.variance_source,
             )
         )
@@ -265,8 +263,11 @@ class DdsImuBridge(Node):
         if normalized_quaternion is None:
             return
 
+        receive_time_ns = self.get_clock().now().nanoseconds
+        stamp_ns = self._reconstruct_stamp_ns(receive_time_ns)
+
         ros_msg = Imu()
-        ros_msg.header.stamp = self.get_clock().now().to_msg()
+        ros_msg.header.stamp = stamp_from_ns(stamp_ns)
         ros_msg.header.frame_id = self._config.frame_id
         ros_msg.orientation.w = normalized_quaternion[0]
         ros_msg.orientation.x = normalized_quaternion[1]
@@ -284,9 +285,7 @@ class DdsImuBridge(Node):
         ros_msg.linear_acceleration.z = accelerometer[2]
         ros_msg.linear_acceleration_covariance = list(self._linear_acceleration_covariance)
 
-        with self._message_lock:
-            self._pending_message = ros_msg
-            self._message_version += 1
+        self._publisher.publish(ros_msg)
 
     @staticmethod
     def _is_finite_vector(values: list[float]) -> bool:
@@ -304,16 +303,31 @@ class DdsImuBridge(Node):
             values[3] / norm,
         )
 
-    def _publish_pending_message(self) -> None:
-        with self._message_lock:
-            if self._pending_message is None or self._message_version == self._last_published_version:
-                return
-            ros_msg = self._pending_message
-            message_version = self._message_version
+    def _reconstruct_stamp_ns(self, receive_time_ns: int) -> int:
+        last_receive_time_ns = self._last_receive_time_ns
+        last_reconstructed_stamp_ns = self._last_reconstructed_stamp_ns
+        if last_receive_time_ns is None or last_reconstructed_stamp_ns is None:
+            self._last_receive_time_ns = receive_time_ns
+            self._last_reconstructed_stamp_ns = receive_time_ns
+            return receive_time_ns
 
-        self._publisher.publish(ros_msg)
-        self._last_published_version = message_version
+        receive_delta_ns = max(receive_time_ns - last_receive_time_ns, 0)
+        elapsed_ticks = max(1, int(round(receive_delta_ns / LOWSTATE_TICK_NS)))
+        reconstructed_stamp_ns = last_reconstructed_stamp_ns + elapsed_ticks * LOWSTATE_TICK_NS
+        timing_error_ns = receive_time_ns - reconstructed_stamp_ns
 
+        if abs(timing_error_ns) > TIMESTAMP_RESYNC_THRESHOLD_NS:
+            self._timestamp_resync_count += 1
+            if self._timestamp_resync_count <= 5:
+                self.get_logger().warning(
+                    "Resynchronizing IMU timestamp reconstruction after %d ns timing error (receive_delta=%d ns, elapsed_ticks=%d)."
+                    % (timing_error_ns, receive_delta_ns, elapsed_ticks)
+                )
+            reconstructed_stamp_ns = receive_time_ns
+
+        self._last_receive_time_ns = receive_time_ns
+        self._last_reconstructed_stamp_ns = reconstructed_stamp_ns
+        return reconstructed_stamp_ns
 
 def main() -> None:
     config = parse_args()

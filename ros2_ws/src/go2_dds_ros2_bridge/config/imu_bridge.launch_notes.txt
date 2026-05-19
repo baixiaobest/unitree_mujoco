@@ -1,4 +1,5 @@
 First-stage IMU bridge notes:
 - Publishes sensor_msgs/Imu from DDS rt/lowstate.
-- Uses ROS receive time for header.stamp as an initial implementation.
-- Intended to be replaced by a corrected shared LiDAR/IMU time base before LIO-SAM becomes the primary odometry path.
+- Reconstructs header.stamp from the known 1 ms LowState cadence and locally re-anchors when timing error grows too large.
+- Publishes each reconstructed IMU sample directly instead of rate-limiting through a lower-frequency flush timer.
+- Still needs runtime cadence validation and LiDAR alignment checks before FAST-LIO2 becomes the primary odometry path.
