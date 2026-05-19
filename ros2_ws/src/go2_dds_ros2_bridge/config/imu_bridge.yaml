@@ -1,0 +1,4 @@
+variances:
+  orientation: 0.05
+  angular_velocity: 0.02
+  linear_acceleration: 0.1

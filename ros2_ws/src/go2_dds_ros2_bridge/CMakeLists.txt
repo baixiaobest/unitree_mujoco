@@ -28,6 +28,13 @@ install(
 )
 
 install(
+  PROGRAMS
+    go2_dds_ros2_bridge/imu_bridge_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME imu_bridge
+)
+
+install(
   DIRECTORY
     launch
     config
