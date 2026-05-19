@@ -42,6 +42,13 @@ install(
 )
 
 install(
+  PROGRAMS
+    go2_dds_ros2_bridge/cloud_experiment_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME cloud_experiment_node
+)
+
+install(
   DIRECTORY
     launch
     config
