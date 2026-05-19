@@ -7,6 +7,7 @@ import numpy as np
 
 DEFAULT_LIDAR_TF_RPY_DEG = (192.0, -8.0, -60.0)
 DEFAULT_LIDAR_TF_XYZ = (0.2929999828338623, 0.0, -0.06000000238418579)
+DEFAULT_IMU_TF_XYZ = (-0.02557, 0.0, 0.04232)
 
 
 def quaternion_from_rpy(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
@@ -64,6 +65,32 @@ def transform_matrix_from_xyz_rpy_degrees(
     transform[:3, :3] = rotation_matrix_from_rpy_degrees(roll_deg, pitch_deg, yaw_deg)
     transform[:3, 3] = np.array((x, y, z), dtype=np.float64)
     return transform
+
+
+def lidar_pose_in_imu_frame() -> tuple[np.ndarray, np.ndarray]:
+    lidar_in_base = transform_matrix_from_xyz_rpy_degrees(
+        DEFAULT_LIDAR_TF_XYZ[0],
+        DEFAULT_LIDAR_TF_XYZ[1],
+        DEFAULT_LIDAR_TF_XYZ[2],
+        DEFAULT_LIDAR_TF_RPY_DEG[0],
+        DEFAULT_LIDAR_TF_RPY_DEG[1],
+        DEFAULT_LIDAR_TF_RPY_DEG[2],
+    )
+    imu_in_base = np.eye(4, dtype=np.float64)
+    imu_in_base[:3, 3] = np.array(DEFAULT_IMU_TF_XYZ, dtype=np.float64)
+    lidar_in_imu = np.linalg.inv(imu_in_base) @ lidar_in_base
+    return lidar_in_imu[:3, 3].copy(), lidar_in_imu[:3, :3].copy()
+
+
+def base_link_pose_in_imu_frame() -> tuple[np.ndarray, np.ndarray]:
+    imu_in_base = np.eye(4, dtype=np.float64)
+    imu_in_base[:3, 3] = np.array(DEFAULT_IMU_TF_XYZ, dtype=np.float64)
+    base_in_imu = np.linalg.inv(imu_in_base)
+    return base_in_imu[:3, 3].copy(), base_in_imu[:3, :3].copy()
+
+
+def flatten_rotation_matrix(rotation: np.ndarray) -> list[float]:
+    return [float(value) for value in rotation.reshape(-1)]
 
 
 def quaternion_from_rotation_matrix(rotation: np.ndarray) -> tuple[float, float, float, float]:

@@ -1,0 +1,50 @@
+/**:
+    ros__parameters:
+        feature_extract_enable: false
+        point_filter_num: 1
+        max_iteration: 3
+        filter_size_surf: 0.5
+        filter_size_map: 0.5
+        cube_side_length: 1000.0
+        runtime_pos_log_enable: false
+        map_file_path: ""
+
+        common:
+            lid_topic: "/utlidar/time_corrected/cloud"
+            imu_topic: "/imu/data_fastlio"
+            time_sync_en: false
+            time_offset_lidar_to_imu: 0.0
+
+        preprocess:
+            # Best-effort default for the Unitree cloud. If the upstream PointCloud2 field layout
+            # does not match FAST-LIO's Velodyne-style parser, override lidar_type/scan_line/
+            # timestamp_unit from the launch file rather than editing bridge code.
+            lidar_type: 2
+            scan_line: 16
+            scan_rate: 5
+            timestamp_unit: 0
+            blind: 0.05
+
+        mapping:
+            acc_cov: 0.1
+            gyr_cov: 0.1
+            b_acc_cov: 0.001
+            b_gyr_cov: 0.0001
+            fov_degree: 360.0
+            det_range: 30.0
+            extrinsic_est_en: false
+            # The following extrinsics are placeholder, and are dynamically replaced in launch.
+            extrinsic_T: [0.0, 0.0, 0.0]
+            extrinsic_R: [1.0, 0.0, 0.0,
+                          0.0, 1.0, 0.0,
+                          0.0, 0.0, 1.0]
+
+        publish:
+            path_en: true
+            scan_publish_en: true
+            dense_publish_en: false
+            scan_bodyframe_pub_en: true
+
+        pcd_save:
+            pcd_save_en: false
+            interval: -1

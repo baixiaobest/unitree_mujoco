@@ -220,6 +220,7 @@ class Go2ClockOffsetBridge(Node):
         self._last_published_version = 0
         self._sample_count = 0
         self._last_log_time_ns = 0
+        self._filtered_offset_log_count = 0
         self._frame_warning_emitted = False
         self._front_leg_filter_log_count = 0
         self._tf_lock = threading.Lock()
@@ -353,8 +354,9 @@ class Go2ClockOffsetBridge(Node):
             filtered_offset_sec = self._filtered_offset_sec
             sample_count = self._sample_count
 
-        if local_receive_ns - self._last_log_time_ns >= 2_000_000_000:
+        if local_receive_ns - self._last_log_time_ns >= 2_000_000_000 and self._filtered_offset_log_count < 3:
             self._last_log_time_ns = local_receive_ns
+            self._filtered_offset_log_count += 1
             self.get_logger().info(
                 "Filtered GO2 clock offset: %.6f s after %d samples"
                 % (filtered_offset_sec, sample_count)
