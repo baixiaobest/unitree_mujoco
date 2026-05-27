@@ -17,8 +17,9 @@ sys.path.append(str(SCRIPT_DIR.parent))
 from robot_comm.robot_communication import RobotCommunication
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
 from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
-from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import UwbSwitch_, WirelessController_
 from utils.odometry_publisher import TOPIC_ESTIMATED_ODOMETRY
+from utils.robot_posture import RobotPostureState, TOPIC_ROBOT_POSTURE, format_robot_posture_state
 from utils.status_monitor_commands import (
     COMMAND_LAY_DOWN,
     COMMAND_STAND_UP,
@@ -63,10 +64,14 @@ class StatusMonitor(QMainWindow):
         
         self.robot_comm = robot_comm
         self._odometry_lock = Lock()
+        self._robot_posture_lock = Lock()
         self._latest_odometry_position: np.ndarray | None = None
         self._latest_odometry_velocity: np.ndarray | None = None
+        self._latest_robot_posture_state: int | None = None
         self.odometry_subscriber = ChannelSubscriber(TOPIC_ESTIMATED_ODOMETRY, Odometry_)
         self.odometry_subscriber.Init(self._estimated_odometry_handler, 10)
+        self.robot_posture_subscriber = ChannelSubscriber(TOPIC_ROBOT_POSTURE, UwbSwitch_)
+        self.robot_posture_subscriber.Init(self._robot_posture_handler, 10)
         self.monitor_command_publisher = ChannelPublisher(TOPIC_STATUS_MONITOR_COMMAND, WirelessController_)
         self.monitor_command_publisher.Init()
         self.init_ui()
@@ -92,7 +97,15 @@ class StatusMonitor(QMainWindow):
             if self._latest_odometry_position is None or self._latest_odometry_velocity is None:
                 return None, None
             return self._latest_odometry_position.copy(), self._latest_odometry_velocity.copy()
-        
+
+    def _robot_posture_handler(self, msg: UwbSwitch_):
+        with self._robot_posture_lock:
+            self._latest_robot_posture_state = int(msg.enabled)
+
+    def _get_latest_robot_posture_state(self) -> int | None:
+        with self._robot_posture_lock:
+            return self._latest_robot_posture_state
+
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle('Unitree Robot Status Monitor')
@@ -257,10 +270,14 @@ class StatusMonitor(QMainWindow):
         roll_label = QLabel("Roll:")
         pitch_label = QLabel("Pitch:")
         yaw_label = QLabel("Yaw:")
+        posture_label = QLabel("Posture:")
         
         self.roll_value = QLabel("0.00°")
         self.pitch_value = QLabel("0.00°")
         self.yaw_value = QLabel("0.00°")
+        self.robot_posture_value = QLabel("unknown")
+        posture_label.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        self.robot_posture_value.setFont(QFont("Arial", 18, QFont.Weight.Bold))
         
         # Add to layout
         base_layout.addWidget(pos_x_label, 0, 0)
@@ -283,6 +300,8 @@ class StatusMonitor(QMainWindow):
         base_layout.addWidget(self.pitch_value, 7, 1)
         base_layout.addWidget(yaw_label, 8, 0)
         base_layout.addWidget(self.yaw_value, 8, 1)
+        base_layout.addWidget(posture_label, 9, 0)
+        base_layout.addWidget(self.robot_posture_value, 9, 1)
         
         base_status_group.setLayout(base_layout)
         
@@ -448,6 +467,9 @@ class StatusMonitor(QMainWindow):
         euler_angles = self.robot_comm.get_euler_angles()
         prev_commands = self.robot_comm.get_previous_position_commands()
         odom_position, odom_velocity = self._get_latest_odometry()
+        robot_posture_state = self._get_latest_robot_posture_state()
+
+        self.robot_posture_value.setText(format_robot_posture_state(robot_posture_state))
         
         # Update joint status tab
         if joint_state["positions"].numel() > 0:

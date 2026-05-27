@@ -13,16 +13,19 @@ from mdp.commands import (
 from time import sleep, time
 import torch
 from utils.odometry_publisher import EstimatedOdometryPublisher
+from utils.robot_posture import RobotPostureState, TOPIC_ROBOT_POSTURE
 from utils.robot_logger import RobotLogger  # Import the logger
 from utils.status_monitor_commands import TOPIC_STATUS_MONITOR_COMMAND, decode_status_monitor_command
-from unitree_sdk2py.core.channel import ChannelSubscriber
-from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_
+from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber
+from unitree_sdk2py.idl.default import unitree_go_msg_dds__UwbSwitch_ as UwbSwitch_default
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import UwbSwitch_, WirelessController_
 
 class GO2HardwareEnvironment(Go2Environment):
     POSITION_CONTROL_POLICY_LAYOUT = "position_control_policy"
     VELOCITY_CONTROL_POLICY_LAYOUT = "velocity_control_policy"
     REMOTE_COMMAND_MAX_LINEAR_SPEED = 0.15
     REMOTE_COMMAND_MAX_ANGULAR_SPEED = 0.35
+    ROBOT_POSTURE_PUBLISH_PERIOD_SEC = 0.1
 
     @property
     def last_policy_output(self):
@@ -70,8 +73,17 @@ class GO2HardwareEnvironment(Go2Environment):
         self._pending_remote_command = None
         self._posture_motion_step_callback = None
         self._control_session_initialized = False
+        self._robot_posture_state = RobotPostureState.LAID_DOWN
+        self._last_robot_posture_publish_time = 0.0
         self._estimated_odometry_publisher = (
             EstimatedOdometryPublisher(device=self.device) if self.policy_mode == "velocity_control" else None
+        )
+
+        self.robot_posture_publisher: ChannelPublisher = ChannelPublisher(TOPIC_ROBOT_POSTURE, UwbSwitch_)
+        self.robot_posture_publisher.Init()
+        self._set_robot_posture_state(
+            RobotPostureState.STANDING if self.is_standing else RobotPostureState.LAID_DOWN,
+            force_publish=True,
         )
 
         self.status_monitor_command_subscriber: ChannelSubscriber = ChannelSubscriber(
@@ -102,6 +114,25 @@ class GO2HardwareEnvironment(Go2Environment):
         command_name = decode_status_monitor_command(msg.keys)
         if command_name is not None:
             self._pending_remote_command = command_name
+
+    def _write_robot_posture_state(self) -> None:
+        posture_msg = UwbSwitch_default()
+        posture_msg.enabled = int(self._robot_posture_state)
+        self.robot_posture_publisher.Write(posture_msg)
+
+    def _set_robot_posture_state(self, state: RobotPostureState, force_publish: bool = False) -> None:
+        if state != self._robot_posture_state:
+            self._robot_posture_state = state
+            force_publish = True
+        if force_publish:
+            self._write_robot_posture_state()
+            self._last_robot_posture_publish_time = time()
+
+    def _maybe_publish_robot_posture_state(self) -> None:
+        now = time()
+        if now - self._last_robot_posture_publish_time >= self.ROBOT_POSTURE_PUBLISH_PERIOD_SEC:
+            self._write_robot_posture_state()
+            self._last_robot_posture_publish_time = now
 
     def set_posture_motion_step_callback(self, callback) -> None:
         """Set an optional simulation-step callback used during stand-up and lay-down sequences."""
@@ -396,9 +427,11 @@ class GO2HardwareEnvironment(Go2Environment):
         """
         if self.is_standing:
             print("Robot is already standing")
+            self._set_robot_posture_state(RobotPostureState.STANDING, force_publish=True)
             return True
         
         print("Starting hardware stand-up sequence...")
+        self._set_robot_posture_state(RobotPostureState.TRANSITIONING_TO_STAND, force_publish=True)
         
         # Wait for robot communication to be ready
         wait_count = 0
@@ -423,6 +456,7 @@ class GO2HardwareEnvironment(Go2Environment):
             target_pos = self.compute_standup_position(progress)
             
             self._robot_comm.send_position_commands(target_pos, self.num_joints, kp=40.0, kd=1.0)
+            self._maybe_publish_robot_posture_state()
             
             # Call simulation step callback if provided
             if sim_step_callback:
@@ -441,6 +475,7 @@ class GO2HardwareEnvironment(Go2Environment):
         hold_start_time = time()
         while time() - hold_start_time < hold_time:
             self._robot_comm.send_position_commands(final_stand_position, self.num_joints, kp=40.0, kd=1.0)
+            self._maybe_publish_robot_posture_state()
             
             # Call simulation step callback if provided
             if sim_step_callback:
@@ -448,6 +483,7 @@ class GO2HardwareEnvironment(Go2Environment):
                 
             sleep(0.002)  # Continue at the same control rate
 
+        self._set_robot_posture_state(RobotPostureState.STANDING, force_publish=True)
         print("Stand-up sequence complete")
         return True
 
@@ -459,9 +495,11 @@ class GO2HardwareEnvironment(Go2Environment):
         """
         if self.is_laid_down:
             print("Robot is already laid down")
+            self._set_robot_posture_state(RobotPostureState.LAID_DOWN, force_publish=True)
             return True
         
         print("Starting hardware lay-down sequence...")
+        self._set_robot_posture_state(RobotPostureState.TRANSITIONING_TO_LAY, force_publish=True)
         
         # Get current joint positions
         joint_state = self._robot_comm.get_joint_state()
@@ -476,6 +514,7 @@ class GO2HardwareEnvironment(Go2Environment):
             target_pos = self.compute_laydown_position(progress)
             
             self._robot_comm.send_position_commands(target_pos, self.num_joints, kp=40.0, kd=1.0)
+            self._maybe_publish_robot_posture_state()
             
             # Call simulation step callback if provided
             if sim_step_callback:
@@ -485,10 +524,12 @@ class GO2HardwareEnvironment(Go2Environment):
 
         self.is_standing = False
         self.is_laid_down = True
+        self._set_robot_posture_state(RobotPostureState.LAID_DOWN, force_publish=True)
         print("Lay-down sequence complete")
         return True
 
     def step(self):
+        self._maybe_publish_robot_posture_state()
         self._process_pending_remote_command()
         if not self.robot_initialized:
             return False
