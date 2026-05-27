@@ -67,7 +67,7 @@ def default_config_file() -> Path | None:
     except Exception:
         pass
 
-    source_config_file = Path(__file__).resolve().parents[1] / "config" / DEFAULT_IMU_CONFIG_FILE
+    source_config_file = Path(__file__).resolve().parents[2] / "config" / DEFAULT_IMU_CONFIG_FILE
     if source_config_file.is_file():
         return source_config_file
     return None

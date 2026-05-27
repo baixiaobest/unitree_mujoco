@@ -8,28 +8,28 @@ ament_python_install_package(${PROJECT_NAME})
 
 install(
   PROGRAMS
-    go2_dds_ros2_bridge/clock_offset_bridge_node.py
+    go2_dds_ros2_bridge/nodes/clock_offset_bridge_node.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME clock_offset_bridge
 )
 
 install(
   PROGRAMS
-    go2_dds_ros2_bridge/odom_bridge_node.py
+    go2_dds_ros2_bridge/nodes/odom_bridge_node.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME odom_bridge
 )
 
 install(
   PROGRAMS
-    go2_dds_ros2_bridge/kiss_odom_node.py
+    go2_dds_ros2_bridge/nodes/kiss_odom_node.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME kiss_odom_node
 )
 
 install(
   PROGRAMS
-    go2_dds_ros2_bridge/imu_bridge_node.py
+    go2_dds_ros2_bridge/nodes/imu_bridge_node.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME imu_bridge
 )
@@ -43,14 +43,14 @@ install(
 
 install(
   PROGRAMS
-    go2_dds_ros2_bridge/cloud_experiment_node.py
+    go2_dds_ros2_bridge/nodes/cloud_experiment_node.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME cloud_experiment_node
 )
 
 install(
   PROGRAMS
-    go2_dds_ros2_bridge/imu_experiment_node.py
+    go2_dds_ros2_bridge/nodes/imu_experiment_node.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME imu_experiment_node
 )
