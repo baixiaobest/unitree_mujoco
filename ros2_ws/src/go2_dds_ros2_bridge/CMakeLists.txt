@@ -56,6 +56,13 @@ install(
 )
 
 install(
+  PROGRAMS
+    go2_dds_ros2_bridge/nodes/occupancy_2d_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME occupancy_2d
+)
+
+install(
   DIRECTORY
     launch
     config

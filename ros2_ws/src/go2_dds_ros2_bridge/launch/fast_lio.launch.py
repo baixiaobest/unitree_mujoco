@@ -32,6 +32,9 @@ def _make_runtime_nodes(context, *args, **kwargs):
     fast_lio_config = LaunchConfiguration("fast_lio_config").perform(context)
     cloud_topic = LaunchConfiguration("cloud_topic").perform(context)
     imu_topic = LaunchConfiguration("imu_topic").perform(context)
+    occupancy_config = LaunchConfiguration("occupancy_config").perform(context)
+    occupancy_cloud_topic = LaunchConfiguration("occupancy_cloud_topic").perform(context)
+    occupancy_output_topic = LaunchConfiguration("occupancy_output_topic").perform(context)
     rviz_config = LaunchConfiguration("rviz_config")
 
     # FAST-LIO expects the pose of the frame that the incoming points are expressed in.
@@ -104,6 +107,20 @@ def _make_runtime_nodes(context, *args, **kwargs):
             ],
         ),
         Node(
+            package="go2_dds_ros2_bridge",
+            executable="occupancy_2d",
+            name="occupancy_2d",
+            output="screen",
+            parameters=[
+                occupancy_config,
+                {
+                    "input_topic": occupancy_cloud_topic,
+                    "output_topic": occupancy_output_topic,
+                },
+            ],
+            condition=IfCondition(LaunchConfiguration("occupancy")),
+        ),
+        Node(
             package="rviz2",
             executable="rviz2",
             name="fast_lio_rviz",
@@ -147,6 +164,28 @@ def generate_launch_description() -> LaunchDescription:
                 "imu_topic",
                 default_value="/imu/data_fastlio",
                 description="Cadence-corrected IMU topic forwarded into FAST-LIO.",
+            ),
+            DeclareLaunchArgument(
+                "occupancy",
+                default_value="true",
+                description="Launch the rolling 2D occupancy mapper on /cloud_registered.",
+            ),
+            DeclareLaunchArgument(
+                "occupancy_config",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("go2_dds_ros2_bridge"), "config", "occupancy_2d.yaml"]
+                ),
+                description="Path to the 2D occupancy mapper parameter YAML file.",
+            ),
+            DeclareLaunchArgument(
+                "occupancy_cloud_topic",
+                default_value="/cloud_registered",
+                description="Registered point cloud topic consumed by the 2D occupancy mapper.",
+            ),
+            DeclareLaunchArgument(
+                "occupancy_output_topic",
+                default_value="/static_occupancy",
+                description="OccupancyGrid topic published by the 2D occupancy mapper.",
             ),
             DeclareLaunchArgument(
                 "rviz",

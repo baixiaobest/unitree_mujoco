@@ -1,0 +1,17 @@
+occupancy_2d:
+  ros__parameters:
+    input_topic: /cloud_registered
+    output_topic: /static_occupancy
+    map_frame: camera_init
+    base_frame: base_link
+    lidar_frame: utlidar_lidar
+    min_z_m: -0.2
+    max_z_m: 1.5
+    resolution_m: 0.1
+    width_m: 15.0
+    height_m: 15.0
+    hit_log_odds_increment: 0.85
+    miss_log_odds_decrement: 0.4
+    decay_factor: 0.999
+    min_log_odds: -4.0
+    max_log_odds: 4.0
