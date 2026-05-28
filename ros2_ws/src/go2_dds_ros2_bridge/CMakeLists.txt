@@ -22,13 +22,6 @@ install(
 
 install(
   PROGRAMS
-    go2_dds_ros2_bridge/nodes/kiss_odom_node.py
-  DESTINATION lib/${PROJECT_NAME}
-  RENAME kiss_odom_node
-)
-
-install(
-  PROGRAMS
     go2_dds_ros2_bridge/nodes/imu_bridge_node.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME imu_bridge

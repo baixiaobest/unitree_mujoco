@@ -3,23 +3,24 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GO2 DDS / ROS2 Fusion Architecture</title>
+  <title>GO2 DDS / ROS2 FAST-LIO Architecture</title>
   <style>
     :root {
-      --bg: #f3efe5;
-      --bg-accent: #e2d7c2;
-      --panel: rgba(255, 252, 246, 0.82);
-      --panel-strong: #fffaf0;
-      --ink: #1d2a32;
-      --muted: #566670;
-      --line: #9a8c74;
-      --hardware: #b85c38;
-      --sim: #2b6a6c;
-      --bridge: #355c7d;
-      --ros: #5f4b8b;
-      --tf: #d9a441;
-      --shadow: 0 18px 45px rgba(40, 34, 24, 0.12);
-      --radius: 22px;
+      --bg: #f6f0e3;
+      --bg-accent: #e8dac0;
+      --panel: rgba(255, 251, 243, 0.85);
+      --ink: #18242d;
+      --muted: #53646d;
+      --hardware: #be643e;
+      --sim: #2d6c67;
+      --bridge: #275778;
+      --mapping: #466d35;
+      --occupancy: #8b5e34;
+      --ros: #5c4c88;
+      --tf: #d7ab47;
+      --line: #8f816a;
+      --shadow: 0 20px 46px rgba(46, 37, 21, 0.12);
+      --radius: 24px;
     }
 
     * {
@@ -28,39 +29,56 @@
 
     body {
       margin: 0;
+      min-height: 100vh;
       font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
       color: var(--ink);
       background:
-        radial-gradient(circle at top left, rgba(255, 255, 255, 0.9), transparent 35%),
-        radial-gradient(circle at bottom right, rgba(184, 92, 56, 0.16), transparent 30%),
-        linear-gradient(135deg, var(--bg) 0%, #ebe2d1 48%, var(--bg-accent) 100%);
-      min-height: 100vh;
+        radial-gradient(circle at top left, rgba(255, 255, 255, 0.88), transparent 32%),
+        radial-gradient(circle at bottom right, rgba(70, 109, 53, 0.14), transparent 26%),
+        linear-gradient(135deg, var(--bg) 0%, #efe6d6 48%, var(--bg-accent) 100%);
     }
 
     .page {
-      max-width: 1480px;
+      max-width: 1440px;
       margin: 0 auto;
       padding: 28px 22px 60px;
     }
 
-    .hero {
+    .hero,
+    .section-grid {
       display: grid;
-      grid-template-columns: 1.15fr 0.85fr;
       gap: 22px;
-      align-items: stretch;
-      margin-bottom: 24px;
+      margin-bottom: 22px;
+    }
+
+    .hero {
+      grid-template-columns: 1.2fr 0.8fr;
+    }
+
+    .section-grid {
+      grid-template-columns: 1.35fr 0.65fr;
+    }
+
+    .section-grid.single {
+      grid-template-columns: 1fr;
     }
 
     .panel {
       background: var(--panel);
-      border: 1px solid rgba(154, 140, 116, 0.35);
+      border: 1px solid rgba(143, 129, 106, 0.34);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
       backdrop-filter: blur(10px);
     }
 
+    .hero-copy,
+    .legend,
+    .diagram-card,
+    .notes-card {
+      padding: 24px;
+    }
+
     .hero-copy {
-      padding: 28px 30px;
       position: relative;
       overflow: hidden;
     }
@@ -68,23 +86,23 @@
     .hero-copy::after {
       content: "";
       position: absolute;
-      inset: auto -40px -60px auto;
-      width: 220px;
-      height: 220px;
-      background: radial-gradient(circle, rgba(217, 164, 65, 0.2), transparent 70%);
+      inset: auto -40px -58px auto;
+      width: 230px;
+      height: 230px;
+      background: radial-gradient(circle, rgba(215, 171, 71, 0.2), transparent 68%);
       pointer-events: none;
     }
 
-    h1, h2, h3 {
+    h1, h2 {
       margin: 0;
       font-weight: 700;
       letter-spacing: 0.02em;
     }
 
     h1 {
-      font-size: clamp(2rem, 4vw, 3.5rem);
-      line-height: 0.95;
-      max-width: 12ch;
+      font-size: clamp(2rem, 4vw, 3.6rem);
+      line-height: 0.94;
+      max-width: 10ch;
     }
 
     h2 {
@@ -94,14 +112,14 @@
 
     p {
       margin: 0;
-      line-height: 1.55;
+      line-height: 1.58;
       color: var(--muted);
       font-size: 1rem;
     }
 
     .lede {
       margin-top: 16px;
-      max-width: 70ch;
+      max-width: 72ch;
       font-size: 1.05rem;
     }
 
@@ -113,26 +131,25 @@
     }
 
     .chip {
-      padding: 8px 12px;
+      padding: 9px 13px;
       border-radius: 999px;
-      background: rgba(255, 250, 240, 0.95);
-      border: 1px solid rgba(154, 140, 116, 0.45);
-      color: var(--ink);
+      border: 1px solid rgba(143, 129, 106, 0.4);
+      background: rgba(255, 251, 243, 0.96);
       font-size: 0.94rem;
+      color: var(--ink);
       white-space: nowrap;
     }
 
     .legend {
-      padding: 24px 24px 18px;
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px 16px;
+      gap: 12px 14px;
       align-content: start;
     }
 
     .legend-item {
       display: flex;
-      gap: 12px;
+      gap: 11px;
       align-items: center;
       color: var(--muted);
       font-size: 0.95rem;
@@ -141,42 +158,225 @@
     .swatch {
       width: 18px;
       height: 18px;
-      border-radius: 5px;
+      border-radius: 6px;
+      border: 1px solid rgba(24, 36, 45, 0.16);
       flex: 0 0 auto;
-      border: 1px solid rgba(29, 42, 50, 0.14);
-    }
-
-    .section-grid {
-      display: grid;
-      grid-template-columns: 1.35fr 0.65fr;
-      gap: 22px;
-      margin-bottom: 22px;
-    }
-
-    .section-grid.single {
-      grid-template-columns: 1fr;
-    }
-
-    .diagram-card,
-    .notes-card {
-      padding: 22px;
     }
 
     .notes-card ul {
       margin: 14px 0 0;
       padding-left: 18px;
       color: var(--muted);
-      line-height: 1.55;
+      line-height: 1.58;
     }
 
     .notes-card li + li {
-      margin-top: 9px;
+      margin-top: 10px;
     }
 
     .caption {
       margin-top: 10px;
-      font-size: 0.95rem;
       color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .runtime-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .runtime-item {
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(255, 251, 243, 0.92);
+      border: 1px solid rgba(143, 129, 106, 0.24);
+      transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
+    }
+
+    .runtime-button {
+      width: 100%;
+      text-align: left;
+      color: inherit;
+      font: inherit;
+      cursor: pointer;
+      appearance: none;
+      -webkit-appearance: none;
+    }
+
+    .runtime-button:hover,
+    .runtime-button:focus-visible {
+      transform: translateY(-2px);
+      box-shadow: 0 14px 30px rgba(46, 37, 21, 0.09);
+      border-color: rgba(39, 87, 120, 0.42);
+      outline: none;
+    }
+
+    .runtime-button strong::after {
+      content: "Open details";
+      float: right;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--bridge);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .runtime-item strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--ink);
+      font-size: 1.02rem;
+    }
+
+    .details-trigger-copy {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .node-dialog {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 28px;
+      background: rgba(24, 36, 45, 0.52);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 180ms ease;
+      z-index: 20;
+    }
+
+    .node-dialog.is-open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .node-dialog-panel {
+      width: min(980px, 100%);
+      max-height: min(88vh, 920px);
+      overflow: auto;
+      background: rgba(255, 251, 243, 0.98);
+      border-radius: 26px;
+      border: 1px solid rgba(143, 129, 106, 0.32);
+      box-shadow: 0 30px 80px rgba(24, 36, 45, 0.24);
+      padding: 26px;
+    }
+
+    .node-dialog-topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: flex-start;
+      margin-bottom: 18px;
+    }
+
+    .node-dialog-kicker {
+      margin-bottom: 10px;
+      color: var(--bridge);
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .node-dialog-title {
+      font-size: clamp(1.6rem, 2.2vw, 2.4rem);
+      line-height: 1;
+      margin-bottom: 10px;
+    }
+
+    .node-dialog-subtitle {
+      max-width: 70ch;
+    }
+
+    .node-dialog-close {
+      border: 0;
+      border-radius: 999px;
+      background: rgba(39, 87, 120, 0.1);
+      color: var(--ink);
+      font: inherit;
+      font-weight: 700;
+      padding: 10px 14px;
+      cursor: pointer;
+      transition: background 140ms ease;
+    }
+
+    .node-dialog-close:hover,
+    .node-dialog-close:focus-visible {
+      background: rgba(39, 87, 120, 0.18);
+      outline: none;
+    }
+
+    .node-dialog-grid {
+      display: grid;
+      grid-template-columns: 0.9fr 1.1fr;
+      gap: 18px;
+      margin-top: 18px;
+    }
+
+    .detail-card {
+      padding: 18px;
+      border-radius: 20px;
+      border: 1px solid rgba(143, 129, 106, 0.22);
+      background: rgba(255, 251, 243, 0.92);
+    }
+
+    .detail-card h3 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+      letter-spacing: 0.02em;
+    }
+
+    .detail-list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      line-height: 1.56;
+    }
+
+    .detail-list li + li {
+      margin-top: 8px;
+    }
+
+    .detail-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 14px 0 0;
+    }
+
+    .detail-pill {
+      padding: 7px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(143, 129, 106, 0.28);
+      background: rgba(255, 251, 243, 0.94);
+      color: var(--ink);
+      font-size: 0.88rem;
+    }
+
+    .detail-code {
+      margin-top: 14px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: #f7f0e5;
+      border: 1px solid rgba(143, 129, 106, 0.24);
+      color: #32424c;
+      line-height: 1.56;
+      white-space: pre-wrap;
+      font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 0.9rem;
+    }
+
+    .detail-empty {
+      padding: 22px;
+      border-radius: 20px;
+      border: 1px dashed rgba(143, 129, 106, 0.4);
+      color: var(--muted);
+      background: rgba(255, 251, 243, 0.65);
     }
 
     svg {
@@ -186,23 +386,25 @@
       margin-top: 14px;
     }
 
-    .footer {
-      padding: 18px 22px;
-      background: rgba(255, 250, 240, 0.72);
-      border-radius: 18px;
-      border: 1px solid rgba(154, 140, 116, 0.35);
-      color: var(--muted);
-      font-size: 0.95rem;
-    }
-
     .mono {
       font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
       font-size: 0.92em;
     }
 
+    .footer {
+      padding: 18px 22px;
+      border-radius: 18px;
+      border: 1px solid rgba(143, 129, 106, 0.3);
+      background: rgba(255, 251, 243, 0.76);
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
     @media (max-width: 1120px) {
       .hero,
-      .section-grid {
+      .section-grid,
+      .runtime-list,
+      .node-dialog-grid {
         grid-template-columns: 1fr;
       }
     }
@@ -222,6 +424,22 @@
       .legend {
         grid-template-columns: 1fr;
       }
+
+      .chip {
+        white-space: normal;
+      }
+
+      .node-dialog {
+        padding: 14px;
+      }
+
+      .node-dialog-panel {
+        padding: 18px;
+      }
+
+      .node-dialog-topbar {
+        flex-direction: column;
+      }
     }
   </style>
 </head>
@@ -229,396 +447,494 @@
   <main class="page">
     <section class="hero">
       <div class="panel hero-copy">
-        <h1>GO2 DDS / ROS2 Fusion Architecture</h1>
+        <h1>GO2 DDS / ROS2 FAST-LIO Architecture</h1>
         <p class="lede">
-          This page shows how the physical GO2, the <span class="mono">simulate_python</span> runtime,
-          and the ROS2 bridge package fit together in the current fusion setup. The main paths are the raw DDS transport,
-          the bridge nodes that translate DDS into ROS2 topics, the KISS-ICP odometry branch, and the local EKF that owns the runtime frame tree.
+          This page reflects the current bridge design after removing the KISS-ICP and EKF fusion path.
+          The active launch is now a direct DDS-to-FAST-LIO pipeline with optional rolling 2D occupancy mapping.
+          Hardware and <span class="mono">simulate_python</span> remain symmetric at the transport layer: both publish the same DDS contract, and the bridge turns that into corrected ROS topics, static transforms, FAST-LIO inputs, and an optional occupancy grid.
         </p>
         <div class="chips">
-          <div class="chip">Recommended entry point: <span class="mono">ekf_fusion.launch.py</span></div>
-          <div class="chip">Raw DDS side: <span class="mono">run_mode</span> plus optional <span class="mono">dds_domain_id</span> / <span class="mono">dds_interface</span></div>
-          <div class="chip">Raw topics: <span class="mono">rt/odom</span>, <span class="mono">rt/utlidar/cloud</span></div>
-          <div class="chip">ROS2 outputs: <span class="mono">/odom</span>, <span class="mono">/utlidar/time_corrected/cloud</span>, <span class="mono">/kiss/odom</span>, <span class="mono">/odometry/filtered</span></div>
-          <div class="chip">KISS input: accumulated clouds, header-shifted point time, periodic reset at 100 registrations</div>
+          <div class="chip">Recommended entry point: <span class="mono">fast_lio.launch.py</span></div>
+          <div class="chip">Raw DDS controls: <span class="mono">run_mode</span>, optional <span class="mono">dds_domain_id</span>, optional <span class="mono">dds_interface</span></div>
+          <div class="chip">Bridge handoff: <span class="mono">/utlidar/time_corrected/cloud</span> and <span class="mono">/imu/data_fastlio</span></div>
+          <div class="chip">Mapping outputs: FAST-LIO registered cloud in <span class="mono">camera_init</span>, optional <span class="mono">/static_occupancy</span></div>
+          <div class="chip">No KISS-ICP branch, no EKF fusion, no robot_localization dependency in the active path</div>
         </div>
       </div>
 
       <aside class="panel legend">
-        <div class="legend-item"><span class="swatch" style="background:#b85c38;"></span> Physical robot, onboard sensors, Ethernet link</div>
-        <div class="legend-item"><span class="swatch" style="background:#2b6a6c;"></span> simulate_python scripts and MuJoCo-side runtime</div>
-        <div class="legend-item"><span class="swatch" style="background:#355c7d;"></span> go2_dds_ros2_bridge ROS2 executables</div>
-        <div class="legend-item"><span class="swatch" style="background:#5f4b8b;"></span> ROS2 topics consumed by RViz, SLAM, or other ROS tools</div>
-        <div class="legend-item"><span class="swatch" style="background:#d9a441;"></span> TF ownership in the current fusion launch</div>
-        <div class="legend-item"><span class="swatch" style="background:#fffaf0;"></span> Browser-only document: no build step, no external assets</div>
+        <div class="legend-item"><span class="swatch" style="background:#be643e;"></span> Physical GO2 and onboard DDS publisher</div>
+        <div class="legend-item"><span class="swatch" style="background:#2d6c67;"></span> <span class="mono">simulate_python</span> DDS publisher path</div>
+        <div class="legend-item"><span class="swatch" style="background:#275778;"></span> Bridge executables in <span class="mono">go2_dds_ros2_bridge</span></div>
+        <div class="legend-item"><span class="swatch" style="background:#466d35;"></span> FAST-LIO mapping stage</div>
+        <div class="legend-item"><span class="swatch" style="background:#8b5e34;"></span> Rolling occupancy grid stage</div>
+        <div class="legend-item"><span class="swatch" style="background:#5c4c88;"></span> ROS2 topics and TF used by tools</div>
       </aside>
     </section>
 
     <section class="section-grid single">
       <div class="panel diagram-card">
-        <h2>1. End-to-End Map</h2>
-        <svg viewBox="0 0 1240 680" role="img" aria-label="End-to-end GO2 DDS and ROS2 fusion architecture diagram">
+        <h2>1. End-to-End Runtime</h2>
+        <svg viewBox="0 0 1260 720" role="img" aria-label="Current GO2 DDS to ROS2 FAST-LIO architecture">
           <defs>
-            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#6c5d4b"></path>
+            <marker id="arrow-main" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#6c5b48"></path>
             </marker>
             <filter id="softShadow" x="-10%" y="-10%" width="120%" height="120%">
-              <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="rgba(29,42,50,0.14)"></feDropShadow>
+              <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="rgba(24,36,45,0.16)"></feDropShadow>
             </filter>
           </defs>
 
-          <rect x="26" y="28" width="1188" height="624" rx="28" fill="rgba(255,250,240,0.55)" stroke="#c1b39a"></rect>
+          <rect x="26" y="28" width="1208" height="664" rx="28" fill="rgba(255,251,243,0.58)" stroke="#c1b198"></rect>
 
-          <text x="60" y="70" font-size="27" font-weight="700" fill="#1d2a32">Two raw DDS sources feed one ROS2 fusion launch</text>
-          <text x="60" y="102" font-size="17" fill="#566670">Both hardware and simulation publish the same DDS contract. The fusion launch turns that into ROS topics, one static LiDAR extrinsic, and one fused odom frame.</text>
+          <text x="60" y="72" font-size="28" font-weight="700" fill="#18242d">Two DDS producers, one mapping launch</text>
+          <text x="60" y="104" font-size="17" fill="#53646d">The active launch is a direct corrected-cloud and bridged-IMU feed into FAST-LIO, followed by optional occupancy mapping.</text>
 
-          <rect x="60" y="145" width="300" height="150" rx="24" fill="#b85c38" opacity="0.94" filter="url(#softShadow)"></rect>
-          <text x="84" y="184" font-size="28" font-weight="700" fill="#fffaf0">Physical GO2</text>
-          <text x="84" y="218" font-size="18" fill="#fffaf0">Onboard LiDAR and state estimator</text>
-          <text x="84" y="250" font-size="18" fill="#fffaf0">Ethernet DDS on domain 0</text>
-          <text x="84" y="280" font-size="18" fill="#fffaf0">Interface overridable at launch</text>
+          <rect x="60" y="150" width="286" height="150" rx="24" fill="#be643e" opacity="0.95" filter="url(#softShadow)"></rect>
+          <text x="84" y="191" font-size="28" font-weight="700" fill="#fffaf3">Physical GO2</text>
+          <text x="84" y="225" font-size="18" fill="#fffaf3">DDS publishes raw LiDAR and IMU-side state</text>
+          <text x="84" y="253" font-size="18" fill="#fffaf3">default hardware transport settings</text>
+          <text x="84" y="281" font-size="18" fill="#fffaf3">launch can override domain and interface</text>
 
-          <rect x="60" y="355" width="300" height="150" rx="24" fill="#2b6a6c" opacity="0.94" filter="url(#softShadow)"></rect>
-          <text x="84" y="394" font-size="28" font-weight="700" fill="#fffaf0">simulate_python</text>
-          <text x="84" y="426" font-size="18" fill="#fffaf0">unitree_mujoco.py</text>
-          <text x="84" y="452" font-size="18" fill="#fffaf0">and hardware env</text>
-          <text x="84" y="478" font-size="18" fill="#fffaf0">EstimatedOdometryPublisher</text>
-          <text x="84" y="488" font-size="16" fill="#fffaf0">DDS domain/interface can differ from ROS domain</text>
+          <rect x="60" y="374" width="286" height="150" rx="24" fill="#2d6c67" opacity="0.95" filter="url(#softShadow)"></rect>
+          <text x="84" y="415" font-size="28" font-weight="700" fill="#fffaf3">simulate_python</text>
+          <text x="84" y="449" font-size="18" fill="#fffaf3">same DDS topic contract</text>
+          <text x="84" y="477" font-size="18" fill="#fffaf3">different producer, same bridge entry points</text>
+          <text x="84" y="505" font-size="18" fill="#fffaf3">no Python import coupling to ROS2 package</text>
 
-          <rect x="420" y="88" width="390" height="500" rx="28" fill="#355c7d" opacity="0.96" filter="url(#softShadow)"></rect>
-          <text x="448" y="131" font-size="30" font-weight="700" fill="#fffaf0">ekf_fusion.launch.py</text>
+          <rect x="410" y="88" width="408" height="540" rx="28" fill="#275778" opacity="0.97" filter="url(#softShadow)"></rect>
+          <text x="438" y="132" font-size="31" font-weight="700" fill="#fffaf3">fast_lio.launch.py</text>
 
-          <rect x="448" y="160" width="334" height="70" rx="18" fill="#fffaf0"></rect>
-          <text x="470" y="188" font-size="22" font-weight="700" fill="#355c7d">clock_offset_bridge</text>
-          <text x="470" y="209" font-size="13" fill="#566670">DDS rt/utlidar/cloud -&gt; ROS /utlidar/time_corrected/cloud</text>
-          <text x="470" y="225" font-size="13" fill="#566670">publishes offset topic, TF disabled in fusion launch</text>
+          <rect x="438" y="162" width="352" height="72" rx="18" fill="#fffaf3"></rect>
+          <text x="458" y="191" font-size="22" font-weight="700" fill="#275778">clock_offset_bridge</text>
+          <text x="458" y="212" font-size="13" fill="#53646d">DDS raw LiDAR -&gt; ROS <tspan class="mono">/utlidar/time_corrected/cloud</tspan></text>
+          <text x="458" y="228" font-size="13" fill="#53646d">preserves LiDAR frame id, publishes TF only when run standalone</text>
 
-          <rect x="448" y="244" width="334" height="70" rx="18" fill="#fffaf0"></rect>
-          <text x="470" y="272" font-size="22" font-weight="700" fill="#355c7d">odom_bridge</text>
-          <text x="470" y="293" font-size="13" fill="#566670">DDS rt/odom -&gt; ROS /odom with configured diagonal covariance</text>
-          <text x="470" y="309" font-size="13" fill="#566670">topic only in fusion launch, no TF publication</text>
+          <rect x="438" y="250" width="352" height="72" rx="18" fill="#fffaf3"></rect>
+          <text x="458" y="279" font-size="22" font-weight="700" fill="#275778">imu_bridge</text>
+          <text x="458" y="300" font-size="13" fill="#53646d">bridges IMU-side data to ROS <tspan class="mono">/imu/data_fastlio</tspan> in frame <tspan class="mono">body</tspan></text>
+          <text x="458" y="316" font-size="13" fill="#53646d">uses receive-time stamping until an upstream absolute IMU clock exists</text>
 
-          <rect x="448" y="328" width="334" height="88" rx="18" fill="#fffaf0"></rect>
-          <text x="470" y="356" font-size="22" font-weight="700" fill="#355c7d">kiss_odom_node</text>
-          <text x="470" y="377" font-size="13" fill="#566670">accumulates corrected clouds, shifts point time by header</text>
-          <text x="470" y="393" font-size="13" fill="#566670">publishes base_link-origin /kiss/odom, resets every 100 registrations</text>
-          <text x="470" y="409" font-size="13" fill="#566670">topic only in fusion launch, no TF publication</text>
+          <rect x="438" y="338" width="352" height="84" rx="18" fill="#fffaf3"></rect>
+          <text x="458" y="367" font-size="22" font-weight="700" fill="#275778">static_transform_publisher x2</text>
+          <text x="458" y="388" font-size="13" fill="#53646d"><tspan class="mono">body -&gt; base_link</tspan> for FAST-LIO body alignment</text>
+          <text x="458" y="404" font-size="13" fill="#53646d"><tspan class="mono">base_link -&gt; utlidar_lidar</tspan> for fixed LiDAR extrinsics</text>
 
-          <rect x="448" y="430" width="334" height="70" rx="18" fill="#fffaf0"></rect>
-          <text x="470" y="458" font-size="22" font-weight="700" fill="#355c7d">static_transform_publisher</text>
-          <text x="470" y="479" font-size="13" fill="#566670">fixed LiDAR extrinsic</text>
-          <text x="470" y="495" font-size="13" fill="#566670">TF base_link-&gt;utlidar_lidar</text>
+          <rect x="438" y="438" width="352" height="86" rx="18" fill="#eaf2e2"></rect>
+          <text x="458" y="467" font-size="22" font-weight="700" fill="#466d35">fastlio_mapping</text>
+          <text x="458" y="488" font-size="13" fill="#53646d">consumes corrected cloud plus bridged IMU</text>
+          <text x="458" y="504" font-size="13" fill="#53646d">uses <tspan class="mono">lidar_pose_in_imu_frame()</tspan> because the cloud remains in <tspan class="mono">utlidar_lidar</tspan></text>
 
-          <rect x="448" y="514" width="334" height="58" rx="18" fill="#fffaf0"></rect>
-          <text x="470" y="541" font-size="21" font-weight="700" fill="#355c7d">robot_localization/ekf_node</text>
-          <text x="470" y="561" font-size="13" fill="#566670">twist from /odom plus pose from /kiss/odom -&gt; /odometry/filtered and TF odom-&gt;base_link</text>
+          <rect x="438" y="540" width="352" height="58" rx="18" fill="#f0e6da"></rect>
+          <text x="458" y="568" font-size="22" font-weight="700" fill="#8b5e34">occupancy_2d</text>
+          <text x="458" y="589" font-size="13" fill="#53646d">optional rolling log-odds occupancy grid on <tspan class="mono">/cloud_registered</tspan></text>
 
-          <rect x="890" y="142" width="285" height="368" rx="28" fill="#5f4b8b" opacity="0.96" filter="url(#softShadow)"></rect>
-          <text x="918" y="185" font-size="29" font-weight="700" fill="#fffaf0">ROS2 Graph</text>
-          <text x="918" y="221" font-size="18" fill="#fffaf0">RViz</text>
-          <text x="918" y="252" font-size="18" fill="#fffaf0">bagging / debug tools</text>
-          <text x="918" y="283" font-size="18" fill="#fffaf0">localization consumers</text>
-          <text x="918" y="324" font-size="18" fill="#fffaf0">/odom</text>
-          <text x="918" y="355" font-size="18" fill="#fffaf0">/utlidar/time_corrected/cloud</text>
-          <text x="918" y="386" font-size="18" fill="#fffaf0">/kiss/odom</text>
-          <text x="918" y="417" font-size="18" fill="#fffaf0">/odometry/filtered</text>
-          <text x="918" y="448" font-size="18" fill="#fffaf0">/go2_clock_offset_sec</text>
-          <text x="918" y="479" font-size="18" fill="#fffaf0">/tf</text>
+          <rect x="890" y="140" width="286" height="432" rx="28" fill="#5c4c88" opacity="0.97" filter="url(#softShadow)"></rect>
+          <text x="918" y="184" font-size="30" font-weight="700" fill="#fffaf3">ROS2 Surface</text>
+          <text x="918" y="222" font-size="18" fill="#fffaf3">RViz and bagging tools</text>
+          <text x="918" y="254" font-size="18" fill="#fffaf3"><tspan class="mono">/utlidar/time_corrected/cloud</tspan></text>
+          <text x="918" y="286" font-size="18" fill="#fffaf3"><tspan class="mono">/imu/data_fastlio</tspan></text>
+          <text x="918" y="318" font-size="18" fill="#fffaf3"><tspan class="mono">/cloud_registered</tspan></text>
+          <text x="918" y="350" font-size="18" fill="#fffaf3">FAST-LIO odometry and TF</text>
+          <text x="918" y="382" font-size="18" fill="#fffaf3"><tspan class="mono">/static_occupancy</tspan> when enabled</text>
+          <text x="918" y="414" font-size="18" fill="#fffaf3"><tspan class="mono">/go2_clock_offset_sec</tspan></text>
+          <text x="918" y="446" font-size="18" fill="#fffaf3">static TF for body and LiDAR</text>
+          <text x="918" y="478" font-size="18" fill="#fffaf3">no KISS topics</text>
+          <text x="918" y="510" font-size="18" fill="#fffaf3">no EKF fusion topics</text>
 
-          <line x1="360" y1="220" x2="420" y2="195" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
-          <text x="376" y="205" font-size="16" fill="#566670">raw LiDAR</text>
+          <line x1="346" y1="226" x2="410" y2="198" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></line>
+          <line x1="346" y1="450" x2="410" y2="286" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></line>
+          <text x="356" y="210" font-size="16" fill="#53646d">raw DDS LiDAR</text>
+          <text x="350" y="408" font-size="16" fill="#53646d">raw DDS bridge modes</text>
 
-          <line x1="360" y1="410" x2="420" y2="279" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
-          <text x="364" y="374" font-size="16" fill="#566670">rt/odom</text>
+          <path d="M 614 234 C 614 246 614 248 614 250" fill="none" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></path>
+          <path d="M 614 322 C 614 330 614 332 614 338" fill="none" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></path>
+          <path d="M 614 422 C 614 430 614 432 614 438" fill="none" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></path>
+          <path d="M 614 524 C 614 532 614 534 614 540" fill="none" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></path>
 
-          <line x1="782" y1="195" x2="890" y2="355" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
-          <line x1="782" y1="279" x2="890" y2="324" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
-          <line x1="782" y1="372" x2="890" y2="386" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
-          <line x1="782" y1="465" x2="890" y2="479" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
-          <line x1="782" y1="543" x2="890" y2="417" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></line>
-
-          <path d="M 615 230 C 615 260 615 282 615 328" fill="none" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></path>
-          <path d="M 615 314 C 615 338 615 348 615 430" fill="none" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></path>
-          <path d="M 615 416 C 615 450 615 478 615 514" fill="none" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow)"></path>
-          <text x="638" y="322" font-size="16" fill="#566670">corrected cloud feeds KISS, KISS and estimator feed the EKF</text>
+          <line x1="790" y1="198" x2="890" y2="262" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></line>
+          <line x1="790" y1="286" x2="890" y2="286" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></line>
+          <line x1="790" y1="480" x2="890" y2="334" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></line>
+          <line x1="790" y1="568" x2="890" y2="382" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></line>
         </svg>
         <p class="caption">
-          The package does not import <span class="mono">simulate_python</span>. Both sides stay decoupled and meet only through shared DDS topics. In the recommended launch, the bridge nodes publish ROS topics, the static publisher owns the LiDAR extrinsic, and the EKF publishes the only dynamic odometry transform.
+          The current launch is narrower and more explicit than the old fusion stack: correct the LiDAR clock, bridge the IMU, publish fixed transforms, run FAST-LIO, and optionally derive a rolling occupancy grid from the registered cloud.
         </p>
       </div>
     </section>
 
     <section class="section-grid">
       <div class="panel diagram-card">
-        <h2>2. Hardware Path: GO2 to ROS2</h2>
-        <svg viewBox="0 0 980 520" role="img" aria-label="Hardware data flow from GO2 to ROS2">
-          <defs>
-            <marker id="arrow-hw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#6c5d4b"></path>
-            </marker>
-          </defs>
-
-          <rect x="26" y="24" width="928" height="472" rx="28" fill="#fffaf0" stroke="#c1b39a"></rect>
-
-          <rect x="58" y="86" width="224" height="120" rx="22" fill="#b85c38"></rect>
-          <text x="76" y="126" font-size="23" font-weight="700" fill="#fffaf0">GO2 onboard DDS</text>
-          <text x="82" y="158" font-size="17" fill="#fffaf0">rt/utlidar/cloud</text>
-          <text x="82" y="184" font-size="17" fill="#fffaf0">rt/odom</text>
-
-          <rect x="58" y="300" width="224" height="120" rx="22" fill="#f2dece" stroke="#b85c38" stroke-width="2"></rect>
-          <text x="82" y="340" font-size="25" font-weight="700" fill="#7c4128">Physical link</text>
-          <text x="82" y="372" font-size="17" fill="#7c4128">Ethernet cable</text>
-          <text x="82" y="398" font-size="17" fill="#7c4128">Host interface enp108s0</text>
-
-          <rect x="378" y="66" width="256" height="160" rx="22" fill="#355c7d"></rect>
-          <text x="402" y="108" font-size="25" font-weight="700" fill="#fffaf0">clock_offset_bridge</text>
-          <text x="402" y="140" font-size="17" fill="#fffaf0">reads rt/utlidar/cloud</text>
-          <text x="402" y="166" font-size="17" fill="#fffaf0">estimates clock offset</text>
-          <text x="402" y="188" font-size="15" fill="#fffaf0">publishes corrected cloud</text>
-          <text x="402" y="210" font-size="15" fill="#fffaf0">TF optional standalone, disabled in fusion launch</text>
-
-          <rect x="378" y="276" width="256" height="160" rx="22" fill="#355c7d"></rect>
-          <text x="402" y="318" font-size="25" font-weight="700" fill="#fffaf0">odom_bridge</text>
-          <text x="402" y="350" font-size="17" fill="#fffaf0">reads rt/odom</text>
-          <text x="402" y="376" font-size="17" fill="#fffaf0">converts DDS Odometry</text>
-          <text x="402" y="398" font-size="15" fill="#fffaf0">publishes /odom</text>
-          <text x="402" y="420" font-size="15" fill="#fffaf0">no TF in fusion launch</text>
-
-          <rect x="728" y="146" width="186" height="210" rx="22" fill="#5f4b8b"></rect>
-          <text x="752" y="186" font-size="25" font-weight="700" fill="#fffaf0">ROS2</text>
-          <text x="752" y="218" font-size="14" fill="#fffaf0">/utlidar/</text>
-          <text x="752" y="238" font-size="14" fill="#fffaf0">time_corrected/cloud</text>
-          <text x="748" y="262" font-size="16" fill="#fffaf0">/go2_clock_offset_sec</text>
-          <text x="752" y="292" font-size="17" fill="#fffaf0">/odom</text>
-          <text x="752" y="320" font-size="17" fill="#fffaf0">/odometry/filtered</text>
-          <text x="752" y="346" font-size="17" fill="#fffaf0">/tf comes from fusion launch ownership</text>
-
-          <line x1="282" y1="146" x2="378" y2="146" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-hw)"></line>
-          <text x="292" y="128" font-size="16" fill="#566670">domain 0 DDS</text>
-
-          <line x1="282" y1="360" x2="378" y2="360" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-hw)"></line>
-          <text x="292" y="342" font-size="16" fill="#566670">rt/odom</text>
-
-          <line x1="634" y1="146" x2="728" y2="196" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-hw)"></line>
-          <line x1="634" y1="356" x2="728" y2="286" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-hw)"></line>
-        </svg>
+        <h2>2. Active Runtime Nodes</h2>
+        <div class="runtime-list">
+          <button type="button" class="runtime-item runtime-button" data-node-id="clock_offset_bridge">
+            <strong>clock_offset_bridge</strong>
+            Corrects ROS header time for the LiDAR cloud and republishes on <span class="mono">/utlidar/time_corrected/cloud</span>. The corrected cloud still carries the LiDAR frame id.
+          </button>
+          <button type="button" class="runtime-item runtime-button" data-node-id="imu_bridge">
+            <strong>imu_bridge</strong>
+            Supplies FAST-LIO with ROS IMU messages on <span class="mono">/imu/data_fastlio</span> in frame <span class="mono">body</span>.
+          </button>
+          <button type="button" class="runtime-item runtime-button" data-node-id="static_transform_publishers">
+            <strong>static_transform_publisher</strong>
+            Publishes <span class="mono">body -&gt; base_link</span> and <span class="mono">base_link -&gt; utlidar_lidar</span> so the mapping stack can resolve the fixed geometry unambiguously.
+          </button>
+          <button type="button" class="runtime-item runtime-button" data-node-id="fastlio_mapping">
+            <strong>fastlio_mapping</strong>
+            Consumes the corrected cloud and bridged IMU, using the physical LiDAR pose in the IMU frame instead of a transformed cloud.
+          </button>
+          <button type="button" class="runtime-item runtime-button" data-node-id="occupancy_2d">
+            <strong>occupancy_2d</strong>
+            Optional rolling occupancy map in <span class="mono">camera_init</span>, using z filtering plus log-odds fusion and decay.
+          </button>
+          <button type="button" class="runtime-item runtime-button" data-node-id="rviz2">
+            <strong>rviz2</strong>
+            Optional visualization. It is not part of the data path and can be disabled without changing runtime behavior.
+          </button>
+        </div>
+        <p class="details-trigger-copy">Click any runtime node card to open a technical detail sheet with launch wiring, key parameters, code-reading landmarks, and implementation-specific caveats.</p>
         <p class="caption">
-          On hardware, the ROS2 bridge listens to the same Unitree DDS traffic the robot publishes on the wired Ethernet path.
+          The package still ships standalone utilities such as <span class="mono">odom_bridge</span>, but the main launch no longer routes odometry through KISS-ICP or <span class="mono">robot_localization</span>.
         </p>
       </div>
 
       <aside class="panel notes-card">
-        <h2>What matters here</h2>
+        <h2>What changed</h2>
         <ul>
-          <li>The raw DDS side still has hardware defaults, but the fusion launch can override them with <span class="mono">dds_domain_id</span> and <span class="mono">dds_interface</span>.</li>
-          <li><span class="mono">clock_offset_bridge</span> is the LiDAR cleanup step. It aligns timestamps to local ROS time before anything downstream uses the cloud.</li>
-          <li><span class="mono">odom_bridge</span> is the low-friction path for robot odometry into standard ROS2 tools.</li>
-          <li>In the current fusion runtime, <span class="mono">base_link -> utlidar_lidar</span> comes from <span class="mono">static_transform_publisher</span>, not from <span class="mono">clock_offset_bridge</span>.</li>
+          <li>The recommended entry point is now <span class="mono">fast_lio.launch.py</span>, not a fusion launch.</li>
+          <li>KISS-ICP is no longer installed or documented as part of the active package path.</li>
+          <li><span class="mono">robot_localization</span> is no longer part of the package runtime dependency set.</li>
+          <li>Occupancy mapping is now the downstream consumer of the FAST-LIO registered cloud inside this package.</li>
+          <li>The design is closer to a pure transport-and-mapping stack: bridge raw DDS, establish fixed geometry, then map.</li>
         </ul>
       </aside>
     </section>
 
     <section class="section-grid">
       <div class="panel diagram-card">
-        <h2>3. Simulation Path: simulate_python to ROS2</h2>
-        <svg viewBox="0 0 980 560" role="img" aria-label="Simulation data flow from simulate_python to ROS2 bridge">
-          <defs>
-            <marker id="arrow-sim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#6c5d4b"></path>
-            </marker>
-          </defs>
-
-          <rect x="24" y="24" width="932" height="512" rx="28" fill="#fffaf0" stroke="#c1b39a"></rect>
-
-          <rect x="54" y="68" width="286" height="164" rx="22" fill="#2b6a6c"></rect>
-          <text x="74" y="110" font-size="24" font-weight="700" fill="#fffaf0">simulate_python/scripts</text>
-          <text x="80" y="142" font-size="17" fill="#fffaf0">unitree_mujoco.py</text>
-          <text x="80" y="168" font-size="17" fill="#fffaf0">control_robot_hardware.py</text>
-          <text x="80" y="194" font-size="17" fill="#fffaf0">control_robot_mujoco.py</text>
-
-          <rect x="54" y="280" width="286" height="180" rx="22" fill="#d8efed" stroke="#2b6a6c" stroke-width="2"></rect>
-          <text x="80" y="320" font-size="25" font-weight="700" fill="#1f5051">simulate_python internals</text>
-          <text x="80" y="352" font-size="17" fill="#1f5051">GO2HardwareEnvironment</text>
-          <text x="80" y="378" font-size="17" fill="#1f5051">EstimatedOdometryPublisher</text>
-          <text x="80" y="404" font-size="17" fill="#1f5051">publishes DDS rt/odom</text>
-          <text x="80" y="430" font-size="17" fill="#1f5051">uses Unitree SDK channels directly</text>
-
-          <rect x="412" y="176" width="172" height="176" rx="22" fill="#2b6a6c"></rect>
-          <text x="440" y="220" font-size="25" font-weight="700" fill="#fffaf0">DDS bus</text>
-          <text x="440" y="254" font-size="17" fill="#fffaf0">domain 1</text>
-          <text x="440" y="282" font-size="17" fill="#fffaf0">interface wlo1</text>
-          <text x="434" y="310" font-size="16" fill="#fffaf0">shared topic contract</text>
-
-          <rect x="650" y="96" width="248" height="144" rx="22" fill="#355c7d"></rect>
-          <text x="676" y="138" font-size="25" font-weight="700" fill="#fffaf0">odom_bridge</text>
-          <text x="676" y="170" font-size="17" fill="#fffaf0">reads rt/odom</text>
-          <text x="676" y="196" font-size="17" fill="#fffaf0">publishes /odom for ROS tools</text>
-
-          <rect x="650" y="286" width="248" height="144" rx="22" fill="#5f4b8b"></rect>
-          <text x="676" y="328" font-size="25" font-weight="700" fill="#fffaf0">ROS2 consumers</text>
-          <text x="670" y="358" font-size="16" fill="#fffaf0">RViz, plots, bagging, debugging</text>
-          <text x="676" y="382" font-size="15" fill="#fffaf0">same fusion graph as hardware,</text>
-          <text x="676" y="404" font-size="15" fill="#fffaf0">different DDS producer and ROS domain</text>
-
-          <line x1="340" y1="150" x2="412" y2="226" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-sim)"></line>
-          <line x1="340" y1="370" x2="412" y2="302" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-sim)"></line>
-          <text x="326" y="262" font-size="16" fill="#566670">script calls env, env publishes DDS</text>
-
-          <line x1="584" y1="264" x2="650" y2="168" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-sim)"></line>
-          <line x1="774" y1="240" x2="774" y2="286" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-sim)"></line>
-        </svg>
-        <p class="caption">
-          In simulation, the contract is still DDS. The ROS2 bridge only cares that the expected topics exist; it does not need a Python import from the simulator.
-        </p>
-      </div>
-
-      <aside class="panel notes-card">
-        <h2>Where the script interaction happens</h2>
-        <ul>
-          <li><span class="mono">unitree_mujoco.py</span> and the control scripts initialize Unitree DDS channels for the simulator side.</li>
-          <li><span class="mono">GO2HardwareEnvironment</span> creates <span class="mono">EstimatedOdometryPublisher</span> when velocity control is active.</li>
-          <li>That publisher writes DDS <span class="mono">rt/odom</span>, which the ROS2 <span class="mono">odom_bridge</span> can consume exactly like hardware odometry.</li>
-          <li>The ROS domain is still selected separately with <span class="mono">ROS_DOMAIN_ID</span>; the bridge DDS side is controlled by <span class="mono">run_mode</span> and optional launch overrides.</li>
-          <li>This symmetry is the key design choice: same launch, same ROS2 outputs, different DDS producer.</li>
-        </ul>
-      </aside>
-    </section>
-
-    <section class="section-grid">
-      <div class="panel diagram-card">
-        <h2>4. Fusion Inputs and EKF Split</h2>
-        <svg viewBox="0 0 980 500" role="img" aria-label="Fusion inputs from corrected cloud, KISS odometry, and estimator odometry">
-          <defs>
-            <marker id="arrow-kiss" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#6c5d4b"></path>
-            </marker>
-          </defs>
-
-          <rect x="24" y="24" width="932" height="452" rx="28" fill="#fffaf0" stroke="#c1b39a"></rect>
-
-          <rect x="56" y="156" width="222" height="144" rx="22" fill="#355c7d"></rect>
-          <text x="72" y="196" font-size="22" font-weight="700" fill="#fffaf0">clock_offset_bridge</text>
-          <text x="80" y="226" font-size="14" fill="#fffaf0">normalizes LiDAR timestamps</text>
-          <text x="82" y="248" font-size="15" fill="#fffaf0">publishes corrected</text>
-          <text x="82" y="270" font-size="15" fill="#fffaf0">PointCloud2</text>
-
-          <rect x="370" y="156" width="230" height="144" rx="22" fill="#5f4b8b"></rect>
-          <text x="396" y="198" font-size="25" font-weight="700" fill="#fffaf0">ROS2 cloud</text>
-          <text x="392" y="228" font-size="16" fill="#fffaf0">/utlidar/time_corrected/cloud</text>
-          <text x="392" y="252" font-size="15" fill="#fffaf0">time-aligned with LiDAR TF</text>
-
-          <rect x="676" y="74" width="242" height="144" rx="22" fill="#355c7d"></rect>
-          <text x="702" y="116" font-size="25" font-weight="700" fill="#fffaf0">kiss_odom_node</text>
-          <text x="702" y="146" font-size="14" fill="#fffaf0">runs KISS-ICP on</text>
-          <text x="702" y="166" font-size="14" fill="#fffaf0">accumulated corrected clouds</text>
-          <text x="702" y="186" font-size="14" fill="#fffaf0">header-shifted point time</text>
-          <text x="702" y="206" font-size="14" fill="#fffaf0">reset-after-registrations = 100</text>
-
-          <rect x="346" y="332" width="256" height="106" rx="22" fill="#355c7d"></rect>
-          <text x="372" y="368" font-size="24" font-weight="700" fill="#fffaf0">odom_bridge</text>
-          <text x="372" y="396" font-size="15" fill="#fffaf0">/odom contributes twist only</text>
-          <text x="372" y="418" font-size="15" fill="#fffaf0">vx, vy, yaw_rate</text>
-
-          <rect x="676" y="270" width="242" height="106" rx="22" fill="#5f4b8b"></rect>
-          <text x="702" y="306" font-size="24" font-weight="700" fill="#fffaf0">/kiss/odom</text>
-          <text x="702" y="334" font-size="15" fill="#fffaf0">base_link-origin pose</text>
-          <text x="702" y="356" font-size="15" fill="#fffaf0">x, y, yaw only</text>
-
-          <rect x="676" y="392" width="242" height="58" rx="18" fill="#355c7d"></rect>
-          <text x="698" y="427" font-size="22" font-weight="700" fill="#fffaf0">robot_localization EKF</text>
-
-          <rect x="56" y="332" width="222" height="106" rx="22" fill="#5f4b8b"></rect>
-          <text x="80" y="368" font-size="24" font-weight="700" fill="#fffaf0">Corrected cloud</text>
-          <text x="80" y="396" font-size="15" fill="#fffaf0">/utlidar/time_corrected/cloud</text>
-          <text x="80" y="418" font-size="15" fill="#fffaf0">time-aligned handoff point</text>
-
-          <line x1="278" y1="228" x2="370" y2="228" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
-          <line x1="486" y1="300" x2="486" y2="332" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
-          <line x1="278" y1="384" x2="346" y2="384" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
-          <line x1="600" y1="228" x2="676" y2="146" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
-          <line x1="797" y1="218" x2="797" y2="270" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
-          <line x1="602" y1="384" x2="676" y2="421" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
-          <line x1="797" y1="376" x2="797" y2="392" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-kiss)"></line>
-
-          <text x="332" y="118" font-size="18" font-weight="700" fill="#1d2a32">The EKF fuses estimator twist with KISS pose. Raw odometry and KISS stay as topics; TF comes from the fused state only.</text>
-        </svg>
-        <p class="caption">
-          KISS-ICP deliberately subscribes to the corrected ROS2 cloud instead of raw DDS so it can reuse the timestamp fix from one place. The EKF then takes pose from <span class="mono">/kiss/odom</span> and twist from <span class="mono">/odom</span>. That is the current runtime split configured in <span class="mono">ekf_localization.yaml</span>.
-        </p>
-      </div>
-
-      <aside class="panel notes-card">
-        <h2>Why this split is useful</h2>
-        <ul>
-          <li>The timestamp correction happens once in <span class="mono">clock_offset_bridge</span>, and both KISS and other ROS tools reuse the corrected cloud.</li>
-          <li><span class="mono">kiss_odom_node</span> stays focused on scan registration rather than DDS transport details.</li>
-          <li>The node accumulates multiple incoming clouds before each KISS registration because single-message registration was too unstable on the GO2 stream.</li>
-          <li>The published KISS pose is expressed at the <span class="mono">base_link</span> origin in the <span class="mono">odom</span> frame, so the EKF can fuse it directly.</li>
-          <li><span class="mono">--reset-after-registrations</span> bounds KISS map history while keeping the published pose continuous.</li>
-          <li>If you disable KISS-ICP, the rest of the bridge still works, but the fused launch loses its pose measurement source.</li>
-        </ul>
-      </aside>
-    </section>
-
-    <section class="section-grid">
-      <div class="panel diagram-card">
-        <h2>5. TF Ownership in the Fusion Launch</h2>
-        <svg viewBox="0 0 980 400" role="img" aria-label="Current TF ownership in the fusion launch">
+        <h2>3. Frame Ownership And Map Semantics</h2>
+        <svg viewBox="0 0 1000 430" role="img" aria-label="Current frame ownership and occupancy map semantics">
           <defs>
             <marker id="arrow-tf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#d9a441"></path>
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#d7ab47"></path>
             </marker>
           </defs>
 
-          <rect x="24" y="24" width="932" height="352" rx="28" fill="#fffaf0" stroke="#c1b39a"></rect>
+          <rect x="24" y="24" width="952" height="382" rx="28" fill="#fffaf3" stroke="#c1b198"></rect>
 
-          <rect x="82" y="126" width="160" height="84" rx="18" fill="#d9a441"></rect>
-          <text x="130" y="176" font-size="28" font-weight="700" fill="#1d2a32">odom</text>
+          <rect x="82" y="130" width="168" height="86" rx="18" fill="#d7ab47"></rect>
+          <text x="130" y="182" font-size="28" font-weight="700" fill="#18242d">body</text>
 
-          <rect x="382" y="126" width="186" height="84" rx="18" fill="#d9a441"></rect>
-          <text x="420" y="176" font-size="28" font-weight="700" fill="#1d2a32">base_link</text>
+          <rect x="346" y="130" width="194" height="86" rx="18" fill="#d7ab47"></rect>
+          <text x="390" y="182" font-size="28" font-weight="700" fill="#18242d">base_link</text>
 
-          <rect x="708" y="126" width="198" height="84" rx="18" fill="#d9a441"></rect>
-          <text x="736" y="176" font-size="28" font-weight="700" fill="#1d2a32">utlidar_lidar</text>
+          <rect x="644" y="130" width="238" height="86" rx="18" fill="#d7ab47"></rect>
+          <text x="690" y="182" font-size="28" font-weight="700" fill="#18242d">utlidar_lidar</text>
 
-          <line x1="242" y1="168" x2="382" y2="168" stroke="#d9a441" stroke-width="5" marker-end="url(#arrow-tf)"></line>
-          <text x="304" y="146" font-size="18" fill="#8c6b1d">ekf_node</text>
+          <line x1="250" y1="173" x2="346" y2="173" stroke="#d7ab47" stroke-width="5" marker-end="url(#arrow-tf)"></line>
+          <line x1="540" y1="173" x2="644" y2="173" stroke="#d7ab47" stroke-width="5" marker-end="url(#arrow-tf)"></line>
+          <text x="270" y="145" font-size="18" fill="#8a6718">static transform</text>
+          <text x="576" y="145" font-size="18" fill="#8a6718">static transform</text>
 
-          <line x1="568" y1="168" x2="708" y2="168" stroke="#d9a441" stroke-width="5" marker-end="url(#arrow-tf)"></line>
-          <text x="576" y="146" font-size="18" fill="#8c6b1d">static_transform_publisher</text>
+          <rect x="100" y="282" width="250" height="64" rx="16" fill="#ece4d6"></rect>
+          <text x="126" y="321" font-size="22" font-weight="700" fill="#5a4c39">corrected cloud stays in LiDAR frame</text>
 
-          <rect x="120" y="270" width="188" height="54" rx="16" fill="#f4e3b2"></rect>
-          <text x="154" y="304" font-size="22" font-weight="700" fill="#7a5c12">/odom topic</text>
-          <rect x="392" y="270" width="188" height="54" rx="16" fill="#f4e3b2"></rect>
-          <text x="414" y="304" font-size="22" font-weight="700" fill="#7a5c12">/kiss/odom</text>
-          <rect x="688" y="270" width="218" height="54" rx="16" fill="#f4e3b2"></rect>
-          <text x="710" y="304" font-size="22" font-weight="700" fill="#7a5c12">/odometry/filtered</text>
+          <rect x="398" y="282" width="252" height="64" rx="16" fill="#e2eddc"></rect>
+          <text x="430" y="321" font-size="22" font-weight="700" fill="#466d35">FAST-LIO outputs in camera_init</text>
 
-          <line x1="308" y1="297" x2="392" y2="297" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-tf)"></line>
-          <line x1="580" y1="297" x2="688" y2="297" stroke="#6c5d4b" stroke-width="4" marker-end="url(#arrow-tf)"></line>
-          <text x="330" y="256" font-size="18" fill="#566670">topics feeding the filter, not extra TF branches</text>
+          <rect x="698" y="282" width="198" height="64" rx="16" fill="#f1e3d7"></rect>
+          <text x="726" y="321" font-size="22" font-weight="700" fill="#8b5e34">rolling occupancy</text>
+
+          <line x1="350" y1="314" x2="398" y2="314" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-tf)"></line>
+          <line x1="650" y1="314" x2="698" y2="314" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-tf)"></line>
         </svg>
         <p class="caption">
-          The current fusion launch has a single runtime TF chain: <span class="mono">odom -> base_link -> utlidar_lidar</span>. Raw estimator odometry and KISS remain ROS topics that feed the filter; they do not own extra TF branches.
+          The important detail is unchanged: the bridge does not transform the corrected cloud into <span class="mono">base_link</span>. FAST-LIO receives LiDAR-frame data and therefore must be configured with the physical LiDAR pose in the IMU frame. The occupancy node then consumes FAST-LIO's registered cloud in <span class="mono">camera_init</span> and recenters a rolling map on the robot in cell-sized increments.
         </p>
       </div>
 
       <aside class="panel notes-card">
-        <h2>Reading the frame tree</h2>
+        <h2>Editing Constraints</h2>
         <ul>
-          <li><span class="mono">odom -> base_link</span> comes from <span class="mono">robot_localization/ekf_node</span>.</li>
-          <li><span class="mono">base_link -> utlidar_lidar</span> comes from <span class="mono">static_transform_publisher</span>.</li>
-          <li><span class="mono">odom_bridge</span> does not publish TF in the fusion launch.</li>
-          <li><span class="mono">kiss_odom_node</span> does not publish TF in the fusion launch.</li>
-          <li><span class="mono">clock_offset_bridge</span> can still publish TF when run standalone, but the launch disables it so TF ownership stays unambiguous.</li>
+          <li>Do not switch the FAST-LIO extrinsic helper to <span class="mono">base_link_pose_in_imu_frame()</span> unless the cloud frame semantics change first.</li>
+          <li>Keep <span class="mono">row_step</span>-aware PointCloud2 decoding in any node that unpacks raw cloud buffers.</li>
+          <li>The occupancy node expects <span class="mono">camera_init</span>, <span class="mono">base_link</span>, and <span class="mono">utlidar_lidar</span> to be resolvable at runtime.</li>
+          <li>Log-odds occupancy parameters belong in <span class="mono">config/occupancy_2d.yaml</span> and launch-time parameter overrides, not in hard-coded per-site forks.</li>
         </ul>
       </aside>
     </section>
 
     <div class="footer">
-      Open this file directly in a browser. It is fully self-contained and intended as the visual overview for
-      <span class="mono">source/unitree_mujoco/ros2_ws/src/go2_dds_ros2_bridge</span>.
+      Open this file directly in a browser. It is self-contained and now documents the current package architecture for
+      <span class="mono">source/unitree_mujoco/ros2_ws/src/go2_dds_ros2_bridge</span> after the removal of the KISS-ICP and EKF fusion path.
     </div>
   </main>
+
+  <div class="node-dialog" id="node-dialog" aria-hidden="true">
+    <div class="node-dialog-panel" role="dialog" aria-modal="true" aria-labelledby="node-dialog-title">
+      <div class="node-dialog-topbar">
+        <div>
+          <div class="node-dialog-kicker">Runtime Detail Sheet</div>
+          <h2 class="node-dialog-title" id="node-dialog-title">Select a runtime node</h2>
+          <p class="node-dialog-subtitle" id="node-dialog-subtitle">Choose a card from the Active Runtime Nodes section to inspect how that component is wired and where to start reading code.</p>
+        </div>
+        <button type="button" class="node-dialog-close" id="node-dialog-close" aria-label="Close node details">Close</button>
+      </div>
+
+      <div class="node-dialog-grid">
+        <div class="detail-card">
+          <h3>Responsibilities</h3>
+          <ul class="detail-list" id="node-detail-responsibilities">
+            <li>Select a runtime node card to populate this detail view.</li>
+          </ul>
+          <div class="detail-meta" id="node-detail-meta"></div>
+        </div>
+
+        <div class="detail-card">
+          <h3>Code Reading Guide</h3>
+          <ul class="detail-list" id="node-detail-reading">
+            <li>The technical guide appears here after a node is selected.</li>
+          </ul>
+        </div>
+
+        <div class="detail-card">
+          <h3>Launch And Parameter Wiring</h3>
+          <ul class="detail-list" id="node-detail-launch">
+            <li>Launch details appear here after a node is selected.</li>
+          </ul>
+        </div>
+
+        <div class="detail-card">
+          <h3>Implementation Snapshot</h3>
+          <div class="detail-code" id="node-detail-code">Open a node to see the relevant files, entry points, and notable implementation hooks.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const NODE_DETAILS = {
+      clock_offset_bridge: {
+        title: "clock_offset_bridge",
+        subtitle: "DDS LiDAR ingress, local clock correction, optional LiDAR TF publication, and front-leg masking all live here.",
+        responsibilities: [
+          "Subscribes to raw Unitree DDS LiDAR on rt/utlidar/cloud and republishes PointCloud2 on /utlidar/time_corrected/cloud.",
+          "Estimates onboard-to-local clock offset from the incoming cloud header stamp and low-pass filters it with filter_alpha.",
+          "Publishes /go2_clock_offset_sec and optionally publishes base_link -> utlidar_lidar TF when not disabled by launch.",
+          "Can remove coarse front-leg self-returns by masking configured boxes in base_link coordinates before forwarding the cloud."
+        ],
+        meta: [
+          "File: go2_dds_ros2_bridge/nodes/clock_offset_bridge_node.py",
+          "Launch name: clock_offset_bridge",
+          "DDS default: domain 0 hardware / domain 1 simulation",
+          "ROS output QoS: reliable keep-last depth 10"
+        ],
+        reading: [
+          "Start with BridgeConfig and parse_args() to see which CLI switches define transport mode, publish rate, filtering, and TF behavior.",
+          "The import_raw_dds_dependencies() function explains why CycloneDDS and unitree_sdk2py must exist in the same Python runtime as ROS.",
+          "The dtype_from_fields() helper and PointField mapping are the reference implementation for row_step-aware cloud decoding in this package.",
+          "Look for the front-leg filter boxes and the LiDAR RPY parameter callback when tracking changes to geometric cleanup or TF calibration."
+        ],
+        launch: [
+          "fast_lio.launch.py passes --no-publish-tf so TF ownership stays with explicit static_transform_publisher instances.",
+          "The launch also overrides --output-topic with the cloud_topic launch argument, defaulting to /utlidar/time_corrected/cloud.",
+          "run_mode, dds_domain_id, and dds_interface are assembled once in _make_common_bridge_arguments() and shared with other raw DDS bridges."
+        ],
+        code: "Entry point: Go2ClockOffsetBridge\nPrimary data path: DDS PointCloud2_ -> filtered offset estimate -> ROS Float64 + corrected sensor_msgs/PointCloud2\nNotable hooks: _publish_pending_offset timer, dynamic lidar_roll_deg/lidar_pitch_deg/lidar_yaw_deg parameters, optional TransformBroadcaster, front-leg masking in base_link coordinates"
+      },
+      imu_bridge: {
+        title: "imu_bridge",
+        subtitle: "Bridges raw DDS LowState IMU data into a ROS Imu stream suitable for FAST-LIO, with YAML-driven covariance values.",
+        responsibilities: [
+          "Subscribes to rt/lowstate and converts Unitree imu_state into sensor_msgs/Imu.",
+          "Loads orientation, angular velocity, and linear acceleration variances from config/imu_bridge.yaml.",
+          "Publishes the IMU topic selected by launch, defaulting to /imu/data_fastlio in the active mapping pipeline.",
+          "Reconstructs timestamps from the known 1 ms LowState cadence and re-anchors when drift grows past the resync threshold."
+        ],
+        meta: [
+          "File: go2_dds_ros2_bridge/nodes/imu_bridge_node.py",
+          "Launch name: imu_bridge",
+          "Default DDS topic: rt/lowstate",
+          "Frame in active launch: body"
+        ],
+        reading: [
+          "Read default_config_file() first; it resolves the installed package config path before falling back to the source tree.",
+          "load_imu_variances() is the guardrail for config correctness. Any new variance key should be added there instead of read ad hoc.",
+          "The timestamp reconstruction logic is the core implementation nuance. It exists because LowState cadence is known but absolute IMU time is not trusted.",
+          "Use diagonal_covariance() and the publisher initialization as the anchor when tracing how YAML values become ROS covariance matrices."
+        ],
+        launch: [
+          "fast_lio.launch.py overrides --ros-topic to the imu_topic launch argument and forces --frame-id body.",
+          "The same run_mode / dds_domain_id / dds_interface transport block is reused here, so hardware and simulation follow the same bridge contract.",
+          "This node is always on in the main launch because FAST-LIO expects an IMU source even when occupancy is disabled."
+        ],
+        code: "Entry point: DdsImuBridge\nPrimary data path: DDS LowState_ -> imu_state extraction -> sensor_msgs/Imu\nNotable hooks: YAML variance loading, stamp_from_ns(), cadence-based timestamp reconstruction, ROS_DOMAIN_ID logging for runtime diagnosis"
+      },
+      static_transform_publishers: {
+        title: "static_transform_publisher x2",
+        subtitle: "The main launch owns fixed geometry explicitly instead of relying on hidden TF publication inside bridge nodes.",
+        responsibilities: [
+          "Publishes body -> base_link using the inverse of DEFAULT_IMU_TF_XYZ from tf_utils.py.",
+          "Publishes base_link -> utlidar_lidar using DEFAULT_LIDAR_TF_XYZ and DEFAULT_LIDAR_TF_RPY_DEG.",
+          "Keeps frame ownership obvious in launch rather than split between runtime nodes and launch-time wiring.",
+          "Provides the fixed geometry resolved later by FAST-LIO and the occupancy node's camera_init lookups."
+        ],
+        meta: [
+          "File anchor: launch/fast_lio.launch.py",
+          "Launch names: go2_lidar_static_tf, go2_body_to_base_link_static_tf",
+          "Frames: body -> base_link -> utlidar_lidar",
+          "Ownership choice: launch-level, not implicit bridge TF"
+        ],
+        reading: [
+          "Start at _make_runtime_nodes() to see both Node() blocks and the exact argument lists passed to tf2_ros/static_transform_publisher.",
+          "The body_to_base_translation calculation is derived from DEFAULT_IMU_TF_XYZ. If IMU mount assumptions change, update the helper source, not the raw numbers in multiple places.",
+          "The LiDAR static transform uses degrees converted to radians inline; keep that conversion consistent if refactoring."
+        ],
+        launch: [
+          "clock_offset_bridge is launched with --no-publish-tf specifically so these two static publishers are the only fixed TF owners in the launch.",
+          "FAST-LIO receives the corresponding LiDAR extrinsic again as mapping.extrinsic_T and mapping.extrinsic_R, but that is a parameter contract rather than TF publication.",
+          "The occupancy node depends on the resulting frame graph plus FAST-LIO's camera_init outputs."
+        ],
+        code: "Entry point: launch-only; no package-local Python node file\nPrimary data path: static frame declarations into /tf_static\nNotable hooks: DEFAULT_IMU_TF_XYZ, DEFAULT_LIDAR_TF_XYZ, DEFAULT_LIDAR_TF_RPY_DEG, lidar_pose_in_imu_frame() in launch wiring"
+      },
+      fastlio_mapping: {
+        title: "fastlio_mapping",
+        subtitle: "Upstream FAST-LIO is treated as the main state-estimation and registered-cloud producer in the current package design.",
+        responsibilities: [
+          "Consumes the corrected LiDAR cloud and bridged IMU from the bridge package.",
+          "Publishes registered clouds and odometry in the FAST-LIO map frame, which the occupancy node later consumes as camera_init data.",
+          "Uses launch-injected extrinsic parameters with extrinsic_est_en forced off so the package owns the physical sensor geometry.",
+          "Takes most tunables from config/fast_lio.yaml, including preprocessing, mapping, and publish behavior."
+        ],
+        meta: [
+          "Launch anchor: launch/fast_lio.launch.py",
+          "Config file: config/fast_lio.yaml",
+          "Input topics: /utlidar/time_corrected/cloud and /imu/data_fastlio",
+          "Extrinsic helper: lidar_pose_in_imu_frame()"
+        ],
+        reading: [
+          "Start in launch/fast_lio.launch.py because that is where the effective FAST-LIO topic wiring and extrinsic override happen.",
+          "Then read config/fast_lio.yaml to understand the default LiDAR parser type, map range, filter sizes, and publish knobs.",
+          "The key semantic constraint is that the corrected cloud remains in utlidar_lidar; therefore the launch passes the physical LiDAR pose in the IMU frame instead of a base_link pose."
+        ],
+        launch: [
+          "The launch sets common.lid_topic and common.imu_topic dynamically from cloud_topic and imu_topic.",
+          "mapping.extrinsic_est_en is pinned false, and extrinsic_T / extrinsic_R are injected from lidar_pose_in_imu_frame() plus flatten_rotation_matrix().",
+          "rviz2 and occupancy_2d are downstream neighbors in the launch but do not modify FAST-LIO internals."
+        ],
+        code: "Entry point: upstream fast_lio executable\nPackage-local control surface: launch/fast_lio.launch.py + config/fast_lio.yaml\nNotable hooks: common.lid_topic, common.imu_topic, mapping.extrinsic_T, mapping.extrinsic_R, publish.scan_publish_en / publish.scan_bodyframe_pub_en"
+      },
+      occupancy_2d: {
+        title: "occupancy_2d",
+        subtitle: "Consumes FAST-LIO's registered cloud and builds a rolling 2D log-odds occupancy grid centered on the robot.",
+        responsibilities: [
+          "Subscribes to /cloud_registered and publishes nav_msgs/OccupancyGrid on /static_occupancy.",
+          "Uses TF lookups in camera_init to locate both utlidar_lidar and base_link at the cloud timestamp.",
+          "Filters points by z before projecting to 2D, then raycasts free space and applies hit or miss log-odds updates.",
+          "Maintains a rolling map window with configurable resolution, decay, and clamp ranges."
+        ],
+        meta: [
+          "Files: go2_dds_ros2_bridge/nodes/occupancy_2d_node.py + go2_dds_ros2_bridge/occupancy_map.py",
+          "Launch name: occupancy_2d",
+          "Default frame: camera_init",
+          "Publisher QoS: reliable + transient local"
+        ],
+        reading: [
+          "Start with Occupancy2DConfig and the parameter declarations in Occupancy2DNode.__init__() to see every external tuning knob.",
+          "The runtime TF dependency is visible in _lookup_translation() and _cloud_callback(); this is the best place to debug missing frames or stale transforms.",
+          "For algorithm behavior, switch to occupancy_map.py. That file owns rolling window shifting, row_step-aware cloud extraction, numba kernels, log-odds fusion, and decay.",
+          "The warning paths are intentional: frame mismatch warnings, TF throttling, and decode failures are meant to fail soft instead of crashing the mapper."
+        ],
+        launch: [
+          "The node is guarded by the occupancy launch argument and reads its defaults from config/occupancy_2d.yaml.",
+          "Launch-time parameter overrides remap only input_topic and output_topic, keeping the rest of the map behavior in YAML or direct ROS parameter overrides.",
+          "Because the output QoS is transient local, late subscribers can still receive the most recent grid."
+        ],
+        code: "Entry point: Occupancy2DNode\nPrimary data path: /cloud_registered -> extract_xyz_points() -> TF lookup in camera_init -> RollingOccupancyMap -> nav_msgs/OccupancyGrid\nNotable hooks: log-odds parameters, numba availability fallback, rolling cell recentering, z-filter bounds, transient-local output QoS"
+      },
+      rviz2: {
+        title: "rviz2",
+        subtitle: "The viewer is intentionally optional and sits outside the mapping control path.",
+        responsibilities: [
+          "Launches only when the rviz argument is true.",
+          "Loads the upstream fastlio.rviz profile to inspect corrected cloud, FAST-LIO outputs, TF, and occupancy topics.",
+          "Provides visualization only; disabling it does not change bridge, FAST-LIO, or occupancy runtime behavior."
+        ],
+        meta: [
+          "Launch anchor: launch/fast_lio.launch.py",
+          "Config path source: FindPackageShare('fast_lio') / rviz / fastlio.rviz",
+          "Condition: IfCondition(LaunchConfiguration('rviz'))",
+          "Role: operator-facing inspection"
+        ],
+        reading: [
+          "There is no package-local node implementation to read here. The relevant logic is the conditional Node() block in fast_lio.launch.py.",
+          "If the visualization is confusing, inspect the RViz config itself and compare that topic list to the actual launch-time remaps."
+        ],
+        launch: [
+          "The rviz launch argument defaults to false, so the runtime stays headless unless explicitly requested.",
+          "rviz_config is a separate launch argument so you can swap layouts without touching the rest of the stack."
+        ],
+        code: "Entry point: upstream rviz2 executable\nPackage-local control surface: conditional Node() in launch/fast_lio.launch.py\nNotable hooks: rviz launch flag, rviz_config path override"
+      }
+    };
+
+    const nodeDialog = document.getElementById("node-dialog");
+    const nodeDialogClose = document.getElementById("node-dialog-close");
+    const nodeDialogTitle = document.getElementById("node-dialog-title");
+    const nodeDialogSubtitle = document.getElementById("node-dialog-subtitle");
+    const nodeDetailResponsibilities = document.getElementById("node-detail-responsibilities");
+    const nodeDetailMeta = document.getElementById("node-detail-meta");
+    const nodeDetailReading = document.getElementById("node-detail-reading");
+    const nodeDetailLaunch = document.getElementById("node-detail-launch");
+    const nodeDetailCode = document.getElementById("node-detail-code");
+
+    function fillList(element, values) {
+      element.innerHTML = values.map((value) => `<li>${value}</li>`).join("");
+    }
+
+    function fillMeta(element, values) {
+      element.innerHTML = values.map((value) => `<span class="detail-pill">${value}</span>`).join("");
+    }
+
+    function openNodeDialog(nodeId) {
+      const detail = NODE_DETAILS[nodeId];
+      if (!detail) {
+        return;
+      }
+
+      nodeDialogTitle.textContent = detail.title;
+      nodeDialogSubtitle.textContent = detail.subtitle;
+      fillList(nodeDetailResponsibilities, detail.responsibilities);
+      fillMeta(nodeDetailMeta, detail.meta);
+      fillList(nodeDetailReading, detail.reading);
+      fillList(nodeDetailLaunch, detail.launch);
+      nodeDetailCode.textContent = detail.code;
+      nodeDialog.classList.add("is-open");
+      nodeDialog.setAttribute("aria-hidden", "false");
+      nodeDialogClose.focus();
+    }
+
+    function closeNodeDialog() {
+      nodeDialog.classList.remove("is-open");
+      nodeDialog.setAttribute("aria-hidden", "true");
+    }
+
+    document.querySelectorAll(".runtime-button").forEach((button) => {
+      button.addEventListener("click", () => openNodeDialog(button.dataset.nodeId));
+    });
+
+    nodeDialogClose.addEventListener("click", closeNodeDialog);
+    nodeDialog.addEventListener("click", (event) => {
+      if (event.target === nodeDialog) {
+        closeNodeDialog();
+      }
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && nodeDialog.classList.contains("is-open")) {
+        closeNodeDialog();
+      }
+    });
+  </script>
 </body>
 </html>
