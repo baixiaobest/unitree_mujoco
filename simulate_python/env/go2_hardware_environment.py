@@ -469,6 +469,7 @@ class GO2HardwareEnvironment(Go2Environment):
 
         self.is_standing = True
         self.is_laid_down = False
+        self._set_robot_posture_state(RobotPostureState.STAND_HOLDING, force_publish=True)
         
         # Hold the final position for the specified time
         print(f"Holding final stand position for {hold_time} seconds...")

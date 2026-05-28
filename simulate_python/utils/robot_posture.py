@@ -11,6 +11,7 @@ class RobotPostureState(IntEnum):
     STANDING = 1
     TRANSITIONING_TO_STAND = 2
     TRANSITIONING_TO_LAY = 3
+    STAND_HOLDING = 4
 
 
 def format_robot_posture_state(state: int | None) -> str:
@@ -29,4 +30,6 @@ def format_robot_posture_state(state: int | None) -> str:
         return "transitioning to stand"
     if posture_state == RobotPostureState.TRANSITIONING_TO_LAY:
         return "transitioning to lay"
+    if posture_state == RobotPostureState.STAND_HOLDING:
+        return "stand holding"
     return f"unknown ({state})"

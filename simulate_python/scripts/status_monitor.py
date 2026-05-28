@@ -106,6 +106,27 @@ class StatusMonitor(QMainWindow):
         with self._robot_posture_lock:
             return self._latest_robot_posture_state
 
+    def _set_robot_posture_display(self, state: int | None) -> None:
+        self.robot_posture_value.setText(format_robot_posture_state(state))
+        try:
+            posture_state = RobotPostureState(state) if state is not None else None
+        except ValueError:
+            posture_state = None
+
+        color = "#4a4a4a"
+        if posture_state == RobotPostureState.LAID_DOWN:
+            color = "#7a1f1f"
+        elif posture_state == RobotPostureState.TRANSITIONING_TO_STAND:
+            color = "#005a9c"
+        elif posture_state == RobotPostureState.TRANSITIONING_TO_LAY:
+            color = "#6b4f00"
+        elif posture_state == RobotPostureState.STAND_HOLDING:
+            color = "#c17d00"
+        elif posture_state == RobotPostureState.STANDING:
+            color = "#137333"
+
+        self.robot_posture_value.setStyleSheet(f"color: {color};")
+
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle('Unitree Robot Status Monitor')
@@ -469,7 +490,7 @@ class StatusMonitor(QMainWindow):
         odom_position, odom_velocity = self._get_latest_odometry()
         robot_posture_state = self._get_latest_robot_posture_state()
 
-        self.robot_posture_value.setText(format_robot_posture_state(robot_posture_state))
+        self._set_robot_posture_display(robot_posture_state)
         
         # Update joint status tab
         if joint_state["positions"].numel() > 0:
