@@ -458,6 +458,7 @@
           <div class="chip">Raw DDS controls: <span class="mono">run_mode</span>, optional <span class="mono">dds_domain_id</span>, optional <span class="mono">dds_interface</span></div>
           <div class="chip">Bridge handoff: <span class="mono">/utlidar/time_corrected/cloud</span> and <span class="mono">/imu/data_fastlio</span></div>
           <div class="chip">Mapping outputs: FAST-LIO registered cloud in <span class="mono">camera_init</span>, optional <span class="mono">/static_occupancy</span></div>
+          <div class="chip">IMU timebase: local 1 ms tick reconstruction with receive-time resync when drift exceeds 1 ms</div>
           <div class="chip">No KISS-ICP branch, no EKF fusion, no robot_localization dependency in the active path</div>
         </div>
       </div>
@@ -573,7 +574,7 @@
           </button>
           <button type="button" class="runtime-item runtime-button" data-node-id="imu_bridge">
             <strong>imu_bridge</strong>
-            Supplies FAST-LIO with ROS IMU messages on <span class="mono">/imu/data_fastlio</span> in frame <span class="mono">body</span>.
+            Supplies FAST-LIO with ROS IMU messages on <span class="mono">/imu/data_fastlio</span> in frame <span class="mono">body</span>, using 1 ms tick-based timestamp reconstruction with local resync.
           </button>
           <button type="button" class="runtime-item runtime-button" data-node-id="static_transform_publishers">
             <strong>static_transform_publisher</strong>
@@ -664,6 +665,62 @@
       </aside>
     </section>
 
+    <section class="section-grid">
+      <div class="panel diagram-card">
+        <h2>4. IMU Timestamp Reconstruction</h2>
+        <svg viewBox="0 0 1040 420" role="img" aria-label="IMU bridge timestamp reconstruction and resynchronization flow">
+          <defs>
+            <marker id="arrow-imu-time" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#6c5b48"></path>
+            </marker>
+          </defs>
+
+          <rect x="24" y="24" width="992" height="372" rx="28" fill="#fffaf3" stroke="#c1b198"></rect>
+
+          <rect x="66" y="116" width="208" height="96" rx="18" fill="#2d6c67"></rect>
+          <text x="92" y="154" font-size="24" font-weight="700" fill="#fffaf3">DDS LowState</text>
+          <text x="92" y="182" font-size="15" fill="#fffaf3">no trusted absolute IMU timestamp</text>
+          <text x="92" y="202" font-size="15" fill="#fffaf3">known cadence: 1 ms tick</text>
+
+          <rect x="336" y="92" width="314" height="144" rx="18" fill="#275778"></rect>
+          <text x="362" y="130" font-size="24" font-weight="700" fill="#fffaf3">imu_bridge</text>
+          <text x="362" y="160" font-size="15" fill="#fffaf3">1. sample local ROS receive time</text>
+          <text x="362" y="182" font-size="15" fill="#fffaf3">2. compute receive_delta = now - last_receive</text>
+          <text x="362" y="204" font-size="15" fill="#fffaf3">3. elapsed_ticks = max(1, round(receive_delta / 1 ms))</text>
+          <text x="362" y="226" font-size="15" fill="#fffaf3">4. reconstructed_stamp = last_stamp + elapsed_ticks * 1 ms</text>
+
+          <rect x="712" y="92" width="260" height="144" rx="18" fill="#8b5e34"></rect>
+          <text x="740" y="130" font-size="24" font-weight="700" fill="#fffaf3">resync rule</text>
+          <text x="740" y="160" font-size="15" fill="#fffaf3">timing_error = receive_time - reconstructed_stamp</text>
+          <text x="740" y="182" font-size="15" fill="#fffaf3">if |timing_error| &gt; 1 ms:</text>
+          <text x="740" y="204" font-size="15" fill="#fffaf3">snap stamp back to receive_time</text>
+          <text x="740" y="226" font-size="15" fill="#fffaf3">emit a warning for the first few resyncs</text>
+
+          <rect x="280" y="284" width="470" height="72" rx="18" fill="#eaf2e2"></rect>
+          <text x="308" y="314" font-size="22" font-weight="700" fill="#466d35">published ROS IMU stamp</text>
+          <text x="308" y="338" font-size="15" fill="#466d35">monotone under stable receive timing, but still anchored to local ROS time rather than robot absolute time</text>
+
+          <line x1="274" y1="164" x2="336" y2="164" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-imu-time)"></line>
+          <line x1="650" y1="164" x2="712" y2="164" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-imu-time)"></line>
+          <line x1="524" y1="236" x2="524" y2="284" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-imu-time)"></line>
+        </svg>
+        <p class="caption">
+          The IMU bridge does not read a trustworthy absolute sensor timestamp from DDS. Instead it models the stream as 1 ms ticks, advances the next outgoing stamp by an integer number of ticks inferred from local receive-time spacing, and falls back to the current receive time when the reconstruction drifts by more than one tick. This is why the IMU path is stable enough for FAST-LIO, but it is still ultimately tied to the host ROS clock.
+        </p>
+      </div>
+
+      <aside class="panel notes-card">
+        <h2>Why The Resync Exists</h2>
+        <ul>
+          <li>The bridge currently has cadence information but not a production-quality absolute IMU timebase from the Unitree DDS lowstate path.</li>
+          <li>Without the resync rule, receive-time jitter would slowly push reconstructed IMU stamps away from the actual arrival-time trend.</li>
+          <li>The <span class="mono">max(1, round(receive_delta / 1 ms))</span> step prevents zero-tick repeats when messages arrive faster than expected.</li>
+          <li>The 1 ms error threshold is intentionally tight, so larger host-time or scheduling disturbances immediately snap the IMU clock model back onto local ROS time.</li>
+          <li>If you see repeated resync warnings, that is a sign to inspect host clock stability, callback latency, or the underlying DDS delivery cadence.</li>
+        </ul>
+      </aside>
+    </section>
+
     <div class="footer">
       Open this file directly in a browser. It is self-contained and now documents the current package architecture for
       <span class="mono">source/unitree_mujoco/ros2_ws/src/go2_dds_ros2_bridge</span> after the removal of the KISS-ICP and EKF fusion path.
@@ -749,18 +806,21 @@
           "Subscribes to rt/lowstate and converts Unitree imu_state into sensor_msgs/Imu.",
           "Loads orientation, angular velocity, and linear acceleration variances from config/imu_bridge.yaml.",
           "Publishes the IMU topic selected by launch, defaulting to /imu/data_fastlio in the active mapping pipeline.",
-          "Reconstructs timestamps from the known 1 ms LowState cadence and re-anchors when drift grows past the resync threshold."
+          "Reconstructs timestamps from the known 1 ms LowState cadence and re-anchors when drift grows past the 1 ms resync threshold."
         ],
         meta: [
           "File: go2_dds_ros2_bridge/nodes/imu_bridge_node.py",
           "Launch name: imu_bridge",
           "Default DDS topic: rt/lowstate",
-          "Frame in active launch: body"
+          "Frame in active launch: body",
+          "Clock model: local receive time + 1 ms tick reconstruction"
         ],
         reading: [
           "Read default_config_file() first; it resolves the installed package config path before falling back to the source tree.",
           "load_imu_variances() is the guardrail for config correctness. Any new variance key should be added there instead of read ad hoc.",
           "The timestamp reconstruction logic is the core implementation nuance. It exists because LowState cadence is known but absolute IMU time is not trusted.",
+          "In _reconstruct_stamp_ns(), the bridge computes receive_delta, rounds it to elapsed ticks at 1 ms per tick, then advances the previous reconstructed stamp by that many ticks.",
+          "If the new reconstructed stamp differs from local receive time by more than 1 ms, the bridge logs a resync warning and snaps the outgoing stamp back to receive time.",
           "Use diagonal_covariance() and the publisher initialization as the anchor when tracing how YAML values become ROS covariance matrices."
         ],
         launch: [
@@ -768,7 +828,7 @@
           "The same run_mode / dds_domain_id / dds_interface transport block is reused here, so hardware and simulation follow the same bridge contract.",
           "This node is always on in the main launch because FAST-LIO expects an IMU source even when occupancy is disabled."
         ],
-        code: "Entry point: DdsImuBridge\nPrimary data path: DDS LowState_ -> imu_state extraction -> sensor_msgs/Imu\nNotable hooks: YAML variance loading, stamp_from_ns(), cadence-based timestamp reconstruction, ROS_DOMAIN_ID logging for runtime diagnosis"
+        code: "Entry point: DdsImuBridge\nPrimary data path: DDS LowState_ -> imu_state extraction -> receive_time_ns -> _reconstruct_stamp_ns() -> sensor_msgs/Imu\nTick model: LOWSTATE_TICK_NS = 1,000,000 ns, elapsed_ticks = max(1, round(receive_delta / LOWSTATE_TICK_NS))\nResync rule: if |receive_time_ns - reconstructed_stamp_ns| > TIMESTAMP_RESYNC_THRESHOLD_NS, replace the reconstructed stamp with receive_time_ns and warn\nNotable hooks: YAML variance loading, stamp_from_ns(), cadence-based timestamp reconstruction, ROS_DOMAIN_ID logging for runtime diagnosis"
       },
       static_transform_publishers: {
         title: "static_transform_publisher x2",
