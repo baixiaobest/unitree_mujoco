@@ -224,6 +224,7 @@ class FastLioFrameCorrectionNode(Node):
         self._imu_samples: deque[ImuSample] = deque(maxlen=max(self._config.min_gravity_samples * 10, 512))
         self._current_posture_state: int | None = None
         self._pending_trigger_time_ns: int | None = None
+        self._startup_trigger_time_ns: int | None = self.get_clock().now().nanoseconds
         self._latest_correction_rotation: np.ndarray | None = None
         self._latest_correction_translation: np.ndarray | None = None
         self._imu_frame_warning_emitted = False
@@ -298,21 +299,29 @@ class FastLioFrameCorrectionNode(Node):
 
         with self._state_lock:
             trigger_time_ns = self._pending_trigger_time_ns
+            startup_trigger_time_ns = self._startup_trigger_time_ns
             posture_state = self._current_posture_state
             imu_samples = list(self._imu_samples)
 
-        if trigger_time_ns is None:
+        active_trigger_time_ns = trigger_time_ns if trigger_time_ns is not None else startup_trigger_time_ns
+        startup_correction_pending = trigger_time_ns is None and startup_trigger_time_ns is not None
+
+        if active_trigger_time_ns is None:
             return
-        if posture_state != self._config.trigger_state:
+        if not startup_correction_pending and posture_state != self._config.trigger_state:
             return
-        if now_ns - trigger_time_ns < sample_window_ns:
+        if now_ns - active_trigger_time_ns < sample_window_ns:
             return
 
-        samples_since_trigger = [sample for sample in imu_samples if sample.receive_time_ns >= trigger_time_ns]
+        samples_since_trigger = [sample for sample in imu_samples if sample.receive_time_ns >= active_trigger_time_ns]
         if len(samples_since_trigger) < self._config.min_gravity_samples:
             self._maybe_log_imu_readiness_warning(
                 now_ns,
-                "Waiting for more IMU samples after entering stand_holding (%d/%d ready)."
+                (
+                    "Waiting for more IMU samples after node startup (%d/%d ready)."
+                    if startup_correction_pending
+                    else "Waiting for more IMU samples after entering stand_holding (%d/%d ready)."
+                )
                 % (len(samples_since_trigger), self._config.min_gravity_samples),
             )
             return
@@ -359,10 +368,12 @@ class FastLioFrameCorrectionNode(Node):
             self._latest_correction_rotation = correction_rotation.copy()
             self._latest_correction_translation = correction_translation.copy()
             self._pending_trigger_time_ns = None
+            self._startup_trigger_time_ns = None
 
         self.get_logger().info(
-            "Updated FAST-LIO level correction from %d IMU samples: roll=%.2f deg, pitch=%.2f deg, yaw=0.00 deg, z_offset=%.3f m, body_height=%.3f m."
+            "%s FAST-LIO level correction from %d IMU samples: roll=%.2f deg, pitch=%.2f deg, yaw=0.00 deg, z_offset=%.3f m, body_height=%.3f m."
             % (
+                "Initialized" if startup_correction_pending else "Updated",
                 len(samples_since_trigger),
                 math.degrees(roll),
                 math.degrees(pitch),
