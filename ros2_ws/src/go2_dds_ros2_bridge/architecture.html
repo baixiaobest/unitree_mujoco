@@ -451,13 +451,15 @@
         <p class="lede">
           This page reflects the current bridge design after removing the KISS-ICP and EKF fusion path.
           The active launch is now a direct DDS-to-FAST-LIO pipeline with optional rolling 2D occupancy mapping.
-          Hardware and <span class="mono">simulate_python</span> remain symmetric at the transport layer: both publish the same DDS contract, and the bridge turns that into corrected ROS topics, static transforms, FAST-LIO inputs, and an optional occupancy grid.
+          Hardware and <span class="mono">simulate_python</span> remain symmetric at the transport layer: both publish the same DDS contract, and the bridge turns that into corrected ROS topics, static transforms, FAST-LIO inputs, a posture-triggered gravity leveling transform from <span class="mono">camera_init_correct</span> to <span class="mono">camera_init</span>, and an optional occupancy grid built in the corrected map frame.
         </p>
         <div class="chips">
           <div class="chip">Recommended entry point: <span class="mono">fast_lio.launch.py</span></div>
           <div class="chip">Raw DDS controls: <span class="mono">run_mode</span>, optional <span class="mono">dds_domain_id</span>, optional <span class="mono">dds_interface</span></div>
           <div class="chip">Bridge handoff: <span class="mono">/utlidar/time_corrected/cloud</span> and <span class="mono">/imu/data_fastlio</span></div>
-          <div class="chip">Mapping outputs: FAST-LIO registered cloud in <span class="mono">camera_init</span>, optional <span class="mono">/static_occupancy</span></div>
+          <div class="chip">Map frames: FAST-LIO still owns <span class="mono">camera_init</span>, while the bridge levels it under <span class="mono">camera_init_correct</span></div>
+          <div class="chip">Correction trigger: on DDS posture <span class="mono">stand_holding</span>, average IMU gravity, solve roll and pitch only, then place the corrected ground so <span class="mono">body</span> is 0.4 m high</div>
+          <div class="chip">Mapping outputs: FAST-LIO registered cloud in <span class="mono">camera_init</span>, optional <span class="mono">/static_occupancy</span>, optional <span class="mono">/occupancy_2d/filtered_pointcloud</span></div>
           <div class="chip">IMU timebase: local 1 ms tick reconstruction with receive-time resync when drift exceeds 1 ms</div>
           <div class="chip">No KISS-ICP branch, no EKF fusion, no robot_localization dependency in the active path</div>
         </div>
@@ -489,7 +491,7 @@
           <rect x="26" y="28" width="1208" height="664" rx="28" fill="rgba(255,251,243,0.58)" stroke="#c1b198"></rect>
 
           <text x="60" y="72" font-size="28" font-weight="700" fill="#18242d">Two DDS producers, one mapping launch</text>
-          <text x="60" y="104" font-size="17" fill="#53646d">The active launch is a direct corrected-cloud and bridged-IMU feed into FAST-LIO, followed by optional occupancy mapping.</text>
+          <text x="60" y="104" font-size="17" fill="#53646d">The active launch is a direct corrected-cloud and bridged-IMU feed into FAST-LIO, then a posture-triggered leveling transform, followed by optional occupancy mapping.</text>
 
           <rect x="60" y="150" width="286" height="150" rx="24" fill="#be643e" opacity="0.95" filter="url(#softShadow)"></rect>
           <text x="84" y="191" font-size="28" font-weight="700" fill="#fffaf3">Physical GO2</text>
@@ -527,8 +529,8 @@
           <text x="458" y="504" font-size="13" fill="#53646d">uses <tspan class="mono">lidar_pose_in_imu_frame()</tspan> because the cloud remains in <tspan class="mono">utlidar_lidar</tspan></text>
 
           <rect x="438" y="540" width="352" height="58" rx="18" fill="#f0e6da"></rect>
-          <text x="458" y="568" font-size="22" font-weight="700" fill="#8b5e34">occupancy_2d</text>
-          <text x="458" y="589" font-size="13" fill="#53646d">optional rolling log-odds occupancy grid on <tspan class="mono">/cloud_registered</tspan></text>
+          <text x="458" y="568" font-size="20" font-weight="700" fill="#8b5e34">frame correction + occupancy_2d</text>
+          <text x="458" y="589" font-size="13" fill="#53646d">levels <tspan class="mono">camera_init</tspan> into <tspan class="mono">camera_init_correct</tspan>, then optionally maps <tspan class="mono">/cloud_registered</tspan></text>
 
           <rect x="890" y="140" width="286" height="432" rx="28" fill="#5c4c88" opacity="0.97" filter="url(#softShadow)"></rect>
           <text x="918" y="184" font-size="30" font-weight="700" fill="#fffaf3">ROS2 Surface</text>
@@ -538,10 +540,10 @@
           <text x="918" y="318" font-size="18" fill="#fffaf3"><tspan class="mono">/cloud_registered</tspan></text>
           <text x="918" y="350" font-size="18" fill="#fffaf3">FAST-LIO odometry and TF</text>
           <text x="918" y="382" font-size="18" fill="#fffaf3"><tspan class="mono">/static_occupancy</tspan> when enabled</text>
-          <text x="918" y="414" font-size="18" fill="#fffaf3"><tspan class="mono">/go2_clock_offset_sec</tspan></text>
-          <text x="918" y="446" font-size="18" fill="#fffaf3">static TF for body and LiDAR</text>
-          <text x="918" y="478" font-size="18" fill="#fffaf3">no KISS topics</text>
-          <text x="918" y="510" font-size="18" fill="#fffaf3">no EKF fusion topics</text>
+          <text x="918" y="414" font-size="18" fill="#fffaf3"><tspan class="mono">/occupancy_2d/filtered_pointcloud</tspan> when debug is enabled</text>
+          <text x="918" y="446" font-size="18" fill="#fffaf3"><tspan class="mono">/go2_clock_offset_sec</tspan></text>
+          <text x="918" y="478" font-size="18" fill="#fffaf3">static TF plus <tspan class="mono">camera_init_correct -&gt; camera_init</tspan></text>
+          <text x="918" y="510" font-size="18" fill="#fffaf3">no KISS topics, no EKF fusion topics</text>
 
           <line x1="346" y1="226" x2="410" y2="198" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></line>
           <line x1="346" y1="450" x2="410" y2="286" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></line>
@@ -559,7 +561,7 @@
           <line x1="790" y1="568" x2="890" y2="382" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-main)"></line>
         </svg>
         <p class="caption">
-          The current launch is narrower and more explicit than the old fusion stack: correct the LiDAR clock, bridge the IMU, publish fixed transforms, run FAST-LIO, and optionally derive a rolling occupancy grid from the registered cloud.
+          The current launch is narrower and more explicit than the old fusion stack: correct the LiDAR clock, bridge the IMU, publish fixed transforms, run FAST-LIO, level the resulting map frame from gravity during <span class="mono">stand_holding</span>, and optionally derive a rolling occupancy grid from the corrected-frame cloud.
         </p>
       </div>
     </section>
@@ -584,9 +586,13 @@
             <strong>fastlio_mapping</strong>
             Consumes the corrected cloud and bridged IMU, using the physical LiDAR pose in the IMU frame instead of a transformed cloud.
           </button>
+          <button type="button" class="runtime-item runtime-button" data-node-id="fast_lio_frame_correction">
+            <strong>fast_lio_frame_correction</strong>
+            Watches DDS posture and IMU gravity during <span class="mono">stand_holding</span>, then broadcasts <span class="mono">camera_init_correct -&gt; camera_init</span> with roll and pitch leveling plus ground placement.
+          </button>
           <button type="button" class="runtime-item runtime-button" data-node-id="occupancy_2d">
             <strong>occupancy_2d</strong>
-            Optional rolling occupancy map in <span class="mono">camera_init</span>, using z filtering plus log-odds fusion and decay.
+            Optional rolling occupancy map in <span class="mono">camera_init_correct</span>; it first transforms FAST-LIO points into the corrected map frame, then applies z filtering, log-odds fusion, and optional debug cloud publication.
           </button>
           <button type="button" class="runtime-item runtime-button" data-node-id="rviz2">
             <strong>rviz2</strong>
@@ -605,15 +611,17 @@
           <li>The recommended entry point is now <span class="mono">fast_lio.launch.py</span>, not a fusion launch.</li>
           <li>KISS-ICP is no longer installed or documented as part of the active package path.</li>
           <li><span class="mono">robot_localization</span> is no longer part of the package runtime dependency set.</li>
-          <li>Occupancy mapping is now the downstream consumer of the FAST-LIO registered cloud inside this package.</li>
-          <li>The design is closer to a pure transport-and-mapping stack: bridge raw DDS, establish fixed geometry, then map.</li>
+          <li><span class="mono">fast_lio_frame_correction</span> now levels FAST-LIO's <span class="mono">camera_init</span> under <span class="mono">camera_init_correct</span> using IMU gravity sampled during <span class="mono">stand_holding</span>.</li>
+          <li>That correction is roll and pitch only, and it also adjusts z so the robot body sits 0.4 m above the corrected ground plane.</li>
+          <li>Occupancy mapping is now the downstream consumer of the FAST-LIO registered cloud inside this package, but it filters in <span class="mono">camera_init_correct</span> after transforming points into the corrected map frame.</li>
+          <li>The design is closer to a pure transport-and-mapping stack: bridge raw DDS, establish fixed geometry, estimate, level, then map.</li>
         </ul>
       </aside>
     </section>
 
     <section class="section-grid">
       <div class="panel diagram-card">
-        <h2>3. Frame Ownership And Map Semantics</h2>
+        <h2>3. Frame Ownership, Correction, And Map Semantics</h2>
         <svg viewBox="0 0 1000 430" role="img" aria-label="Current frame ownership and occupancy map semantics">
           <defs>
             <marker id="arrow-tf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
@@ -643,14 +651,16 @@
           <rect x="398" y="282" width="252" height="64" rx="16" fill="#e2eddc"></rect>
           <text x="430" y="321" font-size="22" font-weight="700" fill="#466d35">FAST-LIO outputs in camera_init</text>
 
-          <rect x="698" y="282" width="198" height="64" rx="16" fill="#f1e3d7"></rect>
-          <text x="726" y="321" font-size="22" font-weight="700" fill="#8b5e34">rolling occupancy</text>
+          <rect x="672" y="282" width="254" height="64" rx="16" fill="#f1e3d7"></rect>
+          <text x="696" y="321" font-size="20" font-weight="700" fill="#8b5e34">occupancy in camera_init_correct</text>
 
           <line x1="350" y1="314" x2="398" y2="314" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-tf)"></line>
-          <line x1="650" y1="314" x2="698" y2="314" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-tf)"></line>
+          <line x1="650" y1="314" x2="672" y2="314" stroke="#6c5b48" stroke-width="4" marker-end="url(#arrow-tf)"></line>
+          <text x="646" y="272" font-size="15" fill="#53646d">gravity-based roll/pitch leveling</text>
+          <text x="678" y="252" font-size="15" fill="#53646d">plus ground z placement during stand_holding</text>
         </svg>
         <p class="caption">
-          The important detail is unchanged: the bridge does not transform the corrected cloud into <span class="mono">base_link</span>. FAST-LIO receives LiDAR-frame data and therefore must be configured with the physical LiDAR pose in the IMU frame. The occupancy node then consumes FAST-LIO's registered cloud in <span class="mono">camera_init</span> and recenters a rolling map on the robot in cell-sized increments.
+          The important detail is unchanged: the bridge does not transform the corrected cloud into <span class="mono">base_link</span>. FAST-LIO receives LiDAR-frame data and therefore must be configured with the physical LiDAR pose in the IMU frame. The correction node then keeps FAST-LIO's <span class="mono">camera_init</span> as the child of a leveled <span class="mono">camera_init_correct</span> frame by solving roll and pitch from averaged IMU gravity and shifting z so the body sits at the configured standing height. The occupancy node consumes FAST-LIO's registered cloud, transforms points into <span class="mono">camera_init_correct</span>, applies z filtering there, and only then integrates the rolling map.
         </p>
       </div>
 
@@ -659,7 +669,8 @@
         <ul>
           <li>Do not switch the FAST-LIO extrinsic helper to <span class="mono">base_link_pose_in_imu_frame()</span> unless the cloud frame semantics change first.</li>
           <li>Keep <span class="mono">row_step</span>-aware PointCloud2 decoding in any node that unpacks raw cloud buffers.</li>
-          <li>The occupancy node expects <span class="mono">camera_init</span>, <span class="mono">base_link</span>, and <span class="mono">utlidar_lidar</span> to be resolvable at runtime.</li>
+          <li>The correction node assumes the robot is in the posture-triggered stand hold and uses averaged IMU gravity to solve roll and pitch only; it does not try to estimate yaw.</li>
+          <li>The occupancy node now expects <span class="mono">camera_init_correct</span>, <span class="mono">camera_init</span>, <span class="mono">base_link</span>, and <span class="mono">utlidar_lidar</span> to be resolvable at runtime, and it pauses updates until the correction transform exists.</li>
           <li>Log-odds occupancy parameters belong in <span class="mono">config/occupancy_2d.yaml</span> and launch-time parameter overrides, not in hard-coded per-site forks.</li>
         </ul>
       </aside>
@@ -859,10 +870,10 @@
       },
       fastlio_mapping: {
         title: "fastlio_mapping",
-        subtitle: "Upstream FAST-LIO is treated as the main state-estimation and registered-cloud producer in the current package design.",
+        subtitle: "Upstream FAST-LIO is treated as the main state-estimation and registered-cloud producer, with the bridge now leveling its map frame downstream rather than modifying FAST-LIO internals.",
         responsibilities: [
           "Consumes the corrected LiDAR cloud and bridged IMU from the bridge package.",
-          "Publishes registered clouds and odometry in the FAST-LIO map frame, which the occupancy node later consumes as camera_init data.",
+          "Publishes registered clouds and odometry in the FAST-LIO map frame, which the correction node leaves as camera_init and parents under camera_init_correct.",
           "Uses launch-injected extrinsic parameters with extrinsic_est_en forced off so the package owns the physical sensor geometry.",
           "Takes most tunables from config/fast_lio.yaml, including preprocessing, mapping, and publish behavior."
         ],
@@ -880,37 +891,69 @@
         launch: [
           "The launch sets common.lid_topic and common.imu_topic dynamically from cloud_topic and imu_topic.",
           "mapping.extrinsic_est_en is pinned false, and extrinsic_T / extrinsic_R are injected from lidar_pose_in_imu_frame() plus flatten_rotation_matrix().",
-          "rviz2 and occupancy_2d are downstream neighbors in the launch but do not modify FAST-LIO internals."
+          "fast_lio_frame_correction, rviz2, and occupancy_2d are downstream neighbors in the launch but do not modify FAST-LIO internals."
         ],
         code: "Entry point: upstream fast_lio executable\nPackage-local control surface: launch/fast_lio.launch.py + config/fast_lio.yaml\nNotable hooks: common.lid_topic, common.imu_topic, mapping.extrinsic_T, mapping.extrinsic_R, publish.scan_publish_en / publish.scan_bodyframe_pub_en"
       },
+      fast_lio_frame_correction: {
+        title: "fast_lio_frame_correction",
+        subtitle: "Adds a leveled parent map frame by sampling IMU gravity during stand_holding and broadcasting camera_init_correct -> camera_init.",
+        responsibilities: [
+          "Subscribes to DDS robot posture and waits for a transition into stand_holding before scheduling a correction update.",
+          "Collects a short window of IMU samples, averages acceleration, and treats the negated mean as gravity in the body frame.",
+          "Looks up camera_init -> body, rotates gravity into camera_init, solves the roll and pitch correction that levels gravity, and keeps yaw fixed at zero.",
+          "Applies a z translation so the body frame lands at the configured standing height in camera_init_correct, then republishes the cached transform continuously."
+        ],
+        meta: [
+          "File: go2_dds_ros2_bridge/nodes/fast_lio_frame_correction_node.py",
+          "Launch name: fast_lio_frame_correction",
+          "Frames: camera_init_correct -> camera_init, body lookup in camera_init",
+          "Trigger: DDS posture state 4 (stand_holding)",
+          "Default standing height: 0.4 m"
+        ],
+        reading: [
+          "Start with CorrectionConfig and parse_args() to see the posture topic, IMU topic, sample window, and standing-height control surface.",
+          "The core behavior lives in _process_pending_correction(): it waits for enough IMU samples after the stand_holding edge, checks freshness, then solves the correction from averaged gravity.",
+          "_lookup_transform_components() is the TF boundary. It first tries the IMU sample stamp and then falls back to the latest transform if needed.",
+          "_publish_cached_transform() rebroadcasts the last solved transform, so downstream consumers always see a live camera_init_correct -> camera_init edge once one valid correction has been computed."
+        ],
+        launch: [
+          "fast_lio.launch.py launches this node unconditionally, wiring it to the shared bridge DDS arguments and the same IMU topic that FAST-LIO consumes.",
+          "The launch exposes corrected_map_frame, defaulting to camera_init_correct, and passes that as the parent frame while keeping camera_init as the child.",
+          "This node owns only the dynamic leveling transform. The fixed body/base_link/utlidar_lidar geometry remains with the explicit static_transform_publisher nodes."
+        ],
+        code: "Entry point: FastLioFrameCorrectionNode\nPrimary data path: DDS posture edge -> IMU sample window -> mean gravity in body -> camera_init/body TF lookup -> roll_pitch_correction_from_gravity() -> z placement -> TransformBroadcaster\nNotable hooks: standing_height_m, gravity_sample_window_sec, max_imu_age_sec, min_gravity_samples, continuous republish timer"
+      },
       occupancy_2d: {
         title: "occupancy_2d",
-        subtitle: "Consumes FAST-LIO's registered cloud and builds a rolling 2D log-odds occupancy grid centered on the robot.",
+        subtitle: "Consumes FAST-LIO's registered cloud, transforms it into camera_init_correct, and builds a rolling 2D log-odds occupancy grid centered on the robot.",
         responsibilities: [
           "Subscribes to /cloud_registered and publishes nav_msgs/OccupancyGrid on /static_occupancy.",
-          "Uses TF lookups in camera_init to locate both utlidar_lidar and base_link at the cloud timestamp.",
-          "Filters points by z before projecting to 2D, then raycasts free space and applies hit or miss log-odds updates.",
-          "Maintains a rolling map window with configurable resolution, decay, and clamp ranges."
+          "Waits for camera_init_correct -> camera_init to exist when the corrected map frame is enabled, then resolves the latest map-frame transforms for the cloud, LiDAR, and base frames subject to a freshness limit.",
+          "Transforms the registered FAST-LIO cloud from camera_init into camera_init_correct before applying the configured z filter, so height gating happens in the corrected map frame rather than the raw FAST-LIO frame.",
+          "Optionally republishes the already-filtered XYZ cloud on /occupancy_2d/filtered_pointcloud for debugging, using the corrected map frame in the outgoing header.",
+          "Maintains a rolling map window with configurable resolution, decay, clamp ranges, and log-odds hit or miss updates."
         ],
         meta: [
           "Files: go2_dds_ros2_bridge/nodes/occupancy_2d_node.py + go2_dds_ros2_bridge/occupancy_map.py",
           "Launch name: occupancy_2d",
-          "Default frame: camera_init",
+          "Default frame: camera_init_correct",
           "Publisher QoS: reliable + transient local"
         ],
         reading: [
           "Start with Occupancy2DConfig and the parameter declarations in Occupancy2DNode.__init__() to see every external tuning knob.",
-          "The runtime TF dependency is visible in _lookup_translation() and _cloud_callback(); this is the best place to debug missing frames or stale transforms.",
+          "The runtime TF dependency is visible in _lookup_transform(), _lookup_translation(), and _cloud_callback(); this is the best place to debug missing correction frames or stale transforms.",
+          "The order of operations in _cloud_callback() matters now: decode cloud, transform into camera_init_correct when needed, then apply the z bounds, then integrate.",
           "For algorithm behavior, switch to occupancy_map.py. That file owns rolling window shifting, row_step-aware cloud extraction, numba kernels, log-odds fusion, and decay.",
-          "The warning paths are intentional: frame mismatch warnings, TF throttling, and decode failures are meant to fail soft instead of crashing the mapper."
+          "The warning paths are intentional: correction-gate warnings, stale-TF throttling, and decode failures are meant to fail soft instead of crashing the mapper."
         ],
         launch: [
           "The node is guarded by the occupancy launch argument and reads its defaults from config/occupancy_2d.yaml.",
-          "Launch-time parameter overrides remap only input_topic and output_topic, keeping the rest of the map behavior in YAML or direct ROS parameter overrides.",
+          "fast_lio.launch.py overrides map_frame with corrected_map_frame and currently enables the node's debug publisher by setting debug=true in the launch-time parameter override block.",
+          "Launch-time parameter overrides remap input_topic and output_topic while leaving the rest of the map behavior in YAML or direct ROS parameter overrides.",
           "Because the output QoS is transient local, late subscribers can still receive the most recent grid."
         ],
-        code: "Entry point: Occupancy2DNode\nPrimary data path: /cloud_registered -> extract_xyz_points() -> TF lookup in camera_init -> RollingOccupancyMap -> nav_msgs/OccupancyGrid\nNotable hooks: log-odds parameters, numba availability fallback, rolling cell recentering, z-filter bounds, transient-local output QoS"
+        code: "Entry point: Occupancy2DNode\nPrimary data path: /cloud_registered -> extract_xyz_points() -> transform into camera_init_correct -> z filtering in corrected frame -> optional debug PointCloud2 -> RollingOccupancyMap -> nav_msgs/OccupancyGrid\nNotable hooks: debug flag and debug_filtered_pointcloud_topic, correction-transform gate, max_tf_age_sec freshness guard, rolling cell recentering, transient-local output QoS"
       },
       rviz2: {
         title: "rviz2",
@@ -922,7 +965,7 @@
         ],
         meta: [
           "Launch anchor: launch/fast_lio.launch.py",
-          "Config path source: FindPackageShare('fast_lio') / rviz / fastlio.rviz",
+          "Config path source: FindPackageShare('go2_dds_ros2_bridge') / config / fast_lio_corrected.rviz",
           "Condition: IfCondition(LaunchConfiguration('rviz'))",
           "Role: operator-facing inspection"
         ],
