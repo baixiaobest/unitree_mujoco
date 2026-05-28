@@ -14,11 +14,7 @@ from builtin_interfaces.msg import Time
 from rclpy.node import Node
 from sensor_msgs.msg import Imu
 
-
-SIMULATION_DOMAIN_ID = 1
-HARDWARE_DOMAIN_ID = 0
-SIMULATION_INTERFACE = "wlo1"
-HARDWARE_INTERFACE = "enp108s0"
+from go2_dds_ros2_bridge.dds_runtime import add_dds_runtime_arguments, resolve_runtime_arguments
 
 DEFAULT_DDS_IMU_TOPIC = "rt/lowstate"
 DEFAULT_ROS_IMU_TOPIC = "/imu/data_raw"
@@ -140,24 +136,7 @@ def parse_args() -> BridgeConfig:
     parser = argparse.ArgumentParser(
         description="Bridge Unitree raw DDS LowState IMU data to a ROS2 sensor_msgs/Imu topic."
     )
-    parser.add_argument(
-        "--run-mode",
-        choices=("simulation", "hardware"),
-        default="hardware",
-        help="Select the default DDS domain/interface pair.",
-    )
-    parser.add_argument(
-        "--dds-domain-id",
-        type=int,
-        default=None,
-        help="Override the raw DDS domain id used to subscribe to the Unitree lowstate topic.",
-    )
-    parser.add_argument(
-        "--dds-interface",
-        type=str,
-        default=None,
-        help="Override the network interface used for the raw DDS subscriber.",
-    )
+    add_dds_runtime_arguments(parser)
     parser.add_argument(
         "--dds-topic",
         type=str,
@@ -184,8 +163,7 @@ def parse_args() -> BridgeConfig:
     )
     non_ros_args = rclpy.utilities.remove_ros_args(args=sys.argv)[1:]
     args = parser.parse_args(non_ros_args)
-    default_domain = SIMULATION_DOMAIN_ID if args.run_mode == "simulation" else HARDWARE_DOMAIN_ID
-    default_interface = SIMULATION_INTERFACE if args.run_mode == "simulation" else HARDWARE_INTERFACE
+    runtime_profile = resolve_runtime_arguments(args)
     configured_variances, variance_source = load_imu_variances(args.config_file)
 
     orientation_variance = configured_variances["orientation"]
@@ -196,8 +174,8 @@ def parse_args() -> BridgeConfig:
         dds_topic=args.dds_topic,
         ros_topic=args.ros_topic,
         frame_id=args.frame_id,
-        dds_domain_id=default_domain if args.dds_domain_id is None else args.dds_domain_id,
-        dds_interface=default_interface if args.dds_interface is None else args.dds_interface,
+        dds_domain_id=runtime_profile.domain_id,
+        dds_interface=runtime_profile.interface,
         orientation_variance=max(orientation_variance, 0.0),
         angular_velocity_variance=max(angular_velocity_variance, 0.0),
         linear_acceleration_variance=max(linear_acceleration_variance, 0.0),

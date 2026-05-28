@@ -23,11 +23,14 @@ from go2_dds_ros2_bridge.occupancy_map import (
     RollingOccupancyMap,
     extract_xyz_points,
 )
+from go2_dds_ros2_bridge.tf_utils import rotation_matrix_from_quaternion_xyzw
 
 
 DEFAULT_INPUT_TOPIC = "/cloud_registered"
 DEFAULT_OUTPUT_TOPIC = "/static_occupancy"
-DEFAULT_MAP_FRAME = "camera_init"
+DEFAULT_MAP_FRAME = "camera_init_correct"
+DEFAULT_REQUIRED_CORRECTION_PARENT_FRAME = "camera_init_correct"
+DEFAULT_REQUIRED_CORRECTION_CHILD_FRAME = "camera_init"
 DEFAULT_BASE_FRAME = "base_link"
 DEFAULT_LIDAR_FRAME = "utlidar_lidar"
 DEFAULT_MIN_Z_M = 0.1
@@ -35,6 +38,7 @@ DEFAULT_MAX_Z_M = 1.5
 DEFAULT_RESOLUTION_M = 0.1
 DEFAULT_WIDTH_M = 15.0
 DEFAULT_HEIGHT_M = 15.0
+DEFAULT_MAX_TF_AGE_SEC = 1.0
 DEFAULT_HIT_LOG_ODDS_INCREMENT = 0.85
 DEFAULT_MISS_LOG_ODDS_DECREMENT = 0.4
 DEFAULT_DECAY_FACTOR = 0.999
@@ -60,6 +64,7 @@ class Occupancy2DConfig:
     resolution_m: float
     width_m: float
     height_m: float
+    max_tf_age_sec: float
     hit_log_odds_increment: float
     miss_log_odds_decrement: float
     decay_factor: float
@@ -81,6 +86,7 @@ def parse_args() -> Occupancy2DConfig:
     parser.add_argument("--resolution-m", type=float, default=DEFAULT_RESOLUTION_M)
     parser.add_argument("--width-m", type=float, default=DEFAULT_WIDTH_M)
     parser.add_argument("--height-m", type=float, default=DEFAULT_HEIGHT_M)
+    parser.add_argument("--max-tf-age-sec", type=float, default=DEFAULT_MAX_TF_AGE_SEC)
     parser.add_argument("--hit-log-odds-increment", type=float, default=DEFAULT_HIT_LOG_ODDS_INCREMENT)
     parser.add_argument("--miss-log-odds-decrement", type=float, default=DEFAULT_MISS_LOG_ODDS_DECREMENT)
     parser.add_argument("--decay-factor", type=float, default=DEFAULT_DECAY_FACTOR)
@@ -99,6 +105,8 @@ def parse_args() -> Occupancy2DConfig:
         raise SystemExit("--decay-factor must be in the interval (0, 1]")
     if args.min_log_odds >= args.max_log_odds:
         raise SystemExit("--min-log-odds must be smaller than --max-log-odds")
+    if args.max_tf_age_sec < 0.0:
+        raise SystemExit("--max-tf-age-sec must be non-negative")
 
     return Occupancy2DConfig(
         input_topic=args.input_topic,
@@ -111,6 +119,7 @@ def parse_args() -> Occupancy2DConfig:
         resolution_m=float(args.resolution_m),
         width_m=float(args.width_m),
         height_m=float(args.height_m),
+        max_tf_age_sec=float(args.max_tf_age_sec),
         hit_log_odds_increment=float(args.hit_log_odds_increment),
         miss_log_odds_decrement=float(args.miss_log_odds_decrement),
         decay_factor=float(args.decay_factor),
@@ -132,6 +141,7 @@ class Occupancy2DNode(Node):
         self.declare_parameter("resolution_m", config.resolution_m)
         self.declare_parameter("width_m", config.width_m)
         self.declare_parameter("height_m", config.height_m)
+        self.declare_parameter("max_tf_age_sec", config.max_tf_age_sec)
         self.declare_parameter("hit_log_odds_increment", config.hit_log_odds_increment)
         self.declare_parameter("miss_log_odds_decrement", config.miss_log_odds_decrement)
         self.declare_parameter("decay_factor", config.decay_factor)
@@ -148,6 +158,7 @@ class Occupancy2DNode(Node):
             resolution_m=float(self.get_parameter("resolution_m").value),
             width_m=float(self.get_parameter("width_m").value),
             height_m=float(self.get_parameter("height_m").value),
+            max_tf_age_sec=float(self.get_parameter("max_tf_age_sec").value),
             hit_log_odds_increment=float(self.get_parameter("hit_log_odds_increment").value),
             miss_log_odds_decrement=float(self.get_parameter("miss_log_odds_decrement").value),
             decay_factor=float(self.get_parameter("decay_factor").value),
@@ -174,7 +185,9 @@ class Occupancy2DNode(Node):
             10,
         )
         self._tf_warning_last_ns = 0
-        self._frame_warning_emitted = False
+        self._stale_tf_warning_last_ns = 0
+        self._cloud_transform_info_emitted = False
+        self._missing_correction_warning_emitted = False
 
         if not NUMBA_AVAILABLE:
             self.get_logger().warning(
@@ -183,7 +196,7 @@ class Occupancy2DNode(Node):
 
         self.get_logger().info(
             "Building a rolling 2D occupancy grid from '%s' to '%s' in frame '%s' with size %.1fm x %.1fm at %.2fm resolution "
-            "and z filtering in [%.2f, %.2f] m using lidar frame '%s' and base frame '%s'. "
+            "and z filtering in [%.2f, %.2f] m using lidar frame '%s' and base frame '%s'. Maximum accepted latest-TF age is %.2f s. "
             "Log-odds fusion uses hit=%.3f, miss=%.3f, decay=%.5f, clamp=[%.2f, %.2f]."
             % (
                 self._config.input_topic,
@@ -196,6 +209,7 @@ class Occupancy2DNode(Node):
                 self._config.max_z_m,
                 self._config.lidar_frame,
                 self._config.base_frame,
+                self._config.max_tf_age_sec,
                 self._config.hit_log_odds_increment,
                 self._config.miss_log_odds_decrement,
                 self._config.decay_factor,
@@ -204,25 +218,42 @@ class Occupancy2DNode(Node):
             )
         )
 
-    def _lookup_translation(self, *, target_frame: str, source_frame: str, stamp: Time) -> np.ndarray | None:
+    def _lookup_transform(
+        self,
+        *,
+        target_frame: str,
+        source_frame: str,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        last_error: Exception | None = None
         try:
             transform = self._tf_buffer.lookup_transform(
                 target_frame,
                 source_frame,
-                stamp,
+                Time(),
                 timeout=Duration(seconds=0.05),
             )
         except TransformException as error:
+            last_error = error
             now_ns = time_ns()
             if now_ns - self._tf_warning_last_ns >= 2_000_000_000:
                 self._tf_warning_last_ns = now_ns
                 self.get_logger().warning(
                     "Failed to resolve transform %s -> %s for occupancy mapping: %s"
-                    % (target_frame, source_frame, error)
+                    % (target_frame, source_frame, last_error)
                 )
             return None
 
-        return np.array(
+        if not self._is_transform_recent_enough(transform):
+            now_ns = time_ns()
+            if now_ns - self._stale_tf_warning_last_ns >= 2_000_000_000:
+                self._stale_tf_warning_last_ns = now_ns
+                self.get_logger().warning(
+                    "Latest transform %s -> %s is stale by %.3f s for occupancy mapping."
+                    % (target_frame, source_frame, self._transform_age_sec(transform))
+                )
+            return None
+
+        translation = np.array(
             [
                 float(transform.transform.translation.x),
                 float(transform.transform.translation.y),
@@ -230,25 +261,103 @@ class Occupancy2DNode(Node):
             ],
             dtype=np.float64,
         )
+        rotation = transform.transform.rotation
+        rotation_matrix = rotation_matrix_from_quaternion_xyzw(
+            float(rotation.x),
+            float(rotation.y),
+            float(rotation.z),
+            float(rotation.w),
+        )
+        return translation, rotation_matrix
+
+    def _transform_age_sec(self, transform) -> float:
+        transform_stamp = Time.from_msg(transform.header.stamp)
+        if transform_stamp.nanoseconds == 0:
+            return 0.0
+        now_ns = self.get_clock().now().nanoseconds
+        return max(0.0, (now_ns - transform_stamp.nanoseconds) / 1e9)
+
+    def _is_transform_recent_enough(self, transform) -> bool:
+        return self._transform_age_sec(transform) <= self._config.max_tf_age_sec
+
+    def _lookup_translation(
+        self,
+        *,
+        target_frame: str,
+        source_frame: str,
+    ) -> np.ndarray | None:
+        transform = self._lookup_transform(
+            target_frame=target_frame,
+            source_frame=source_frame,
+        )
+        if transform is None:
+            return None
+        translation, _ = transform
+        return translation
+
+    def _can_resolve_transform(
+        self,
+        *,
+        target_frame: str,
+        source_frame: str,
+    ) -> bool:
+        transform = self._lookup_transform(
+            target_frame=target_frame,
+            source_frame=source_frame,
+        )
+        return transform is not None
+
+    def _requires_correction_transform(self) -> bool:
+        return self._config.map_frame == DEFAULT_REQUIRED_CORRECTION_PARENT_FRAME
 
     def _cloud_callback(self, cloud_msg: PointCloud2) -> None:
-        if not self._frame_warning_emitted and cloud_msg.header.frame_id != self._config.map_frame:
-            self._frame_warning_emitted = True
-            self.get_logger().warning(
-                "Incoming registered cloud frame_id '%s' does not match configured map frame '%s'."
-                % (cloud_msg.header.frame_id, self._config.map_frame)
-            )
-
         stamp = Time.from_msg(cloud_msg.header.stamp)
+        cloud_frame = cloud_msg.header.frame_id or self._config.map_frame
+        cloud_transform: tuple[np.ndarray, np.ndarray] | None = None
+
+        if self._requires_correction_transform():
+            if not self._can_resolve_transform(
+                target_frame=self._config.map_frame,
+                source_frame=DEFAULT_REQUIRED_CORRECTION_CHILD_FRAME,
+            ):
+                if not self._missing_correction_warning_emitted:
+                    self._missing_correction_warning_emitted = True
+                    self.get_logger().warning(
+                        "Skipping occupancy updates until correction transform %s -> %s becomes available."
+                        % (self._config.map_frame, DEFAULT_REQUIRED_CORRECTION_CHILD_FRAME)
+                    )
+                return
+            self._missing_correction_warning_emitted = False
+            if cloud_frame == DEFAULT_REQUIRED_CORRECTION_CHILD_FRAME:
+                cloud_transform = self._lookup_transform(
+                    target_frame=self._config.map_frame,
+                    source_frame=cloud_frame,
+                )
+                if cloud_transform is None:
+                    return
+
+        if cloud_frame != self._config.map_frame:
+            if not self._cloud_transform_info_emitted:
+                self._cloud_transform_info_emitted = True
+                self.get_logger().info(
+                    "Transforming registered clouds from '%s' into occupancy map frame '%s'."
+                    % (cloud_frame, self._config.map_frame)
+                )
+            if cloud_transform is None:
+                cloud_transform = self._lookup_transform(
+                    target_frame=self._config.map_frame,
+                    source_frame=cloud_frame,
+                )
+                if cloud_transform is None:
+                    return
+
         lidar_translation = self._lookup_translation(
             target_frame=self._config.map_frame,
             source_frame=self._config.lidar_frame,
-            stamp=stamp,
         )
         base_translation = self._lookup_translation(
             target_frame=self._config.map_frame,
             source_frame=self._config.base_frame,
-            stamp=stamp,
         )
         if lidar_translation is None or base_translation is None:
             return
@@ -264,6 +373,10 @@ class Occupancy2DNode(Node):
             filtered_points = np.ascontiguousarray(points_xyz[height_mask], dtype=np.float64)
         else:
             filtered_points = np.empty((0, 3), dtype=np.float64)
+
+        if filtered_points.size > 0 and cloud_transform is not None:
+            cloud_translation, cloud_rotation = cloud_transform
+            filtered_points = np.ascontiguousarray(filtered_points @ cloud_rotation.T + cloud_translation, dtype=np.float64)
 
         self._mapper.integrate_point_cloud(
             points_xyz_m=filtered_points,

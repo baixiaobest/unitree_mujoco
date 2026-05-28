@@ -5,6 +5,7 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
+from go2_dds_ros2_bridge.dds_runtime import DEFAULT_HARDWARE_DDS_RUNTIME, DEFAULT_SIMULATION_DDS_RUNTIME
 from go2_dds_ros2_bridge.tf_utils import (
     DEFAULT_IMU_TF_XYZ,
     DEFAULT_LIDAR_TF_RPY_DEG,
@@ -16,14 +17,39 @@ from go2_dds_ros2_bridge.tf_utils import (
 
 def _make_common_bridge_arguments(context) -> list[str]:
     run_mode = LaunchConfiguration("run_mode").perform(context)
-    dds_domain_id = LaunchConfiguration("dds_domain_id").perform(context).strip()
-    dds_interface = LaunchConfiguration("dds_interface").perform(context).strip()
+    dds_domain_id_override = LaunchConfiguration("dds_domain_id").perform(context).strip()
+    dds_interface_override = LaunchConfiguration("dds_interface").perform(context).strip()
+    simulation_dds_domain_id = LaunchConfiguration("simulation_dds_domain_id").perform(context).strip()
+    hardware_dds_domain_id = LaunchConfiguration("hardware_dds_domain_id").perform(context).strip()
+    simulation_dds_interface = LaunchConfiguration("simulation_dds_interface").perform(context).strip()
+    hardware_dds_interface = LaunchConfiguration("hardware_dds_interface").perform(context).strip()
 
-    arguments = ["--run-mode", run_mode]
-    if dds_domain_id:
-        arguments.extend(["--dds-domain-id", dds_domain_id])
-    if dds_interface:
-        arguments.extend(["--dds-interface", dds_interface])
+    if run_mode == "simulation":
+        resolved_domain_id = (
+            dds_domain_id_override
+            or simulation_dds_domain_id
+            or str(DEFAULT_SIMULATION_DDS_RUNTIME.domain_id)
+        )
+        resolved_interface = (
+            dds_interface_override
+            or simulation_dds_interface
+            or DEFAULT_SIMULATION_DDS_RUNTIME.interface
+        )
+    else:
+        resolved_domain_id = (
+            dds_domain_id_override
+            or hardware_dds_domain_id
+            or str(DEFAULT_HARDWARE_DDS_RUNTIME.domain_id)
+        )
+        resolved_interface = (
+            dds_interface_override
+            or hardware_dds_interface
+            or DEFAULT_HARDWARE_DDS_RUNTIME.interface
+        )
+
+    arguments = ["--run-mode", run_mode, "--dds-domain-id", resolved_domain_id]
+    if resolved_interface:
+        arguments.extend(["--dds-interface", resolved_interface])
     return arguments
 
 
@@ -32,6 +58,7 @@ def _make_runtime_nodes(context, *args, **kwargs):
     fast_lio_config = LaunchConfiguration("fast_lio_config").perform(context)
     cloud_topic = LaunchConfiguration("cloud_topic").perform(context)
     imu_topic = LaunchConfiguration("imu_topic").perform(context)
+    corrected_map_frame = LaunchConfiguration("corrected_map_frame").perform(context)
     occupancy_config = LaunchConfiguration("occupancy_config").perform(context)
     occupancy_cloud_topic = LaunchConfiguration("occupancy_cloud_topic").perform(context)
     occupancy_output_topic = LaunchConfiguration("occupancy_output_topic").perform(context)
@@ -108,6 +135,19 @@ def _make_runtime_nodes(context, *args, **kwargs):
         ),
         Node(
             package="go2_dds_ros2_bridge",
+            executable="fast_lio_frame_correction",
+            name="fast_lio_frame_correction",
+            output="screen",
+            arguments=common_bridge_arguments
+            + [
+                "--imu-topic", imu_topic,
+                "--parent-frame", corrected_map_frame,
+                "--child-frame", "camera_init",
+                "--body-frame", "body",
+            ],
+        ),
+        Node(
+            package="go2_dds_ros2_bridge",
             executable="occupancy_2d",
             name="occupancy_2d",
             output="screen",
@@ -116,6 +156,7 @@ def _make_runtime_nodes(context, *args, **kwargs):
                 {
                     "input_topic": occupancy_cloud_topic,
                     "output_topic": occupancy_output_topic,
+                    "map_frame": corrected_map_frame,
                 },
             ],
             condition=IfCondition(LaunchConfiguration("occupancy")),
@@ -141,12 +182,32 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "dds_domain_id",
                 default_value="",
-                description="Optional raw DDS domain override passed to the bridge nodes.",
+                description="Optional global raw DDS domain override passed to the bridge nodes.",
             ),
             DeclareLaunchArgument(
                 "dds_interface",
                 default_value="",
-                description="Optional raw DDS interface override passed to the bridge nodes.",
+                description="Optional global raw DDS interface override passed to the bridge nodes.",
+            ),
+            DeclareLaunchArgument(
+                "simulation_dds_domain_id",
+                default_value=str(DEFAULT_SIMULATION_DDS_RUNTIME.domain_id),
+                description="Shared DDS domain id used when run_mode=simulation and no explicit dds_domain_id override is set.",
+            ),
+            DeclareLaunchArgument(
+                "hardware_dds_domain_id",
+                default_value=str(DEFAULT_HARDWARE_DDS_RUNTIME.domain_id),
+                description="Shared DDS domain id used when run_mode=hardware and no explicit dds_domain_id override is set.",
+            ),
+            DeclareLaunchArgument(
+                "simulation_dds_interface",
+                default_value=DEFAULT_SIMULATION_DDS_RUNTIME.interface,
+                description="Shared DDS network interface used when run_mode=simulation and no explicit dds_interface override is set.",
+            ),
+            DeclareLaunchArgument(
+                "hardware_dds_interface",
+                default_value=DEFAULT_HARDWARE_DDS_RUNTIME.interface,
+                description="Shared DDS network interface used when run_mode=hardware and no explicit dds_interface override is set.",
             ),
             DeclareLaunchArgument(
                 "fast_lio_config",
@@ -164,6 +225,11 @@ def generate_launch_description() -> LaunchDescription:
                 "imu_topic",
                 default_value="/imu/data_fastlio",
                 description="Cadence-corrected IMU topic forwarded into FAST-LIO.",
+            ),
+            DeclareLaunchArgument(
+                "corrected_map_frame",
+                default_value="camera_init_correct",
+                description="Parent frame that levels FAST-LIO's camera_init using gravity-based roll/pitch correction.",
             ),
             DeclareLaunchArgument(
                 "occupancy",
@@ -190,11 +256,13 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "rviz",
                 default_value="false",
-                description="Launch RViz with the upstream FAST-LIO config.",
+                description="Launch RViz with the corrected FAST-LIO config.",
             ),
             DeclareLaunchArgument(
                 "rviz_config",
-                default_value=PathJoinSubstitution([FindPackageShare("fast_lio"), "rviz", "fastlio.rviz"]),
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("go2_dds_ros2_bridge"), "config", "fast_lio_corrected.rviz"]
+                ),
                 description="Path to the RViz config file.",
             ),
             OpaqueFunction(function=_make_runtime_nodes),

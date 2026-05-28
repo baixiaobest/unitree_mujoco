@@ -29,6 +29,13 @@ install(
 
 install(
   PROGRAMS
+    go2_dds_ros2_bridge/nodes/fast_lio_frame_correction_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME fast_lio_frame_correction
+)
+
+install(
+  PROGRAMS
     go2_dds_ros2_bridge/tick_experiment_node.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME tick_experiment_node

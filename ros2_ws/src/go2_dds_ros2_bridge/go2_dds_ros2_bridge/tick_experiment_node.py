@@ -15,11 +15,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64, String
 
-
-SIMULATION_DOMAIN_ID = 1
-HARDWARE_DOMAIN_ID = 0
-SIMULATION_INTERFACE = "wlo1"
-HARDWARE_INTERFACE = "enp108s0"
+from go2_dds_ros2_bridge.dds_runtime import add_dds_runtime_arguments, resolve_runtime_arguments
 
 DEFAULT_DDS_TOPIC = "rt/lowstate"
 DEFAULT_MEAN_TOPIC = "/lowstate_tick_experiment/mean_sec_per_tick"
@@ -98,24 +94,7 @@ def parse_args() -> BridgeConfig:
             "DDS receive intervals against tick increments."
         )
     )
-    parser.add_argument(
-        "--run-mode",
-        choices=("simulation", "hardware"),
-        default="hardware",
-        help="Select the default DDS domain/interface pair.",
-    )
-    parser.add_argument(
-        "--dds-domain-id",
-        type=int,
-        default=None,
-        help="Override the raw DDS domain id used to subscribe to the Unitree lowstate topic.",
-    )
-    parser.add_argument(
-        "--dds-interface",
-        type=str,
-        default=None,
-        help="Override the network interface used for the raw DDS subscriber.",
-    )
+    add_dds_runtime_arguments(parser)
     parser.add_argument(
         "--dds-topic",
         type=str,
@@ -167,8 +146,7 @@ def parse_args() -> BridgeConfig:
 
     non_ros_args = rclpy.utilities.remove_ros_args(args=sys.argv)[1:]
     args = parser.parse_args(non_ros_args)
-    default_domain = SIMULATION_DOMAIN_ID if args.run_mode == "simulation" else HARDWARE_DOMAIN_ID
-    default_interface = SIMULATION_INTERFACE if args.run_mode == "simulation" else HARDWARE_INTERFACE
+    runtime_profile = resolve_runtime_arguments(args)
 
     return BridgeConfig(
         dds_topic=args.dds_topic,
@@ -177,8 +155,8 @@ def parse_args() -> BridgeConfig:
         interval_topic=args.interval_topic,
         tick_increment_topic=args.tick_increment_topic,
         tick_increment_summary_topic=args.tick_increment_summary_topic,
-        dds_domain_id=default_domain if args.dds_domain_id is None else args.dds_domain_id,
-        dds_interface=default_interface if args.dds_interface is None else args.dds_interface,
+        dds_domain_id=runtime_profile.domain_id,
+        dds_interface=runtime_profile.interface,
         publish_period_sec=max(args.publish_period_sec, 0.1),
         summary_top_k=max(args.summary_top_k, 1),
     )

@@ -53,6 +53,43 @@ def rotation_matrix_from_rpy_degrees(roll_deg: float, pitch_deg: float, yaw_deg:
     )
 
 
+def normalize_vector(vector: np.ndarray, *, eps: float = 1e-9) -> np.ndarray:
+    norm = float(np.linalg.norm(vector))
+    if norm <= eps:
+        raise ValueError("Cannot normalize a near-zero vector.")
+    return np.asarray(vector, dtype=np.float64) / norm
+
+
+def rotation_matrix_from_quaternion_xyzw(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+    xx = qx * qx
+    yy = qy * qy
+    zz = qz * qz
+    xy = qx * qy
+    xz = qx * qz
+    yz = qy * qz
+    wx = qw * qx
+    wy = qw * qy
+    wz = qw * qz
+    return np.array(
+        [
+            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
+            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
+            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def roll_pitch_correction_from_gravity(gravity_vector: np.ndarray) -> tuple[float, float, np.ndarray]:
+    gravity_direction = normalize_vector(gravity_vector)
+    roll = math.atan2(-float(gravity_direction[1]), -float(gravity_direction[2]))
+    roll_rotation = rotation_matrix_from_rpy(roll, 0.0, 0.0)
+    gravity_after_roll = roll_rotation @ gravity_direction
+    pitch = math.atan2(float(gravity_after_roll[0]), -float(gravity_after_roll[2]))
+    correction_rotation = rotation_matrix_from_rpy(roll, pitch, 0.0)
+    return roll, pitch, correction_rotation
+
+
 def transform_matrix_from_xyz_rpy_degrees(
     x: float,
     y: float,
