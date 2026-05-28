@@ -157,6 +157,7 @@ def _make_runtime_nodes(context, *args, **kwargs):
                     "input_topic": occupancy_cloud_topic,
                     "output_topic": occupancy_output_topic,
                     "map_frame": corrected_map_frame,
+                    "debug": True,
                 },
             ],
             condition=IfCondition(LaunchConfiguration("occupancy")),

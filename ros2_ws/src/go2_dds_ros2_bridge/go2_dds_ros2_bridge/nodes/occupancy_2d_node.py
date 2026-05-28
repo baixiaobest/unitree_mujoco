@@ -15,7 +15,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from go2_dds_ros2_bridge.occupancy_map import (
@@ -28,6 +28,7 @@ from go2_dds_ros2_bridge.tf_utils import rotation_matrix_from_quaternion_xyzw
 
 DEFAULT_INPUT_TOPIC = "/cloud_registered"
 DEFAULT_OUTPUT_TOPIC = "/static_occupancy"
+DEFAULT_DEBUG_FILTERED_POINTCLOUD_TOPIC = "/occupancy_2d/filtered_pointcloud"
 DEFAULT_MAP_FRAME = "camera_init_correct"
 DEFAULT_REQUIRED_CORRECTION_PARENT_FRAME = "camera_init_correct"
 DEFAULT_REQUIRED_CORRECTION_CHILD_FRAME = "camera_init"
@@ -39,6 +40,7 @@ DEFAULT_RESOLUTION_M = 0.1
 DEFAULT_WIDTH_M = 15.0
 DEFAULT_HEIGHT_M = 15.0
 DEFAULT_MAX_TF_AGE_SEC = 1.0
+DEFAULT_DEBUG = False
 DEFAULT_HIT_LOG_ODDS_INCREMENT = 0.85
 DEFAULT_MISS_LOG_ODDS_DECREMENT = 0.4
 DEFAULT_DECAY_FACTOR = 0.999
@@ -56,6 +58,7 @@ OUTPUT_QOS = QoSProfile(
 class Occupancy2DConfig:
     input_topic: str
     output_topic: str
+    debug_filtered_pointcloud_topic: str
     map_frame: str
     base_frame: str
     lidar_frame: str
@@ -65,6 +68,7 @@ class Occupancy2DConfig:
     width_m: float
     height_m: float
     max_tf_age_sec: float
+    debug: bool
     hit_log_odds_increment: float
     miss_log_odds_decrement: float
     decay_factor: float
@@ -78,6 +82,7 @@ def parse_args() -> Occupancy2DConfig:
     )
     parser.add_argument("--input-topic", type=str, default=DEFAULT_INPUT_TOPIC)
     parser.add_argument("--output-topic", type=str, default=DEFAULT_OUTPUT_TOPIC)
+    parser.add_argument("--debug-filtered-pointcloud-topic", type=str, default=DEFAULT_DEBUG_FILTERED_POINTCLOUD_TOPIC)
     parser.add_argument("--map-frame", type=str, default=DEFAULT_MAP_FRAME)
     parser.add_argument("--base-frame", type=str, default=DEFAULT_BASE_FRAME)
     parser.add_argument("--lidar-frame", type=str, default=DEFAULT_LIDAR_FRAME)
@@ -87,6 +92,11 @@ def parse_args() -> Occupancy2DConfig:
     parser.add_argument("--width-m", type=float, default=DEFAULT_WIDTH_M)
     parser.add_argument("--height-m", type=float, default=DEFAULT_HEIGHT_M)
     parser.add_argument("--max-tf-age-sec", type=float, default=DEFAULT_MAX_TF_AGE_SEC)
+    parser.add_argument(
+        "--debug",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_DEBUG,
+    )
     parser.add_argument("--hit-log-odds-increment", type=float, default=DEFAULT_HIT_LOG_ODDS_INCREMENT)
     parser.add_argument("--miss-log-odds-decrement", type=float, default=DEFAULT_MISS_LOG_ODDS_DECREMENT)
     parser.add_argument("--decay-factor", type=float, default=DEFAULT_DECAY_FACTOR)
@@ -111,6 +121,7 @@ def parse_args() -> Occupancy2DConfig:
     return Occupancy2DConfig(
         input_topic=args.input_topic,
         output_topic=args.output_topic,
+        debug_filtered_pointcloud_topic=args.debug_filtered_pointcloud_topic,
         map_frame=args.map_frame,
         base_frame=args.base_frame,
         lidar_frame=args.lidar_frame,
@@ -120,6 +131,7 @@ def parse_args() -> Occupancy2DConfig:
         width_m=float(args.width_m),
         height_m=float(args.height_m),
         max_tf_age_sec=float(args.max_tf_age_sec),
+        debug=bool(args.debug),
         hit_log_odds_increment=float(args.hit_log_odds_increment),
         miss_log_odds_decrement=float(args.miss_log_odds_decrement),
         decay_factor=float(args.decay_factor),
@@ -133,6 +145,7 @@ class Occupancy2DNode(Node):
         super().__init__("occupancy_2d")
         self.declare_parameter("input_topic", config.input_topic)
         self.declare_parameter("output_topic", config.output_topic)
+        self.declare_parameter("debug_filtered_pointcloud_topic", config.debug_filtered_pointcloud_topic)
         self.declare_parameter("map_frame", config.map_frame)
         self.declare_parameter("base_frame", config.base_frame)
         self.declare_parameter("lidar_frame", config.lidar_frame)
@@ -142,6 +155,7 @@ class Occupancy2DNode(Node):
         self.declare_parameter("width_m", config.width_m)
         self.declare_parameter("height_m", config.height_m)
         self.declare_parameter("max_tf_age_sec", config.max_tf_age_sec)
+        self.declare_parameter("debug", config.debug)
         self.declare_parameter("hit_log_odds_increment", config.hit_log_odds_increment)
         self.declare_parameter("miss_log_odds_decrement", config.miss_log_odds_decrement)
         self.declare_parameter("decay_factor", config.decay_factor)
@@ -150,6 +164,7 @@ class Occupancy2DNode(Node):
         self._config = Occupancy2DConfig(
             input_topic=str(self.get_parameter("input_topic").value),
             output_topic=str(self.get_parameter("output_topic").value),
+            debug_filtered_pointcloud_topic=str(self.get_parameter("debug_filtered_pointcloud_topic").value),
             map_frame=str(self.get_parameter("map_frame").value),
             base_frame=str(self.get_parameter("base_frame").value),
             lidar_frame=str(self.get_parameter("lidar_frame").value),
@@ -159,6 +174,7 @@ class Occupancy2DNode(Node):
             width_m=float(self.get_parameter("width_m").value),
             height_m=float(self.get_parameter("height_m").value),
             max_tf_age_sec=float(self.get_parameter("max_tf_age_sec").value),
+            debug=bool(self.get_parameter("debug").value),
             hit_log_odds_increment=float(self.get_parameter("hit_log_odds_increment").value),
             miss_log_odds_decrement=float(self.get_parameter("miss_log_odds_decrement").value),
             decay_factor=float(self.get_parameter("decay_factor").value),
@@ -178,6 +194,11 @@ class Occupancy2DNode(Node):
         self._tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._publisher = self.create_publisher(OccupancyGrid, self._config.output_topic, OUTPUT_QOS)
+        self._debug_filtered_pointcloud_publisher = (
+            self.create_publisher(PointCloud2, self._config.debug_filtered_pointcloud_topic, 10)
+            if self._config.debug
+            else None
+        )
         self._subscription = self.create_subscription(
             PointCloud2,
             self._config.input_topic,
@@ -197,6 +218,7 @@ class Occupancy2DNode(Node):
         self.get_logger().info(
             "Building a rolling 2D occupancy grid from '%s' to '%s' in frame '%s' with size %.1fm x %.1fm at %.2fm resolution "
             "and z filtering in [%.2f, %.2f] m using lidar frame '%s' and base frame '%s'. Maximum accepted latest-TF age is %.2f s. "
+            "Debug filtered cloud publishing is %s on '%s'. "
             "Log-odds fusion uses hit=%.3f, miss=%.3f, decay=%.5f, clamp=[%.2f, %.2f]."
             % (
                 self._config.input_topic,
@@ -210,6 +232,8 @@ class Occupancy2DNode(Node):
                 self._config.lidar_frame,
                 self._config.base_frame,
                 self._config.max_tf_age_sec,
+                self._config.debug,
+                self._config.debug_filtered_pointcloud_topic,
                 self._config.hit_log_odds_increment,
                 self._config.miss_log_odds_decrement,
                 self._config.decay_factor,
@@ -217,6 +241,25 @@ class Occupancy2DNode(Node):
                 self._config.max_log_odds,
             )
         )
+
+    def _build_xyz_cloud_message(self, *, stamp: Time, points_xyz_m: np.ndarray) -> PointCloud2:
+        cloud_msg = PointCloud2()
+        cloud_msg.header.stamp = stamp.to_msg()
+        cloud_msg.header.frame_id = self._config.map_frame
+        cloud_msg.height = 1
+        cloud_msg.width = int(points_xyz_m.shape[0])
+        cloud_msg.fields = [
+            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+        ]
+        cloud_msg.is_bigendian = False
+        cloud_msg.point_step = 12
+        cloud_msg.row_step = cloud_msg.point_step * cloud_msg.width
+        cloud_msg.is_dense = True
+        xyz_float32 = np.ascontiguousarray(points_xyz_m, dtype=np.float32)
+        cloud_msg.data = xyz_float32.tobytes()
+        return cloud_msg
 
     def _lookup_transform(
         self,
@@ -369,14 +412,22 @@ class Occupancy2DNode(Node):
             return
 
         if points_xyz.size > 0:
-            height_mask = (points_xyz[:, 2] >= self._config.min_z_m) & (points_xyz[:, 2] <= self._config.max_z_m)
-            filtered_points = np.ascontiguousarray(points_xyz[height_mask], dtype=np.float64)
+            filtered_points = np.ascontiguousarray(points_xyz, dtype=np.float64)
         else:
             filtered_points = np.empty((0, 3), dtype=np.float64)
 
         if filtered_points.size > 0 and cloud_transform is not None:
             cloud_translation, cloud_rotation = cloud_transform
             filtered_points = np.ascontiguousarray(filtered_points @ cloud_rotation.T + cloud_translation, dtype=np.float64)
+
+        if filtered_points.size > 0:
+            height_mask = (filtered_points[:, 2] >= self._config.min_z_m) & (filtered_points[:, 2] <= self._config.max_z_m)
+            filtered_points = np.ascontiguousarray(filtered_points[height_mask], dtype=np.float64)
+
+        if self._debug_filtered_pointcloud_publisher is not None:
+            self._debug_filtered_pointcloud_publisher.publish(
+                self._build_xyz_cloud_message(stamp=stamp, points_xyz_m=filtered_points)
+            )
 
         self._mapper.integrate_point_cloud(
             points_xyz_m=filtered_points,
