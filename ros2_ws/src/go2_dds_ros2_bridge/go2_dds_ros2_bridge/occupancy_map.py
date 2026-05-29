@@ -210,11 +210,28 @@ def _apply_scan(
                 log_odds_grid[row, col] = updated_value
                 observed_mask[row, col] = 1
             elif free_mask[row, col] != 0:
-                updated_value = log_odds_grid[row, col] - miss_log_odds_decrement
+                updated_value = log_odds_grid[row, col] + miss_log_odds_decrement
                 if updated_value < min_log_odds:
                     updated_value = min_log_odds
                 log_odds_grid[row, col] = updated_value
                 observed_mask[row, col] = 1
+
+
+@njit(cache=True)
+def _dynamic_positive_occupancy_from_thresholds(
+    log_odds_fast_grid: np.ndarray,
+    log_odds_slow_grid: np.ndarray,
+    fast_occupancy_threshold: float,
+    slow_occupancy_threshold: float,
+) -> np.ndarray:
+    occupancy = np.zeros(log_odds_fast_grid.shape, dtype=np.int8)
+    for row in range(log_odds_fast_grid.shape[0]):
+        for col in range(log_odds_fast_grid.shape[1]):
+            fast_occ = np.int8(log_odds_fast_grid[row, col] > fast_occupancy_threshold)
+            slow_occ = np.int8(log_odds_slow_grid[row, col] > slow_occupancy_threshold)
+            if fast_occ - slow_occ > 0:
+                occupancy[row, col] = 100
+    return occupancy
 
 
 class RollingOccupancyMap:
@@ -224,29 +241,47 @@ class RollingOccupancyMap:
         width_m: float,
         height_m: float,
         resolution_m: float,
-        hit_log_odds_increment: float,
-        miss_log_odds_decrement: float,
-        decay_factor: float,
+        fast_hit_log_odds_increment: float,
+        fast_miss_log_odds_decrement: float,
+        slow_hit_log_odds_increment: float,
+        slow_miss_log_odds_decrement: float,
+        fast_occupancy_threshold: float,
+        slow_occupancy_threshold: float,
+        fast_decay_factor: float,
+        slow_decay_factor: float,
         min_log_odds: float,
         max_log_odds: float,
     ) -> None:
         if width_m <= 0.0 or height_m <= 0.0 or resolution_m <= 0.0:
             raise ValueError("width_m, height_m, and resolution_m must be positive")
-        if hit_log_odds_increment <= 0.0:
-            raise ValueError("hit_log_odds_increment must be positive")
-        if miss_log_odds_decrement <= 0.0:
-            raise ValueError("miss_log_odds_decrement must be positive")
-        if decay_factor <= 0.0 or decay_factor > 1.0:
-            raise ValueError("decay_factor must be in the interval (0, 1]")
+        if fast_hit_log_odds_increment <= 0.0 or slow_hit_log_odds_increment <= 0.0:
+            raise ValueError("fast_hit_log_odds_increment and slow_hit_log_odds_increment must be positive")
+        if fast_miss_log_odds_decrement >= 0.0 or slow_miss_log_odds_decrement >= 0.0:
+            raise ValueError("fast_miss_log_odds_decrement and slow_miss_log_odds_decrement must be negative")
+        if fast_decay_factor <= 0.0 or fast_decay_factor > 1.0:
+            raise ValueError("fast_decay_factor must be in the interval (0, 1]")
+        if slow_decay_factor <= 0.0 or slow_decay_factor > 1.0:
+            raise ValueError("slow_decay_factor must be in the interval (0, 1]")
         if min_log_odds >= max_log_odds:
             raise ValueError("min_log_odds must be smaller than max_log_odds")
+        if not math.isfinite(fast_occupancy_threshold) or not math.isfinite(slow_occupancy_threshold):
+            raise ValueError("fast_occupancy_threshold and slow_occupancy_threshold must be finite")
+        if fast_occupancy_threshold < min_log_odds or fast_occupancy_threshold > max_log_odds:
+            raise ValueError("fast_occupancy_threshold must lie within [min_log_odds, max_log_odds]")
+        if slow_occupancy_threshold < min_log_odds or slow_occupancy_threshold > max_log_odds:
+            raise ValueError("slow_occupancy_threshold must lie within [min_log_odds, max_log_odds]")
 
         self.width_m = float(width_m)
         self.height_m = float(height_m)
         self.resolution_m = float(resolution_m)
-        self.hit_log_odds_increment = float(hit_log_odds_increment)
-        self.miss_log_odds_decrement = float(miss_log_odds_decrement)
-        self.decay_factor = float(decay_factor)
+        self.fast_hit_log_odds_increment = float(fast_hit_log_odds_increment)
+        self.fast_miss_log_odds_decrement = float(fast_miss_log_odds_decrement)
+        self.slow_hit_log_odds_increment = float(slow_hit_log_odds_increment)
+        self.slow_miss_log_odds_decrement = float(slow_miss_log_odds_decrement)
+        self.fast_occupancy_threshold = float(fast_occupancy_threshold)
+        self.slow_occupancy_threshold = float(slow_occupancy_threshold)
+        self.fast_decay_factor = float(fast_decay_factor)
+        self.slow_decay_factor = float(slow_decay_factor)
         self.min_log_odds = float(min_log_odds)
         self.max_log_odds = float(max_log_odds)
         self.width = int(round(self.width_m / self.resolution_m))
@@ -254,7 +289,8 @@ class RollingOccupancyMap:
         if self.width <= 0 or self.height <= 0:
             raise ValueError("width_m and height_m must produce at least one cell")
 
-        self._log_odds_grid = np.zeros((self.height, self.width), dtype=np.float32)
+        self._log_odds_fast_grid = np.zeros((self.height, self.width), dtype=np.float32)
+        self._log_odds_slow_grid = np.zeros((self.height, self.width), dtype=np.float32)
         self._observed_mask = np.zeros((self.height, self.width), dtype=np.uint8)
         self._free_mask = np.zeros((self.height, self.width), dtype=np.uint8)
         self._hit_mask = np.zeros((self.height, self.width), dtype=np.uint8)
@@ -289,7 +325,8 @@ class RollingOccupancyMap:
         if shift_x_cells == 0 and shift_y_cells == 0:
             return
 
-        self._log_odds_grid = _shift_grid(self._log_odds_grid, shift_x_cells, shift_y_cells, 0.0)
+        self._log_odds_fast_grid = _shift_grid(self._log_odds_fast_grid, shift_x_cells, shift_y_cells, 0.0)
+        self._log_odds_slow_grid = _shift_grid(self._log_odds_slow_grid, shift_x_cells, shift_y_cells, 0.0)
         self._observed_mask = _shift_grid(self._observed_mask, shift_x_cells, shift_y_cells, 0)
         self._center_cell_x = new_center_cell_x
         self._center_cell_y = new_center_cell_y
@@ -308,7 +345,8 @@ class RollingOccupancyMap:
         self.update_window(center_x_m=float(map_center_xy_m[0]), center_y_m=float(map_center_xy_m[1]))
         _clear_mask(self._free_mask)
         _clear_mask(self._hit_mask)
-        _decay_log_odds(self._log_odds_grid, self._observed_mask, self.decay_factor)
+        _decay_log_odds(self._log_odds_fast_grid, self._observed_mask, self.fast_decay_factor)
+        _decay_log_odds(self._log_odds_slow_grid, self._observed_mask, self.slow_decay_factor)
         if points_xyz_m.size == 0:
             return
 
@@ -326,25 +364,43 @@ class RollingOccupancyMap:
             self._hit_mask,
         )
         _apply_scan(
-            self._log_odds_grid,
+            self._log_odds_fast_grid,
             self._observed_mask,
             self._free_mask,
             self._hit_mask,
-            self.hit_log_odds_increment,
-            self.miss_log_odds_decrement,
+            self.fast_hit_log_odds_increment,
+            self.fast_miss_log_odds_decrement,
+            self.min_log_odds,
+            self.max_log_odds,
+        )
+        _apply_scan(
+            self._log_odds_slow_grid,
+            self._observed_mask,
+            self._free_mask,
+            self._hit_mask,
+            self.slow_hit_log_odds_increment,
+            self.slow_miss_log_odds_decrement,
             self.min_log_odds,
             self.max_log_odds,
         )
 
-    def _occupancy_data(self) -> np.ndarray:
+    def _occupancy_data_from_log_odds(self, log_odds_grid: np.ndarray) -> np.ndarray:
         occupancy = np.full((self.height, self.width), UNKNOWN_CELL, dtype=np.int8)
         observed = self._observed_mask != 0
         if not np.any(observed):
             return occupancy
 
-        probabilities = 1.0 / (1.0 + np.exp(-self._log_odds_grid[observed]))
+        probabilities = 1.0 / (1.0 + np.exp(-log_odds_grid[observed]))
         occupancy[observed] = np.clip(np.rint(probabilities * 100.0), 0, 100).astype(np.int8)
         return occupancy
+
+    def _dynamic_occupancy_data(self) -> np.ndarray:
+        return _dynamic_positive_occupancy_from_thresholds(
+            self._log_odds_fast_grid,
+            self._log_odds_slow_grid,
+            self.fast_occupancy_threshold,
+            self.slow_occupancy_threshold,
+        )
 
     def snapshot(self) -> OccupancyMapSnapshot:
         return OccupancyMapSnapshot(
@@ -353,5 +409,25 @@ class RollingOccupancyMap:
             height=self.height,
             origin_x_m=self._origin_x_m,
             origin_y_m=self._origin_y_m,
-            data=self._occupancy_data(),
+            data=self._occupancy_data_from_log_odds(self._log_odds_slow_grid),
+        )
+
+    def fast_snapshot(self) -> OccupancyMapSnapshot:
+        return OccupancyMapSnapshot(
+            resolution_m=self.resolution_m,
+            width=self.width,
+            height=self.height,
+            origin_x_m=self._origin_x_m,
+            origin_y_m=self._origin_y_m,
+            data=self._occupancy_data_from_log_odds(self._log_odds_fast_grid),
+        )
+
+    def dynamic_snapshot(self) -> OccupancyMapSnapshot:
+        return OccupancyMapSnapshot(
+            resolution_m=self.resolution_m,
+            width=self.width,
+            height=self.height,
+            origin_x_m=self._origin_x_m,
+            origin_y_m=self._origin_y_m,
+            data=self._dynamic_occupancy_data(),
         )

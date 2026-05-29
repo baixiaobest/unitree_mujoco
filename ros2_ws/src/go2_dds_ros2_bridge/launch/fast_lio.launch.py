@@ -62,6 +62,8 @@ def _make_runtime_nodes(context, *args, **kwargs):
     occupancy_config = LaunchConfiguration("occupancy_config").perform(context)
     occupancy_cloud_topic = LaunchConfiguration("occupancy_cloud_topic").perform(context)
     occupancy_output_topic = LaunchConfiguration("occupancy_output_topic").perform(context)
+    occupancy_fast_output_topic = LaunchConfiguration("occupancy_fast_output_topic").perform(context)
+    occupancy_dynamic_output_topic = LaunchConfiguration("occupancy_dynamic_output_topic").perform(context)
     rviz_config = LaunchConfiguration("rviz_config")
 
     # FAST-LIO expects the pose of the frame that the incoming points are expressed in.
@@ -156,6 +158,8 @@ def _make_runtime_nodes(context, *args, **kwargs):
                 {
                     "input_topic": occupancy_cloud_topic,
                     "output_topic": occupancy_output_topic,
+                    "fast_output_topic": occupancy_fast_output_topic,
+                    "dynamic_output_topic": occupancy_dynamic_output_topic,
                     "map_frame": corrected_map_frame,
                     "debug": True,
                 },
@@ -251,8 +255,18 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "occupancy_output_topic",
-                default_value="/static_occupancy",
-                description="OccupancyGrid topic published by the 2D occupancy mapper.",
+                default_value="/slow_occupancy",
+                description="Slow OccupancyGrid topic published by the 2D occupancy mapper.",
+            ),
+            DeclareLaunchArgument(
+                "occupancy_fast_output_topic",
+                default_value="/fast_occupancy",
+                description="Fast OccupancyGrid topic published by the 2D occupancy mapper.",
+            ),
+            DeclareLaunchArgument(
+                "occupancy_dynamic_output_topic",
+                default_value="/dynamic_occupancy",
+                description="Dynamic OccupancyGrid topic published by the 2D occupancy mapper.",
             ),
             DeclareLaunchArgument(
                 "rviz",

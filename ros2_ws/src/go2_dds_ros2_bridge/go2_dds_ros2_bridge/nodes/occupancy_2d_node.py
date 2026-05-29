@@ -20,6 +20,7 @@ from tf2_ros import Buffer, TransformException, TransformListener
 
 from go2_dds_ros2_bridge.occupancy_map import (
     NUMBA_AVAILABLE,
+    OccupancyMapSnapshot,
     RollingOccupancyMap,
     extract_xyz_points,
 )
@@ -27,7 +28,9 @@ from go2_dds_ros2_bridge.tf_utils import rotation_matrix_from_quaternion_xyzw
 
 
 DEFAULT_INPUT_TOPIC = "/cloud_registered"
-DEFAULT_OUTPUT_TOPIC = "/static_occupancy"
+DEFAULT_OUTPUT_TOPIC = "/slow_occupancy"
+DEFAULT_FAST_OUTPUT_TOPIC = "/fast_occupancy"
+DEFAULT_DYNAMIC_OUTPUT_TOPIC = "/dynamic_occupancy"
 DEFAULT_DEBUG_FILTERED_POINTCLOUD_TOPIC = "/occupancy_2d/filtered_pointcloud"
 DEFAULT_MAP_FRAME = "camera_init_correct"
 DEFAULT_REQUIRED_CORRECTION_PARENT_FRAME = "camera_init_correct"
@@ -41,11 +44,16 @@ DEFAULT_WIDTH_M = 15.0
 DEFAULT_HEIGHT_M = 15.0
 DEFAULT_MAX_TF_AGE_SEC = 1.0
 DEFAULT_DEBUG = False
-DEFAULT_HIT_LOG_ODDS_INCREMENT = 0.85
-DEFAULT_MISS_LOG_ODDS_DECREMENT = 0.4
-DEFAULT_DECAY_FACTOR = 0.999
-DEFAULT_MIN_LOG_ODDS = -4.0
-DEFAULT_MAX_LOG_ODDS = 4.0
+DEFAULT_FAST_HIT_LOG_ODDS_INCREMENT = 1.0
+DEFAULT_FAST_MISS_LOG_ODDS_DECREMENT = -0.5
+DEFAULT_SLOW_HIT_LOG_ODDS_INCREMENT = 0.1
+DEFAULT_SLOW_MISS_LOG_ODDS_DECREMENT = -0.05
+DEFAULT_FAST_OCCUPANCY_THRESHOLD = 2.0
+DEFAULT_SLOW_OCCUPANCY_THRESHOLD = 2.0
+DEFAULT_FAST_DECAY_FACTOR = 0.999
+DEFAULT_SLOW_DECAY_FACTOR = 0.999
+DEFAULT_MIN_LOG_ODDS = -8.0
+DEFAULT_MAX_LOG_ODDS = 8.0
 OUTPUT_QOS = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
     durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -58,6 +66,8 @@ OUTPUT_QOS = QoSProfile(
 class Occupancy2DConfig:
     input_topic: str
     output_topic: str
+    fast_output_topic: str
+    dynamic_output_topic: str
     debug_filtered_pointcloud_topic: str
     map_frame: str
     base_frame: str
@@ -69,9 +79,14 @@ class Occupancy2DConfig:
     height_m: float
     max_tf_age_sec: float
     debug: bool
-    hit_log_odds_increment: float
-    miss_log_odds_decrement: float
-    decay_factor: float
+    fast_hit_log_odds_increment: float
+    fast_miss_log_odds_decrement: float
+    slow_hit_log_odds_increment: float
+    slow_miss_log_odds_decrement: float
+    fast_occupancy_threshold: float
+    slow_occupancy_threshold: float
+    fast_decay_factor: float
+    slow_decay_factor: float
     min_log_odds: float
     max_log_odds: float
 
@@ -82,6 +97,8 @@ def parse_args() -> Occupancy2DConfig:
     )
     parser.add_argument("--input-topic", type=str, default=DEFAULT_INPUT_TOPIC)
     parser.add_argument("--output-topic", type=str, default=DEFAULT_OUTPUT_TOPIC)
+    parser.add_argument("--fast-output-topic", type=str, default=DEFAULT_FAST_OUTPUT_TOPIC)
+    parser.add_argument("--dynamic-output-topic", type=str, default=DEFAULT_DYNAMIC_OUTPUT_TOPIC)
     parser.add_argument("--debug-filtered-pointcloud-topic", type=str, default=DEFAULT_DEBUG_FILTERED_POINTCLOUD_TOPIC)
     parser.add_argument("--map-frame", type=str, default=DEFAULT_MAP_FRAME)
     parser.add_argument("--base-frame", type=str, default=DEFAULT_BASE_FRAME)
@@ -97,9 +114,14 @@ def parse_args() -> Occupancy2DConfig:
         action=argparse.BooleanOptionalAction,
         default=DEFAULT_DEBUG,
     )
-    parser.add_argument("--hit-log-odds-increment", type=float, default=DEFAULT_HIT_LOG_ODDS_INCREMENT)
-    parser.add_argument("--miss-log-odds-decrement", type=float, default=DEFAULT_MISS_LOG_ODDS_DECREMENT)
-    parser.add_argument("--decay-factor", type=float, default=DEFAULT_DECAY_FACTOR)
+    parser.add_argument("--fast-hit-log-odds-increment", type=float, default=DEFAULT_FAST_HIT_LOG_ODDS_INCREMENT)
+    parser.add_argument("--fast-miss-log-odds-decrement", type=float, default=DEFAULT_FAST_MISS_LOG_ODDS_DECREMENT)
+    parser.add_argument("--slow-hit-log-odds-increment", type=float, default=DEFAULT_SLOW_HIT_LOG_ODDS_INCREMENT)
+    parser.add_argument("--slow-miss-log-odds-decrement", type=float, default=DEFAULT_SLOW_MISS_LOG_ODDS_DECREMENT)
+    parser.add_argument("--fast-occupancy-threshold", type=float, default=DEFAULT_FAST_OCCUPANCY_THRESHOLD)
+    parser.add_argument("--slow-occupancy-threshold", type=float, default=DEFAULT_SLOW_OCCUPANCY_THRESHOLD)
+    parser.add_argument("--fast-decay-factor", type=float, default=DEFAULT_FAST_DECAY_FACTOR)
+    parser.add_argument("--slow-decay-factor", type=float, default=DEFAULT_SLOW_DECAY_FACTOR)
     parser.add_argument("--min-log-odds", type=float, default=DEFAULT_MIN_LOG_ODDS)
     parser.add_argument("--max-log-odds", type=float, default=DEFAULT_MAX_LOG_ODDS)
 
@@ -107,20 +129,28 @@ def parse_args() -> Occupancy2DConfig:
     args = parser.parse_args(non_ros_args)
     if args.min_z_m >= args.max_z_m:
         raise SystemExit("--min-z-m must be smaller than --max-z-m")
-    if args.hit_log_odds_increment <= 0.0:
-        raise SystemExit("--hit-log-odds-increment must be positive")
-    if args.miss_log_odds_decrement <= 0.0:
-        raise SystemExit("--miss-log-odds-decrement must be positive")
-    if args.decay_factor <= 0.0 or args.decay_factor > 1.0:
-        raise SystemExit("--decay-factor must be in the interval (0, 1]")
+    if args.fast_hit_log_odds_increment <= 0.0 or args.slow_hit_log_odds_increment <= 0.0:
+        raise SystemExit("--fast-hit-log-odds-increment and --slow-hit-log-odds-increment must be positive")
+    if args.fast_miss_log_odds_decrement >= 0.0 or args.slow_miss_log_odds_decrement >= 0.0:
+        raise SystemExit("--fast-miss-log-odds-decrement and --slow-miss-log-odds-decrement must be negative")
+    if args.fast_decay_factor <= 0.0 or args.fast_decay_factor > 1.0:
+        raise SystemExit("--fast-decay-factor must be in the interval (0, 1]")
+    if args.slow_decay_factor <= 0.0 or args.slow_decay_factor > 1.0:
+        raise SystemExit("--slow-decay-factor must be in the interval (0, 1]")
     if args.min_log_odds >= args.max_log_odds:
         raise SystemExit("--min-log-odds must be smaller than --max-log-odds")
+    if args.fast_occupancy_threshold < args.min_log_odds or args.fast_occupancy_threshold > args.max_log_odds:
+        raise SystemExit("--fast-occupancy-threshold must lie within [--min-log-odds, --max-log-odds]")
+    if args.slow_occupancy_threshold < args.min_log_odds or args.slow_occupancy_threshold > args.max_log_odds:
+        raise SystemExit("--slow-occupancy-threshold must lie within [--min-log-odds, --max-log-odds]")
     if args.max_tf_age_sec < 0.0:
         raise SystemExit("--max-tf-age-sec must be non-negative")
 
     return Occupancy2DConfig(
         input_topic=args.input_topic,
         output_topic=args.output_topic,
+        fast_output_topic=args.fast_output_topic,
+        dynamic_output_topic=args.dynamic_output_topic,
         debug_filtered_pointcloud_topic=args.debug_filtered_pointcloud_topic,
         map_frame=args.map_frame,
         base_frame=args.base_frame,
@@ -132,9 +162,14 @@ def parse_args() -> Occupancy2DConfig:
         height_m=float(args.height_m),
         max_tf_age_sec=float(args.max_tf_age_sec),
         debug=bool(args.debug),
-        hit_log_odds_increment=float(args.hit_log_odds_increment),
-        miss_log_odds_decrement=float(args.miss_log_odds_decrement),
-        decay_factor=float(args.decay_factor),
+        fast_hit_log_odds_increment=float(args.fast_hit_log_odds_increment),
+        fast_miss_log_odds_decrement=float(args.fast_miss_log_odds_decrement),
+        slow_hit_log_odds_increment=float(args.slow_hit_log_odds_increment),
+        slow_miss_log_odds_decrement=float(args.slow_miss_log_odds_decrement),
+        fast_occupancy_threshold=float(args.fast_occupancy_threshold),
+        slow_occupancy_threshold=float(args.slow_occupancy_threshold),
+        fast_decay_factor=float(args.fast_decay_factor),
+        slow_decay_factor=float(args.slow_decay_factor),
         min_log_odds=float(args.min_log_odds),
         max_log_odds=float(args.max_log_odds),
     )
@@ -145,6 +180,8 @@ class Occupancy2DNode(Node):
         super().__init__("occupancy_2d")
         self.declare_parameter("input_topic", config.input_topic)
         self.declare_parameter("output_topic", config.output_topic)
+        self.declare_parameter("fast_output_topic", config.fast_output_topic)
+        self.declare_parameter("dynamic_output_topic", config.dynamic_output_topic)
         self.declare_parameter("debug_filtered_pointcloud_topic", config.debug_filtered_pointcloud_topic)
         self.declare_parameter("map_frame", config.map_frame)
         self.declare_parameter("base_frame", config.base_frame)
@@ -156,14 +193,21 @@ class Occupancy2DNode(Node):
         self.declare_parameter("height_m", config.height_m)
         self.declare_parameter("max_tf_age_sec", config.max_tf_age_sec)
         self.declare_parameter("debug", config.debug)
-        self.declare_parameter("hit_log_odds_increment", config.hit_log_odds_increment)
-        self.declare_parameter("miss_log_odds_decrement", config.miss_log_odds_decrement)
-        self.declare_parameter("decay_factor", config.decay_factor)
+        self.declare_parameter("fast_hit_log_odds_increment", config.fast_hit_log_odds_increment)
+        self.declare_parameter("fast_miss_log_odds_decrement", config.fast_miss_log_odds_decrement)
+        self.declare_parameter("slow_hit_log_odds_increment", config.slow_hit_log_odds_increment)
+        self.declare_parameter("slow_miss_log_odds_decrement", config.slow_miss_log_odds_decrement)
+        self.declare_parameter("fast_occupancy_threshold", config.fast_occupancy_threshold)
+        self.declare_parameter("slow_occupancy_threshold", config.slow_occupancy_threshold)
+        self.declare_parameter("fast_decay_factor", config.fast_decay_factor)
+        self.declare_parameter("slow_decay_factor", config.slow_decay_factor)
         self.declare_parameter("min_log_odds", config.min_log_odds)
         self.declare_parameter("max_log_odds", config.max_log_odds)
         self._config = Occupancy2DConfig(
             input_topic=str(self.get_parameter("input_topic").value),
             output_topic=str(self.get_parameter("output_topic").value),
+            fast_output_topic=str(self.get_parameter("fast_output_topic").value),
+            dynamic_output_topic=str(self.get_parameter("dynamic_output_topic").value),
             debug_filtered_pointcloud_topic=str(self.get_parameter("debug_filtered_pointcloud_topic").value),
             map_frame=str(self.get_parameter("map_frame").value),
             base_frame=str(self.get_parameter("base_frame").value),
@@ -175,9 +219,14 @@ class Occupancy2DNode(Node):
             height_m=float(self.get_parameter("height_m").value),
             max_tf_age_sec=float(self.get_parameter("max_tf_age_sec").value),
             debug=bool(self.get_parameter("debug").value),
-            hit_log_odds_increment=float(self.get_parameter("hit_log_odds_increment").value),
-            miss_log_odds_decrement=float(self.get_parameter("miss_log_odds_decrement").value),
-            decay_factor=float(self.get_parameter("decay_factor").value),
+            fast_hit_log_odds_increment=float(self.get_parameter("fast_hit_log_odds_increment").value),
+            fast_miss_log_odds_decrement=float(self.get_parameter("fast_miss_log_odds_decrement").value),
+            slow_hit_log_odds_increment=float(self.get_parameter("slow_hit_log_odds_increment").value),
+            slow_miss_log_odds_decrement=float(self.get_parameter("slow_miss_log_odds_decrement").value),
+            fast_occupancy_threshold=float(self.get_parameter("fast_occupancy_threshold").value),
+            slow_occupancy_threshold=float(self.get_parameter("slow_occupancy_threshold").value),
+            fast_decay_factor=float(self.get_parameter("fast_decay_factor").value),
+            slow_decay_factor=float(self.get_parameter("slow_decay_factor").value),
             min_log_odds=float(self.get_parameter("min_log_odds").value),
             max_log_odds=float(self.get_parameter("max_log_odds").value),
         )
@@ -185,15 +234,22 @@ class Occupancy2DNode(Node):
             width_m=self._config.width_m,
             height_m=self._config.height_m,
             resolution_m=self._config.resolution_m,
-            hit_log_odds_increment=self._config.hit_log_odds_increment,
-            miss_log_odds_decrement=self._config.miss_log_odds_decrement,
-            decay_factor=self._config.decay_factor,
+            fast_hit_log_odds_increment=self._config.fast_hit_log_odds_increment,
+            fast_miss_log_odds_decrement=self._config.fast_miss_log_odds_decrement,
+            slow_hit_log_odds_increment=self._config.slow_hit_log_odds_increment,
+            slow_miss_log_odds_decrement=self._config.slow_miss_log_odds_decrement,
+            fast_occupancy_threshold=self._config.fast_occupancy_threshold,
+            slow_occupancy_threshold=self._config.slow_occupancy_threshold,
+            fast_decay_factor=self._config.fast_decay_factor,
+            slow_decay_factor=self._config.slow_decay_factor,
             min_log_odds=self._config.min_log_odds,
             max_log_odds=self._config.max_log_odds,
         )
         self._tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._publisher = self.create_publisher(OccupancyGrid, self._config.output_topic, OUTPUT_QOS)
+        self._fast_publisher = self.create_publisher(OccupancyGrid, self._config.fast_output_topic, OUTPUT_QOS)
+        self._dynamic_publisher = self.create_publisher(OccupancyGrid, self._config.dynamic_output_topic, OUTPUT_QOS)
         self._debug_filtered_pointcloud_publisher = (
             self.create_publisher(PointCloud2, self._config.debug_filtered_pointcloud_topic, 10)
             if self._config.debug
@@ -216,13 +272,15 @@ class Occupancy2DNode(Node):
             )
 
         self.get_logger().info(
-            "Building a rolling 2D occupancy grid from '%s' to '%s' in frame '%s' with size %.1fm x %.1fm at %.2fm resolution "
+            "Building dual-timescale rolling occupancy grids from '%s' to slow '%s', fast '%s', and dynamic '%s' in frame '%s' with size %.1fm x %.1fm at %.2fm resolution "
             "and z filtering in [%.2f, %.2f] m using lidar frame '%s' and base frame '%s'. Maximum accepted latest-TF age is %.2f s. "
             "Debug filtered cloud publishing is %s on '%s'. "
-            "Log-odds fusion uses hit=%.3f, miss=%.3f, decay=%.5f, clamp=[%.2f, %.2f]."
+            "Fast log-odds uses hit=%.3f, miss=%.3f, threshold=%.3f, decay=%.5f; slow log-odds uses hit=%.3f, miss=%.3f, threshold=%.3f, decay=%.5f; clamp=[%.2f, %.2f]."
             % (
                 self._config.input_topic,
                 self._config.output_topic,
+                self._config.fast_output_topic,
+                self._config.dynamic_output_topic,
                 self._config.map_frame,
                 self._config.width_m,
                 self._config.height_m,
@@ -234,9 +292,14 @@ class Occupancy2DNode(Node):
                 self._config.max_tf_age_sec,
                 self._config.debug,
                 self._config.debug_filtered_pointcloud_topic,
-                self._config.hit_log_odds_increment,
-                self._config.miss_log_odds_decrement,
-                self._config.decay_factor,
+                self._config.fast_hit_log_odds_increment,
+                self._config.fast_miss_log_odds_decrement,
+                self._config.fast_occupancy_threshold,
+                self._config.fast_decay_factor,
+                self._config.slow_hit_log_odds_increment,
+                self._config.slow_miss_log_odds_decrement,
+                self._config.slow_occupancy_threshold,
+                self._config.slow_decay_factor,
                 self._config.min_log_odds,
                 self._config.max_log_odds,
             )
@@ -434,10 +497,11 @@ class Occupancy2DNode(Node):
             ray_origin_xy_m=lidar_translation[:2],
             map_center_xy_m=base_translation[:2],
         )
-        self._publisher.publish(self._build_message(stamp))
+        self._publisher.publish(self._build_message(stamp=stamp, snapshot=self._mapper.snapshot()))
+        self._fast_publisher.publish(self._build_message(stamp=stamp, snapshot=self._mapper.fast_snapshot()))
+        self._dynamic_publisher.publish(self._build_message(stamp=stamp, snapshot=self._mapper.dynamic_snapshot()))
 
-    def _build_message(self, stamp: Time) -> OccupancyGrid:
-        snapshot = self._mapper.snapshot()
+    def _build_message(self, *, stamp: Time, snapshot: OccupancyMapSnapshot) -> OccupancyGrid:
         message = OccupancyGrid()
         message.header.stamp = stamp.to_msg()
         message.header.frame_id = self._config.map_frame
