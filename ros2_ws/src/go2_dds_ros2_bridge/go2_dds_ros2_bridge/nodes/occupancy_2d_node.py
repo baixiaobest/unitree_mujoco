@@ -48,8 +48,7 @@ DEFAULT_FAST_HIT_LOG_ODDS_INCREMENT = 1.0
 DEFAULT_FAST_MISS_LOG_ODDS_DECREMENT = -0.5
 DEFAULT_SLOW_HIT_LOG_ODDS_INCREMENT = 0.1
 DEFAULT_SLOW_MISS_LOG_ODDS_DECREMENT = -0.05
-DEFAULT_FAST_OCCUPANCY_THRESHOLD = 2.0
-DEFAULT_SLOW_OCCUPANCY_THRESHOLD = 2.0
+DEFAULT_DYNAMIC_OCCUPANCY_THRESHOLD = 10.0
 DEFAULT_FAST_DECAY_FACTOR = 0.999
 DEFAULT_SLOW_DECAY_FACTOR = 0.999
 DEFAULT_MIN_LOG_ODDS = -8.0
@@ -83,8 +82,7 @@ class Occupancy2DConfig:
     fast_miss_log_odds_decrement: float
     slow_hit_log_odds_increment: float
     slow_miss_log_odds_decrement: float
-    fast_occupancy_threshold: float
-    slow_occupancy_threshold: float
+    dynamic_occupancy_threshold: float
     fast_decay_factor: float
     slow_decay_factor: float
     min_log_odds: float
@@ -118,8 +116,7 @@ def parse_args() -> Occupancy2DConfig:
     parser.add_argument("--fast-miss-log-odds-decrement", type=float, default=DEFAULT_FAST_MISS_LOG_ODDS_DECREMENT)
     parser.add_argument("--slow-hit-log-odds-increment", type=float, default=DEFAULT_SLOW_HIT_LOG_ODDS_INCREMENT)
     parser.add_argument("--slow-miss-log-odds-decrement", type=float, default=DEFAULT_SLOW_MISS_LOG_ODDS_DECREMENT)
-    parser.add_argument("--fast-occupancy-threshold", type=float, default=DEFAULT_FAST_OCCUPANCY_THRESHOLD)
-    parser.add_argument("--slow-occupancy-threshold", type=float, default=DEFAULT_SLOW_OCCUPANCY_THRESHOLD)
+    parser.add_argument("--dynamic-occupancy-threshold", type=float, default=DEFAULT_DYNAMIC_OCCUPANCY_THRESHOLD)
     parser.add_argument("--fast-decay-factor", type=float, default=DEFAULT_FAST_DECAY_FACTOR)
     parser.add_argument("--slow-decay-factor", type=float, default=DEFAULT_SLOW_DECAY_FACTOR)
     parser.add_argument("--min-log-odds", type=float, default=DEFAULT_MIN_LOG_ODDS)
@@ -139,10 +136,8 @@ def parse_args() -> Occupancy2DConfig:
         raise SystemExit("--slow-decay-factor must be in the interval (0, 1]")
     if args.min_log_odds >= args.max_log_odds:
         raise SystemExit("--min-log-odds must be smaller than --max-log-odds")
-    if args.fast_occupancy_threshold < args.min_log_odds or args.fast_occupancy_threshold > args.max_log_odds:
-        raise SystemExit("--fast-occupancy-threshold must lie within [--min-log-odds, --max-log-odds]")
-    if args.slow_occupancy_threshold < args.min_log_odds or args.slow_occupancy_threshold > args.max_log_odds:
-        raise SystemExit("--slow-occupancy-threshold must lie within [--min-log-odds, --max-log-odds]")
+    if args.dynamic_occupancy_threshold < 0.0 or args.dynamic_occupancy_threshold > 100.0:
+        raise SystemExit("--dynamic-occupancy-threshold must lie within [0, 100]")
     if args.max_tf_age_sec < 0.0:
         raise SystemExit("--max-tf-age-sec must be non-negative")
 
@@ -166,8 +161,7 @@ def parse_args() -> Occupancy2DConfig:
         fast_miss_log_odds_decrement=float(args.fast_miss_log_odds_decrement),
         slow_hit_log_odds_increment=float(args.slow_hit_log_odds_increment),
         slow_miss_log_odds_decrement=float(args.slow_miss_log_odds_decrement),
-        fast_occupancy_threshold=float(args.fast_occupancy_threshold),
-        slow_occupancy_threshold=float(args.slow_occupancy_threshold),
+        dynamic_occupancy_threshold=float(args.dynamic_occupancy_threshold),
         fast_decay_factor=float(args.fast_decay_factor),
         slow_decay_factor=float(args.slow_decay_factor),
         min_log_odds=float(args.min_log_odds),
@@ -197,8 +191,7 @@ class Occupancy2DNode(Node):
         self.declare_parameter("fast_miss_log_odds_decrement", config.fast_miss_log_odds_decrement)
         self.declare_parameter("slow_hit_log_odds_increment", config.slow_hit_log_odds_increment)
         self.declare_parameter("slow_miss_log_odds_decrement", config.slow_miss_log_odds_decrement)
-        self.declare_parameter("fast_occupancy_threshold", config.fast_occupancy_threshold)
-        self.declare_parameter("slow_occupancy_threshold", config.slow_occupancy_threshold)
+        self.declare_parameter("dynamic_occupancy_threshold", config.dynamic_occupancy_threshold)
         self.declare_parameter("fast_decay_factor", config.fast_decay_factor)
         self.declare_parameter("slow_decay_factor", config.slow_decay_factor)
         self.declare_parameter("min_log_odds", config.min_log_odds)
@@ -223,8 +216,7 @@ class Occupancy2DNode(Node):
             fast_miss_log_odds_decrement=float(self.get_parameter("fast_miss_log_odds_decrement").value),
             slow_hit_log_odds_increment=float(self.get_parameter("slow_hit_log_odds_increment").value),
             slow_miss_log_odds_decrement=float(self.get_parameter("slow_miss_log_odds_decrement").value),
-            fast_occupancy_threshold=float(self.get_parameter("fast_occupancy_threshold").value),
-            slow_occupancy_threshold=float(self.get_parameter("slow_occupancy_threshold").value),
+            dynamic_occupancy_threshold=float(self.get_parameter("dynamic_occupancy_threshold").value),
             fast_decay_factor=float(self.get_parameter("fast_decay_factor").value),
             slow_decay_factor=float(self.get_parameter("slow_decay_factor").value),
             min_log_odds=float(self.get_parameter("min_log_odds").value),
@@ -238,8 +230,7 @@ class Occupancy2DNode(Node):
             fast_miss_log_odds_decrement=self._config.fast_miss_log_odds_decrement,
             slow_hit_log_odds_increment=self._config.slow_hit_log_odds_increment,
             slow_miss_log_odds_decrement=self._config.slow_miss_log_odds_decrement,
-            fast_occupancy_threshold=self._config.fast_occupancy_threshold,
-            slow_occupancy_threshold=self._config.slow_occupancy_threshold,
+            dynamic_occupancy_threshold=self._config.dynamic_occupancy_threshold,
             fast_decay_factor=self._config.fast_decay_factor,
             slow_decay_factor=self._config.slow_decay_factor,
             min_log_odds=self._config.min_log_odds,
@@ -275,7 +266,7 @@ class Occupancy2DNode(Node):
             "Building dual-timescale rolling occupancy grids from '%s' to slow '%s', fast '%s', and dynamic '%s' in frame '%s' with size %.1fm x %.1fm at %.2fm resolution "
             "and z filtering in [%.2f, %.2f] m using lidar frame '%s' and base frame '%s'. Maximum accepted latest-TF age is %.2f s. "
             "Debug filtered cloud publishing is %s on '%s'. "
-            "Fast log-odds uses hit=%.3f, miss=%.3f, threshold=%.3f, decay=%.5f; slow log-odds uses hit=%.3f, miss=%.3f, threshold=%.3f, decay=%.5f; clamp=[%.2f, %.2f]."
+            "Fast log-odds uses hit=%.3f, miss=%.3f, decay=%.5f; slow log-odds uses hit=%.3f, miss=%.3f, decay=%.5f; dynamic cells use occupancy diff threshold=%.1f; clamp=[%.2f, %.2f]."
             % (
                 self._config.input_topic,
                 self._config.output_topic,
@@ -294,12 +285,11 @@ class Occupancy2DNode(Node):
                 self._config.debug_filtered_pointcloud_topic,
                 self._config.fast_hit_log_odds_increment,
                 self._config.fast_miss_log_odds_decrement,
-                self._config.fast_occupancy_threshold,
                 self._config.fast_decay_factor,
                 self._config.slow_hit_log_odds_increment,
                 self._config.slow_miss_log_odds_decrement,
-                self._config.slow_occupancy_threshold,
                 self._config.slow_decay_factor,
+                self._config.dynamic_occupancy_threshold,
                 self._config.min_log_odds,
                 self._config.max_log_odds,
             )

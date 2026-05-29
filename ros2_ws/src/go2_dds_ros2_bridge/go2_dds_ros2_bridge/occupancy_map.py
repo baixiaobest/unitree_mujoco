@@ -218,19 +218,34 @@ def _apply_scan(
 
 
 @njit(cache=True)
-def _dynamic_positive_occupancy_from_thresholds(
+def _log_odds_to_occupancy_value(log_odds_value: float) -> int:
+    probability = 1.0 / (1.0 + math.exp(-log_odds_value))
+    occupancy_value = int(math.floor(probability * 100.0 + 0.5))
+    if occupancy_value < 0:
+        return 0
+    if occupancy_value > 100:
+        return 100
+    return occupancy_value
+
+
+@njit(cache=True)
+def _dynamic_positive_occupancy_from_diff(
     log_odds_fast_grid: np.ndarray,
     log_odds_slow_grid: np.ndarray,
-    fast_occupancy_threshold: float,
-    slow_occupancy_threshold: float,
+    dynamic_occupancy_threshold: float,
 ) -> np.ndarray:
     occupancy = np.zeros(log_odds_fast_grid.shape, dtype=np.int8)
     for row in range(log_odds_fast_grid.shape[0]):
         for col in range(log_odds_fast_grid.shape[1]):
-            fast_occ = np.int8(log_odds_fast_grid[row, col] > fast_occupancy_threshold)
-            slow_occ = np.int8(log_odds_slow_grid[row, col] > slow_occupancy_threshold)
-            if fast_occ - slow_occ > 0:
-                occupancy[row, col] = 100
+            fast_occupancy = _log_odds_to_occupancy_value(log_odds_fast_grid[row, col])
+            slow_occupancy = _log_odds_to_occupancy_value(log_odds_slow_grid[row, col])
+            if fast_occupancy < 52 and slow_occupancy < 52:
+                continue
+            dynamic_diff = fast_occupancy - slow_occupancy
+            if dynamic_diff < 0:
+                dynamic_diff = 0
+
+            occupancy[row, col] = dynamic_diff
     return occupancy
 
 
@@ -245,8 +260,7 @@ class RollingOccupancyMap:
         fast_miss_log_odds_decrement: float,
         slow_hit_log_odds_increment: float,
         slow_miss_log_odds_decrement: float,
-        fast_occupancy_threshold: float,
-        slow_occupancy_threshold: float,
+        dynamic_occupancy_threshold: float,
         fast_decay_factor: float,
         slow_decay_factor: float,
         min_log_odds: float,
@@ -264,12 +278,10 @@ class RollingOccupancyMap:
             raise ValueError("slow_decay_factor must be in the interval (0, 1]")
         if min_log_odds >= max_log_odds:
             raise ValueError("min_log_odds must be smaller than max_log_odds")
-        if not math.isfinite(fast_occupancy_threshold) or not math.isfinite(slow_occupancy_threshold):
-            raise ValueError("fast_occupancy_threshold and slow_occupancy_threshold must be finite")
-        if fast_occupancy_threshold < min_log_odds or fast_occupancy_threshold > max_log_odds:
-            raise ValueError("fast_occupancy_threshold must lie within [min_log_odds, max_log_odds]")
-        if slow_occupancy_threshold < min_log_odds or slow_occupancy_threshold > max_log_odds:
-            raise ValueError("slow_occupancy_threshold must lie within [min_log_odds, max_log_odds]")
+        if not math.isfinite(dynamic_occupancy_threshold):
+            raise ValueError("dynamic_occupancy_threshold must be finite")
+        if dynamic_occupancy_threshold < 0.0 or dynamic_occupancy_threshold > 100.0:
+            raise ValueError("dynamic_occupancy_threshold must lie within [0, 100]")
 
         self.width_m = float(width_m)
         self.height_m = float(height_m)
@@ -278,8 +290,7 @@ class RollingOccupancyMap:
         self.fast_miss_log_odds_decrement = float(fast_miss_log_odds_decrement)
         self.slow_hit_log_odds_increment = float(slow_hit_log_odds_increment)
         self.slow_miss_log_odds_decrement = float(slow_miss_log_odds_decrement)
-        self.fast_occupancy_threshold = float(fast_occupancy_threshold)
-        self.slow_occupancy_threshold = float(slow_occupancy_threshold)
+        self.dynamic_occupancy_threshold = float(dynamic_occupancy_threshold)
         self.fast_decay_factor = float(fast_decay_factor)
         self.slow_decay_factor = float(slow_decay_factor)
         self.min_log_odds = float(min_log_odds)
@@ -395,11 +406,10 @@ class RollingOccupancyMap:
         return occupancy
 
     def _dynamic_occupancy_data(self) -> np.ndarray:
-        return _dynamic_positive_occupancy_from_thresholds(
+        return _dynamic_positive_occupancy_from_diff(
             self._log_odds_fast_grid,
             self._log_odds_slow_grid,
-            self.fast_occupancy_threshold,
-            self.slow_occupancy_threshold,
+            self.dynamic_occupancy_threshold,
         )
 
     def snapshot(self) -> OccupancyMapSnapshot:
