@@ -6,11 +6,16 @@ import torch
 
 import utils.math_utils as math_utils
 from unitree_sdk2py.core.channel import ChannelPublisher
-from unitree_sdk2py.idl.default import nav_msgs_msg_dds__Odometry_ as Odometry_default
+from unitree_sdk2py.idl.default import (
+    nav_msgs_msg_dds__Odometry_ as Odometry_default,
+    geometry_msgs_msg_dds__TwistStamped_ as TwistStamped_default,
+)
+from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import TwistStamped_
 from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
 
 
 TOPIC_ESTIMATED_ODOMETRY = "rt/odom"
+TOPIC_ESTIMATED_BODY_VELOCITY = "rt/estimated_velocity"
 
 
 class EstimatedOdometryPublisher:
@@ -20,16 +25,20 @@ class EstimatedOdometryPublisher:
         self,
         device: str | torch.device = "cpu",
         topic_name: str = TOPIC_ESTIMATED_ODOMETRY,
+        velocity_topic_name: str = TOPIC_ESTIMATED_BODY_VELOCITY,
         odom_frame_id: str = "odom",
         child_frame_id: str = "base_link",
     ) -> None:
         self.device = torch.device(device)
         self.topic_name = topic_name
+        self.velocity_topic_name = velocity_topic_name
         self.odom_frame_id = odom_frame_id
         self.child_frame_id = child_frame_id
 
         self.publisher: ChannelPublisher = ChannelPublisher(self.topic_name, Odometry_)
         self.publisher.Init()
+        self._velocity_publisher: ChannelPublisher = ChannelPublisher(self.velocity_topic_name, TwistStamped_)
+        self._velocity_publisher.Init()
 
         self._integrated_position = torch.zeros(3, dtype=torch.float32, device=self.device)
         self._last_publish_time_ns: int | None = None
@@ -94,4 +103,14 @@ class EstimatedOdometryPublisher:
         odometry_msg.twist.twist.angular.z = float(angular_velocity[2].item())
 
         self.publisher.Write(odometry_msg)
+
+        vel_msg = TwistStamped_default()
+        vel_msg.header.stamp.sec = odometry_msg.header.stamp.sec
+        vel_msg.header.stamp.nanosec = odometry_msg.header.stamp.nanosec
+        vel_msg.header.frame_id = self.child_frame_id
+        vel_msg.twist.linear.x = float(estimated_linear_velocity[0].item())
+        vel_msg.twist.linear.y = float(estimated_linear_velocity[1].item())
+        vel_msg.twist.linear.z = float(estimated_linear_velocity[2].item())
+        self._velocity_publisher.Write(vel_msg)
+
         return True
