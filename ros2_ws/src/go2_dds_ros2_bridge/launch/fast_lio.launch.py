@@ -64,6 +64,8 @@ def _make_runtime_nodes(context, *args, **kwargs):
     occupancy_output_topic = LaunchConfiguration("occupancy_output_topic").perform(context)
     occupancy_fast_output_topic = LaunchConfiguration("occupancy_fast_output_topic").perform(context)
     occupancy_dynamic_output_topic = LaunchConfiguration("occupancy_dynamic_output_topic").perform(context)
+    occupancy_scan_config = LaunchConfiguration("occupancy_scan_config").perform(context)
+    occupancy_scan_output_topic = LaunchConfiguration("occupancy_scan_output_topic").perform(context)
     rviz_config = LaunchConfiguration("rviz_config")
 
     # FAST-LIO expects the pose of the frame that the incoming points are expressed in.
@@ -167,6 +169,20 @@ def _make_runtime_nodes(context, *args, **kwargs):
             condition=IfCondition(LaunchConfiguration("occupancy")),
         ),
         Node(
+            package="go2_dds_ros2_bridge",
+            executable="occupancy_scan",
+            name="occupancy_scan",
+            output="screen",
+            parameters=[
+                occupancy_scan_config,
+                {
+                    "map_frame": corrected_map_frame,
+                    "output_topic": occupancy_scan_output_topic,
+                },
+            ],
+            condition=IfCondition(LaunchConfiguration("occupancy_scan")),
+        ),
+        Node(
             package="rviz2",
             executable="rviz2",
             name="fast_lio_rviz",
@@ -267,6 +283,23 @@ def generate_launch_description() -> LaunchDescription:
                 "occupancy_dynamic_output_topic",
                 default_value="/dynamic_occupancy",
                 description="Dynamic OccupancyGrid topic published by the 2D occupancy mapper.",
+            ),
+            DeclareLaunchArgument(
+                "occupancy_scan",
+                default_value="true",
+                description="Launch the occupancy ray-cast scan node that converts the 2D grid to a LaserScan.",
+            ),
+            DeclareLaunchArgument(
+                "occupancy_scan_config",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("go2_dds_ros2_bridge"), "config", "occupancy_scan.yaml"]
+                ),
+                description="Path to the occupancy scan node parameter YAML file.",
+            ),
+            DeclareLaunchArgument(
+                "occupancy_scan_output_topic",
+                default_value="/occupancy_scan",
+                description="LaserScan topic published by the occupancy scan node.",
             ),
             DeclareLaunchArgument(
                 "rviz",
