@@ -7,8 +7,8 @@ occupancy_2d:
     map_frame: camera_init_correct
     base_frame: base_link
     lidar_frame: utlidar_lidar
-    min_z_m: 0.15
-    max_z_m: 1.8
+    min_z_m: -0.25
+    max_z_m: 1.4
     resolution_m: 0.1
     width_m: 15.0
     height_m: 15.0

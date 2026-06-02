@@ -474,7 +474,8 @@ class Occupancy2DNode(Node):
             filtered_points = np.ascontiguousarray(filtered_points @ cloud_rotation.T + cloud_translation, dtype=np.float64)
 
         if filtered_points.size > 0:
-            height_mask = (filtered_points[:, 2] >= self._config.min_z_m) & (filtered_points[:, 2] <= self._config.max_z_m)
+            body_z = base_translation[2]
+            height_mask = (filtered_points[:, 2] >= body_z + self._config.min_z_m) & (filtered_points[:, 2] <= body_z + self._config.max_z_m)
             filtered_points = np.ascontiguousarray(filtered_points[height_mask], dtype=np.float64)
 
         if self._debug_filtered_pointcloud_publisher is not None:
