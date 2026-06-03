@@ -1,0 +1,19 @@
+navigation:
+  ros__parameters:
+    policy_path: "/home/baixiao/Desktop/IsaacLab/logs/rsl_rl/ObstacleAvoidance/Navigation/exported/navigation_policy_jit.pt"
+    goal_topic: /goal_pose
+    velocity_topic: /estimated_velocity
+    imu_topic: /imu/data_fastlio
+    scan_topic: /occupancy_scan
+    cmd_topic: /cmd_vel
+    map_frame: camera_init_correct
+    body_frame: base_link
+    policy_hz: 15.0
+    lidar_max_distance: 20.0
+    num_lidar_rays: 129
+    cmd_scale_vx: 1.0
+    cmd_scale_vy: 1.0
+    cmd_scale_wz: 1.0
+    goal_z: 0.35
+    max_tf_age_sec: 1.0
+    device: cuda

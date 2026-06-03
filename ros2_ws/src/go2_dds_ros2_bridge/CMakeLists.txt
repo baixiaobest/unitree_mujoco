@@ -70,6 +70,13 @@ install(
 )
 
 install(
+  PROGRAMS
+    go2_dds_ros2_bridge/nodes/navigation_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME navigation
+)
+
+install(
   DIRECTORY
     launch
     config

@@ -66,6 +66,8 @@ def _make_runtime_nodes(context, *args, **kwargs):
     occupancy_dynamic_output_topic = LaunchConfiguration("occupancy_dynamic_output_topic").perform(context)
     occupancy_scan_config = LaunchConfiguration("occupancy_scan_config").perform(context)
     occupancy_scan_output_topic = LaunchConfiguration("occupancy_scan_output_topic").perform(context)
+    navigation_config = LaunchConfiguration("navigation_config").perform(context)
+    navigation_policy_path = LaunchConfiguration("navigation_policy_path").perform(context)
     rviz_config = LaunchConfiguration("rviz_config")
 
     # FAST-LIO expects the pose of the frame that the incoming points are expressed in.
@@ -181,6 +183,17 @@ def _make_runtime_nodes(context, *args, **kwargs):
                 },
             ],
             condition=IfCondition(LaunchConfiguration("occupancy_scan")),
+        ),
+        Node(
+            package="go2_dds_ros2_bridge",
+            executable="navigation",
+            name="navigation",
+            output="screen",
+            parameters=[
+                navigation_config,
+                *([ {"policy_path": navigation_policy_path} ] if navigation_policy_path else []),
+            ],
+            condition=IfCondition(LaunchConfiguration("navigation")),
         ),
         Node(
             package="rviz2",
@@ -300,6 +313,23 @@ def generate_launch_description() -> LaunchDescription:
                 "occupancy_scan_output_topic",
                 default_value="/occupancy_scan",
                 description="LaserScan topic published by the occupancy scan node.",
+            ),
+            DeclareLaunchArgument(
+                "navigation",
+                default_value="true",
+                description="Launch the navigation policy inference node.",
+            ),
+            DeclareLaunchArgument(
+                "navigation_config",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("go2_dds_ros2_bridge"), "config", "navigation.yaml"]
+                ),
+                description="Path to the navigation node parameter YAML file.",
+            ),
+            DeclareLaunchArgument(
+                "navigation_policy_path",
+                default_value="",
+                description="Path to the JIT navigation policy file (.pt).",
             ),
             DeclareLaunchArgument(
                 "rviz",
