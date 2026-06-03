@@ -16,4 +16,6 @@ navigation:
     cmd_scale_wz: 0.5
     goal_z: 0.35
     max_tf_age_sec: 1.0
+    goal_reached_distance: 0.1
+    goal_reached_angle: 0.2
     device: cuda

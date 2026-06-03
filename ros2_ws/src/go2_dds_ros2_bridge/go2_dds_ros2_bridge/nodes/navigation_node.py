@@ -37,6 +37,8 @@ DEFAULT_CMD_SCALE_VY = 1.0
 DEFAULT_CMD_SCALE_WZ = 1.0
 DEFAULT_GOAL_Z = 0.35
 DEFAULT_MAX_TF_AGE_SEC = 1.0
+DEFAULT_GOAL_REACHED_DISTANCE = 0.1
+DEFAULT_GOAL_REACHED_ANGLE = 0.2
 
 SCAN_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -64,6 +66,8 @@ class NavigationConfig:
     cmd_scale_wz: float
     goal_z: float
     max_tf_age_sec: float
+    goal_reached_distance: float
+    goal_reached_angle: float
     device: str
 
 
@@ -103,6 +107,10 @@ def parse_args() -> NavigationConfig:
                         help="Target z coordinate in map frame used for the pose command (nominal standing height).")
     parser.add_argument("--max-tf-age-sec", type=float, default=DEFAULT_MAX_TF_AGE_SEC,
                         help="Maximum age of a TF transform before it is considered stale.")
+    parser.add_argument("--goal-reached-distance", type=float, default=DEFAULT_GOAL_REACHED_DISTANCE,
+                        help="XY distance threshold (m) to consider the goal reached.")
+    parser.add_argument("--goal-reached-angle", type=float, default=DEFAULT_GOAL_REACHED_ANGLE,
+                        help="Heading error threshold (rad) to consider the goal reached.")
     parser.add_argument("--device", type=str, default="cpu",
                         help="Torch device for policy inference ('cpu' or 'cuda').")
 
@@ -133,6 +141,8 @@ def parse_args() -> NavigationConfig:
         cmd_scale_wz=float(args.cmd_scale_wz),
         goal_z=float(args.goal_z),
         max_tf_age_sec=float(args.max_tf_age_sec),
+        goal_reached_distance=float(args.goal_reached_distance),
+        goal_reached_angle=float(args.goal_reached_angle),
         device=args.device,
     )
 
@@ -157,6 +167,8 @@ class NavigationNode(Node):
         self.declare_parameter("cmd_scale_wz", config.cmd_scale_wz)
         self.declare_parameter("goal_z", config.goal_z)
         self.declare_parameter("max_tf_age_sec", config.max_tf_age_sec)
+        self.declare_parameter("goal_reached_distance", config.goal_reached_distance)
+        self.declare_parameter("goal_reached_angle", config.goal_reached_angle)
         self.declare_parameter("device", config.device)
 
         self._config = NavigationConfig(
@@ -176,6 +188,8 @@ class NavigationNode(Node):
             cmd_scale_wz=float(self.get_parameter("cmd_scale_wz").value),
             goal_z=float(self.get_parameter("goal_z").value),
             max_tf_age_sec=float(self.get_parameter("max_tf_age_sec").value),
+            goal_reached_distance=float(self.get_parameter("goal_reached_distance").value),
+            goal_reached_angle=float(self.get_parameter("goal_reached_angle").value),
             device=str(self.get_parameter("device").value),
         )
 
@@ -213,6 +227,7 @@ class NavigationNode(Node):
         self._ang_vel: np.ndarray | None = None
         self._scan: np.ndarray | None = None
         self._last_action = torch.zeros(3, dtype=torch.float32)
+        self._goal_reached: bool = False
 
         self._tf_warning_last_ns: int = 0
         self._stale_tf_warning_last_ns: int = 0
@@ -253,6 +268,8 @@ class NavigationNode(Node):
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y ** 2 + q.z ** 2),
         )
+        self._goal_reached = False
+        self._last_action = torch.zeros(3, dtype=torch.float32)
 
     def _velocity_callback(self, msg: TwistStamped) -> None:
         self._lin_vel = np.array(
@@ -340,7 +357,17 @@ class NavigationNode(Node):
         heading_err = (self._goal_yaw_world - robot_yaw + math.pi) % (2.0 * math.pi) - math.pi
         return np.array([pos_body_x, pos_body_y, dz, heading_err], dtype=np.float32)
 
+    def _publish_zero_cmd(self) -> None:
+        cmd = TwistStamped()
+        cmd.header.stamp = self.get_clock().now().to_msg()
+        cmd.header.frame_id = self._config.body_frame
+        self._cmd_publisher.publish(cmd)
+
     def _policy_step(self) -> None:
+        if self._goal_reached:
+            self._publish_zero_cmd()
+            return
+
         if any(
             v is None
             for v in [self._goal_pos_world, self._goal_yaw_world, self._lin_vel, self._ang_vel, self._scan]
@@ -356,6 +383,17 @@ class NavigationNode(Node):
         robot_pos, robot_yaw = pose_result
 
         pose_cmd = self._build_pose_command(robot_pos, robot_yaw)
+
+        xy_dist = math.hypot(pose_cmd[0], pose_cmd[1])
+        heading_err = abs(pose_cmd[3])
+        if xy_dist <= self._config.goal_reached_distance and heading_err <= self._config.goal_reached_angle:
+            self._goal_reached = True
+            self._last_action = torch.zeros(3, dtype=torch.float32)
+            self._publish_zero_cmd()
+            self.get_logger().info(
+                "Goal reached (dist=%.3f m, heading_err=%.3f rad). Awaiting new goal." % (xy_dist, heading_err)
+            )
+            return
 
         obs = np.concatenate([
             pose_cmd,                    # (4,)  pose_2d_command
