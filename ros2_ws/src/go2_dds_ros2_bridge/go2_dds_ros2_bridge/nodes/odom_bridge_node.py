@@ -21,6 +21,8 @@ DEFAULT_DDS_ODOM_TOPIC = "rt/odom"
 DEFAULT_ROS_ODOM_TOPIC = "/odom"
 DEFAULT_DDS_VELOCITY_TOPIC = "rt/estimated_velocity"
 DEFAULT_ROS_VELOCITY_TOPIC = "/estimated_velocity"
+DEFAULT_ROS_CMD_VEL_TOPIC = "/cmd_vel"
+DEFAULT_DDS_CMD_VEL_TOPIC = "rt/cmd_vel"
 ODOM_BRIDGE_DEFAULT_VARIANCES = {
     "x": 1.0,
     "y": 1.0,
@@ -47,11 +49,14 @@ class BridgeConfig:
     covariance_file: Path | None
     velocity_dds_topic: str
     velocity_ros_topic: str
+    cmd_vel_ros_topic: str
+    cmd_vel_dds_topic: str
 
 
 def import_raw_dds_dependencies():
     try:
-        from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
+        from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
+        from unitree_sdk2py.idl.default import geometry_msgs_msg_dds__TwistStamped_ as DdsTwistStampedDefault
         from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import TwistStamped_ as DdsTwistStamped
         from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_ as DdsOdometry
     except ModuleNotFoundError as error:
@@ -69,7 +74,7 @@ def import_raw_dds_dependencies():
             "to point at a compatible installation built for the same Python version."
         ) from error
 
-    return ChannelFactoryInitialize, ChannelSubscriber, DdsOdometry, DdsTwistStamped
+    return ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber, DdsOdometry, DdsTwistStamped, DdsTwistStampedDefault
 
 
 def parse_args() -> BridgeConfig:
@@ -113,6 +118,18 @@ def parse_args() -> BridgeConfig:
         default=DEFAULT_ROS_VELOCITY_TOPIC,
         help="ROS2 body-frame linear velocity topic to publish.",
     )
+    parser.add_argument(
+        "--cmd-vel-ros-topic",
+        type=str,
+        default=DEFAULT_ROS_CMD_VEL_TOPIC,
+        help="ROS2 velocity command topic to subscribe to (from navigation policy).",
+    )
+    parser.add_argument(
+        "--cmd-vel-dds-topic",
+        type=str,
+        default=DEFAULT_DDS_CMD_VEL_TOPIC,
+        help="Raw DDS velocity command topic to publish.",
+    )
     non_ros_args = rclpy.utilities.remove_ros_args(args=sys.argv)[1:]
     args = parser.parse_args(non_ros_args)
     runtime_profile = resolve_runtime_arguments(args)
@@ -126,13 +143,16 @@ def parse_args() -> BridgeConfig:
         covariance_file=args.covariance_file,
         velocity_dds_topic=args.velocity_dds_topic,
         velocity_ros_topic=args.velocity_ros_topic,
+        cmd_vel_ros_topic=args.cmd_vel_ros_topic,
+        cmd_vel_dds_topic=args.cmd_vel_dds_topic,
     )
 
 
 class DdsOdometryBridge(Node):
-    def __init__(self, config: BridgeConfig, channel_subscriber_cls, dds_odometry_type, dds_twist_type) -> None:
+    def __init__(self, config: BridgeConfig, channel_publisher_cls, channel_subscriber_cls, dds_odometry_type, dds_twist_type, dds_twist_default) -> None:
         super().__init__("go2_odometry_bridge")
         self._config = config
+        self._dds_twist_default = dds_twist_default
         self._publisher = self.create_publisher(Odometry, self._config.ros_topic, 10)
         self._velocity_publisher = self.create_publisher(TwistStamped, self._config.velocity_ros_topic, 10)
         covariance_variances, covariance_source = load_state_variances(
@@ -156,6 +176,10 @@ class DdsOdometryBridge(Node):
         self._velocity_dds_subscriber.Init(self._dds_velocity_handler, 10)
         self._publish_timer = self.create_timer(1.0 / self._config.publish_hz, self._publish_pending_message)
 
+        self._cmd_vel_dds_publisher = channel_publisher_cls(self._config.cmd_vel_dds_topic, dds_twist_type)
+        self._cmd_vel_dds_publisher.Init()
+        self.create_subscription(TwistStamped, self._config.cmd_vel_ros_topic, self._ros_cmd_vel_handler, 10)
+
         ros_domain_id = os.environ.get("ROS_DOMAIN_ID", "<unset>")
         self.get_logger().info(
             "Bridging raw DDS odometry '%s' (domain=%d, interface=%s) to ROS2 topic '%s' (ROS_DOMAIN_ID=%s, covariance_source=%s)"
@@ -171,6 +195,10 @@ class DdsOdometryBridge(Node):
         self.get_logger().info(
             "Bridging raw DDS body velocity '%s' to ROS2 topic '%s'"
             % (self._config.velocity_dds_topic, self._config.velocity_ros_topic)
+        )
+        self.get_logger().info(
+            "Bridging ROS2 cmd_vel '%s' to raw DDS topic '%s'"
+            % (self._config.cmd_vel_ros_topic, self._config.cmd_vel_dds_topic)
         )
 
     def _dds_odometry_handler(self, msg) -> None:
@@ -214,6 +242,19 @@ class DdsOdometryBridge(Node):
             self._pending_velocity = ros_msg
             self._velocity_version += 1
 
+    def _ros_cmd_vel_handler(self, msg: TwistStamped) -> None:
+        dds_msg = self._dds_twist_default()
+        dds_msg.header.stamp.sec = msg.header.stamp.sec
+        dds_msg.header.stamp.nanosec = msg.header.stamp.nanosec
+        dds_msg.header.frame_id = msg.header.frame_id
+        dds_msg.twist.linear.x = msg.twist.linear.x
+        dds_msg.twist.linear.y = msg.twist.linear.y
+        dds_msg.twist.linear.z = msg.twist.linear.z
+        dds_msg.twist.angular.x = msg.twist.angular.x
+        dds_msg.twist.angular.y = msg.twist.angular.y
+        dds_msg.twist.angular.z = msg.twist.angular.z
+        self._cmd_vel_dds_publisher.Write(dds_msg)
+
     def _publish_pending_message(self) -> None:
         with self._message_lock:
             if self._pending_message is None or self._message_version == self._last_published_version:
@@ -236,11 +277,11 @@ class DdsOdometryBridge(Node):
 
 def main() -> None:
     config = parse_args()
-    ChannelFactoryInitialize, channel_subscriber_cls, dds_odometry_type, dds_twist_type = import_raw_dds_dependencies()
+    ChannelFactoryInitialize, channel_publisher_cls, channel_subscriber_cls, dds_odometry_type, dds_twist_type, dds_twist_default = import_raw_dds_dependencies()
     ChannelFactoryInitialize(config.dds_domain_id, config.dds_interface)
     rclpy.init(args=None)
 
-    node = DdsOdometryBridge(config, channel_subscriber_cls, dds_odometry_type, dds_twist_type)
+    node = DdsOdometryBridge(config, channel_publisher_cls, channel_subscriber_cls, dds_odometry_type, dds_twist_type, dds_twist_default)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

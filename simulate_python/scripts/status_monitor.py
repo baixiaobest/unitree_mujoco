@@ -18,6 +18,7 @@ from robot_comm.robot_communication import RobotCommunication
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
 from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import UwbSwitch_, WirelessController_
+from utils.locomotion_mode import TOPIC_LOCOMOTION_MODE, LocomotionMode, format_locomotion_mode
 from utils.odometry_publisher import TOPIC_ESTIMATED_ODOMETRY
 from utils.robot_posture import RobotPostureState, TOPIC_ROBOT_POSTURE, format_robot_posture_state
 from utils.status_monitor_commands import (
@@ -72,6 +73,10 @@ class StatusMonitor(QMainWindow):
         self.odometry_subscriber.Init(self._estimated_odometry_handler, 10)
         self.robot_posture_subscriber = ChannelSubscriber(TOPIC_ROBOT_POSTURE, UwbSwitch_)
         self.robot_posture_subscriber.Init(self._robot_posture_handler, 10)
+        self._locomotion_mode_lock = Lock()
+        self._latest_locomotion_mode: int = int(LocomotionMode.CONTROLLER)
+        self.locomotion_mode_subscriber = ChannelSubscriber(TOPIC_LOCOMOTION_MODE, UwbSwitch_)
+        self.locomotion_mode_subscriber.Init(self._locomotion_mode_handler, 10)
         self.monitor_command_publisher = ChannelPublisher(TOPIC_STATUS_MONITOR_COMMAND, WirelessController_)
         self.monitor_command_publisher.Init()
         self.init_ui()
@@ -105,6 +110,29 @@ class StatusMonitor(QMainWindow):
     def _get_latest_robot_posture_state(self) -> int | None:
         with self._robot_posture_lock:
             return self._latest_robot_posture_state
+
+    def _locomotion_mode_handler(self, msg: UwbSwitch_):
+        with self._locomotion_mode_lock:
+            self._latest_locomotion_mode = int(msg.enabled)
+
+    def _get_latest_locomotion_mode(self) -> int | None:
+        with self._locomotion_mode_lock:
+            return self._latest_locomotion_mode
+
+    def _set_locomotion_mode_display(self, state: int | None) -> None:
+        self.locomotion_mode_value.setText(format_locomotion_mode(state))
+        try:
+            mode = LocomotionMode(state) if state is not None else None
+        except ValueError:
+            mode = None
+
+        if mode == LocomotionMode.POLICY:
+            color = "#137333"
+        elif mode == LocomotionMode.CONTROLLER:
+            color = "#005a9c"
+        else:
+            color = "#4a4a4a"
+        self.locomotion_mode_value.setStyleSheet(f"color: {color};")
 
     def _set_robot_posture_display(self, state: int | None) -> None:
         self.robot_posture_value.setText(format_robot_posture_state(state))
@@ -292,13 +320,17 @@ class StatusMonitor(QMainWindow):
         pitch_label = QLabel("Pitch:")
         yaw_label = QLabel("Yaw:")
         posture_label = QLabel("Posture:")
-        
+        locomotion_mode_label = QLabel("Locomotion Mode:")
+
         self.roll_value = QLabel("0.00°")
         self.pitch_value = QLabel("0.00°")
         self.yaw_value = QLabel("0.00°")
         self.robot_posture_value = QLabel("unknown")
+        self.locomotion_mode_value = QLabel("unknown")
         posture_label.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         self.robot_posture_value.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+        locomotion_mode_label.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        self.locomotion_mode_value.setFont(QFont("Arial", 18, QFont.Weight.Bold))
         
         # Add to layout
         base_layout.addWidget(pos_x_label, 0, 0)
@@ -323,6 +355,8 @@ class StatusMonitor(QMainWindow):
         base_layout.addWidget(self.yaw_value, 8, 1)
         base_layout.addWidget(posture_label, 9, 0)
         base_layout.addWidget(self.robot_posture_value, 9, 1)
+        base_layout.addWidget(locomotion_mode_label, 10, 0)
+        base_layout.addWidget(self.locomotion_mode_value, 10, 1)
         
         base_status_group.setLayout(base_layout)
         
@@ -491,6 +525,7 @@ class StatusMonitor(QMainWindow):
         robot_posture_state = self._get_latest_robot_posture_state()
 
         self._set_robot_posture_display(robot_posture_state)
+        self._set_locomotion_mode_display(self._get_latest_locomotion_mode())
         
         # Update joint status tab
         if joint_state["positions"].numel() > 0:

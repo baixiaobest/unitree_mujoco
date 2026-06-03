@@ -7,6 +7,8 @@ from mdp.commands import (
     GameControllerPose2dCommandConfig,
     GameControllerVelocityCommand,
     GameControllerVelocityCommandConfig,
+    GameControllerPolicyHybridVelocityCommand,
+    GameControllerPolicyHybridVelocityCommandConfig,
     WasdKeyboardCommand,
     WasdKeyboardCommandConfig,
 )
@@ -368,8 +370,8 @@ class GO2HardwareEnvironment(Go2Environment):
                     visualize=self.policy_mode == "position_control"
                 )),
                 ("game_controller_velocity_command",
-                GameControllerVelocityCommand,
-                GameControllerVelocityCommandConfig(
+                GameControllerPolicyHybridVelocityCommand,
+                GameControllerPolicyHybridVelocityCommandConfig(
                     resample_interval=0.05,
                     max_linear_velocity=1.0,
                     max_angular_velocity=1.0,

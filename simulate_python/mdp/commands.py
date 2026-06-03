@@ -1,8 +1,14 @@
 from env.environment import Environment
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import threading
 import torch
 import math
 import utils.math_utils as math_utils
+from utils.locomotion_mode import (
+    TOPIC_POLICY_VEL_CMD,
+    TOPIC_LOCOMOTION_MODE,
+    LocomotionMode,
+)
 from utils.mujoco_visualizer import MujocoVisualizer
 import pygame
 
@@ -692,3 +698,109 @@ class WasdKeyboardCommand(Pose2dCommand):
     
         # Set the command in world frame
         self.command_w = torch.tensor([x, y, z, heading, 0.0], device=self._command.device, dtype=torch.float32)
+
+
+@dataclass
+class GameControllerPolicyHybridVelocityCommandConfig(GameControllerVelocityCommandConfig):
+    """Configuration for GameControllerPolicyHybridVelocityCommand."""
+    toggle_button_index: int = 0  # A button
+    vel_cmd_dds_topic: str = TOPIC_POLICY_VEL_CMD
+    mode_dds_topic: str = TOPIC_LOCOMOTION_MODE
+    vel_cmd_timeout: float = 0.5  # seconds before falling back to CONTROLLER mode
+
+
+class GameControllerPolicyHybridVelocityCommand(GameControllerVelocityCommand):
+    """Velocity command that switches between game controller and navigation policy via a button toggle.
+
+    Default mode is CONTROLLER. Pressing the toggle button (LB by default) switches modes.
+    In POLICY mode, velocity is sourced from the DDS vel_cmd topic published by the navigation node.
+    In CONTROLLER mode, velocity is sourced from the game controller axes.
+    Current mode is broadcast on DDS so other tools (status monitor) can observe it.
+    """
+
+    def __init__(self, env: Environment, cfg: GameControllerPolicyHybridVelocityCommandConfig, device: str = "cpu"):
+        super().__init__(env, cfg, device)
+        self.cfg = cfg
+        self._mode = LocomotionMode.CONTROLLER
+        self._toggle_button_pressed_prev = False
+        self._policy_vel_lock = threading.Lock()
+        self._policy_vel_cmd: torch.Tensor | None = None
+        self._policy_vel_last_recv_time: float | None = None
+
+        from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber
+        from unitree_sdk2py.idl.default import (
+            unitree_go_msg_dds__UwbSwitch_ as UwbSwitchDefault,
+        )
+        from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import TwistStamped_
+        from unitree_sdk2py.idl.unitree_go.msg.dds_ import UwbSwitch_
+
+        self._uwb_switch_default = UwbSwitchDefault
+
+        self._vel_cmd_subscriber = ChannelSubscriber(cfg.vel_cmd_dds_topic, TwistStamped_)
+        self._vel_cmd_subscriber.Init(self._dds_vel_cmd_handler, 10)
+
+        self._mode_publisher = ChannelPublisher(cfg.mode_dds_topic, UwbSwitch_)
+        self._mode_publisher.Init()
+        self._publish_mode()
+
+    def _dds_vel_cmd_handler(self, msg) -> None:
+        import time
+        vel = torch.tensor(
+            [msg.twist.linear.x, msg.twist.linear.y, msg.twist.angular.z],
+            device=self.device,
+            dtype=torch.float32,
+        )
+        with self._policy_vel_lock:
+            self._policy_vel_cmd = vel
+            self._policy_vel_last_recv_time = time.monotonic()
+
+    def _read_toggle_button(self) -> bool:
+        if not self.has_controller or self.controller is None:
+            return False
+        try:
+            pygame.event.pump()
+            return bool(self.controller.get_button(self.cfg.toggle_button_index))
+        except Exception:
+            return False
+
+    def _publish_mode(self) -> None:
+        msg = self._uwb_switch_default()
+        msg.enabled = int(self._mode)
+        self._mode_publisher.Write(msg)
+
+    def resample(self) -> None:
+        super().resample()
+
+        pressed = self._read_toggle_button()
+        if pressed and not self._toggle_button_pressed_prev:
+            self._mode = (
+                LocomotionMode.POLICY
+                if self._mode == LocomotionMode.CONTROLLER
+                else LocomotionMode.CONTROLLER
+            )
+            self._publish_mode()
+            print(f"Locomotion mode: {self._mode.name}")
+        self._toggle_button_pressed_prev = pressed
+
+    def update(self) -> None:
+        if self._mode == LocomotionMode.POLICY:
+            import time
+            with self._policy_vel_lock:
+                policy_cmd = self._policy_vel_cmd
+                last_recv = self._policy_vel_last_recv_time
+
+            timed_out = last_recv is None or (time.monotonic() - last_recv) > self.cfg.vel_cmd_timeout
+            if timed_out:
+                self._command = torch.zeros_like(self._command)
+                self._mode = LocomotionMode.CONTROLLER
+                self._publish_mode()
+                print(f"[WARNING] vel_cmd timeout — switched to CONTROLLER mode")
+                super().update()
+                return
+
+            if policy_cmd is None:
+                self._command = torch.zeros_like(self._command)
+            else:
+                self._command = policy_cmd.clone()
+        else:
+            super().update()
