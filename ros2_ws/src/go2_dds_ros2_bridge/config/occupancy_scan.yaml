@@ -5,7 +5,7 @@ occupancy_scan:
     debug_costmap_topic: /occupancy_scan/debug_costmap
     map_frame: camera_init_correct
     base_frame: base_link
-    num_rays: 129
+    num_rays: 128
     fov_deg: 180.0
     max_range_m: 20.0
     occupancy_threshold: 50
