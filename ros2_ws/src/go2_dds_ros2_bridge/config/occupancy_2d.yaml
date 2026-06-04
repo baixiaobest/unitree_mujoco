@@ -1,6 +1,6 @@
 occupancy_2d:
   ros__parameters:
-    input_topic: /cloud_registered
+    input_topic: /utlidar/time_corrected/cloud
     output_topic: /slow_occupancy
     fast_output_topic: /fast_occupancy
     dynamic_output_topic: /dynamic_occupancy
