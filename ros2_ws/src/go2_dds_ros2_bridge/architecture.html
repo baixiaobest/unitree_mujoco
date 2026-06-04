@@ -472,6 +472,8 @@
         <div class="legend-item"><span class="swatch" style="background:#466d35;"></span> FAST-LIO mapping stage</div>
         <div class="legend-item"><span class="swatch" style="background:#8b5e34;"></span> Rolling occupancy grid stage</div>
         <div class="legend-item"><span class="swatch" style="background:#5c4c88;"></span> ROS2 topics and TF used by tools</div>
+        <div class="legend-item"><span class="swatch" style="background:#8b5e34;"></span> Occupancy scan node (grid → LaserScan)</div>
+        <div class="legend-item"><span class="swatch" style="background:#275778;"></span> Navigation node (goal → velocity command)</div>
       </aside>
     </section>
 
@@ -593,6 +595,14 @@
           <button type="button" class="runtime-item runtime-button" data-node-id="occupancy_2d">
             <strong>occupancy_2d</strong>
             Optional rolling occupancy map in <span class="mono">camera_init_correct</span>; it first transforms FAST-LIO points into the corrected map frame, then applies z filtering, log-odds fusion, and optional debug cloud publication.
+          </button>
+          <button type="button" class="runtime-item runtime-button" data-node-id="occupancy_scan">
+            <strong>occupancy_scan</strong>
+            Casts rays through the rolling 2D occupancy grid and publishes a <span class="mono">LaserScan</span> on <span class="mono">/occupancy_scan</span> for the navigation policy to consume.
+          </button>
+          <button type="button" class="runtime-item runtime-button" data-node-id="navigation">
+            <strong>navigation</strong>
+            Loads a JIT locomotion policy, transforms the map-frame goal into a body-frame pose command, concatenates sensor observations, runs inference, and publishes velocity commands on <span class="mono">/cmd_vel</span>.
           </button>
           <button type="button" class="runtime-item runtime-button" data-node-id="rviz2">
             <strong>rviz2</strong>
@@ -732,9 +742,122 @@
       </aside>
     </section>
 
+    <section class="section-grid single">
+      <div class="panel diagram-card">
+        <h2>5. Navigation Pipeline: Goal to Velocity Command</h2>
+        <svg viewBox="0 0 1260 580" role="img" aria-label="Navigation pipeline from goal pose to velocity command">
+          <defs>
+            <marker id="arrow-nav" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#6c5b48"></path>
+            </marker>
+          </defs>
+
+          <rect x="26" y="18" width="1208" height="544" rx="28" fill="rgba(255,251,243,0.58)" stroke="#c1b198"></rect>
+
+          <!-- Row 1: inputs -->
+          <!-- Goal pose -->
+          <rect x="60" y="60" width="220" height="88" rx="18" fill="#5c4c88" opacity="0.93"></rect>
+          <text x="80" y="96" font-size="20" font-weight="700" fill="#fffaf3">Goal Pose</text>
+          <text x="80" y="118" font-size="13" fill="#fffaf3">/goal_pose (PoseStamped)</text>
+          <text x="80" y="136" font-size="13" fill="#fffaf3">map frame, from RViz Nav Goal</text>
+
+          <!-- TF -->
+          <rect x="60" y="188" width="220" height="72" rx="18" fill="#d7ab47" opacity="0.93"></rect>
+          <text x="80" y="218" font-size="20" font-weight="700" fill="#18242d">TF Robot Pose</text>
+          <text x="80" y="240" font-size="13" fill="#53646d">camera_init_correct → base_link</text>
+
+          <!-- Occupancy grid -->
+          <rect x="60" y="300" width="220" height="88" rx="18" fill="#8b5e34" opacity="0.93"></rect>
+          <text x="80" y="336" font-size="20" font-weight="700" fill="#fffaf3">occupancy_2d</text>
+          <text x="80" y="358" font-size="13" fill="#fffaf3">/fast_occupancy</text>
+          <text x="80" y="376" font-size="13" fill="#fffaf3">rolling 2D log-odds grid</text>
+
+          <!-- IMU / velocity -->
+          <rect x="60" y="428" width="220" height="88" rx="18" fill="#466d35" opacity="0.93"></rect>
+          <text x="80" y="464" font-size="20" font-weight="700" fill="#fffaf3">IMU + Velocity</text>
+          <text x="80" y="486" font-size="13" fill="#fffaf3">/imu/data_fastlio (ang_vel)</text>
+          <text x="80" y="504" font-size="13" fill="#fffaf3">/estimated_velocity (lin_vel)</text>
+
+          <!-- occupancy_scan node -->
+          <rect x="360" y="300" width="230" height="88" rx="18" fill="#8b5e34" opacity="0.93"></rect>
+          <text x="378" y="336" font-size="20" font-weight="700" fill="#fffaf3">occupancy_scan</text>
+          <text x="378" y="358" font-size="13" fill="#fffaf3">128 rays, 180° FOV</text>
+          <text x="378" y="376" font-size="13" fill="#fffaf3">/occupancy_scan (LaserScan)</text>
+
+          <!-- pose command box -->
+          <rect x="360" y="60" width="230" height="128" rx="18" fill="#275778" opacity="0.97"></rect>
+          <text x="378" y="96" font-size="20" font-weight="700" fill="#fffaf3">Pose Command</text>
+          <text x="378" y="120" font-size="14" fill="#fffaf3">dx_body = cos(yaw)·Δx + sin(yaw)·Δy</text>
+          <text x="378" y="140" font-size="14" fill="#fffaf3">dy_body = −sin(yaw)·Δx + cos(yaw)·Δy</text>
+          <text x="378" y="160" font-size="14" fill="#fffaf3">dz  =  goal_z − robot_z</text>
+          <text x="378" y="180" font-size="14" fill="#fffaf3">Δψ  =  wrap(goal_yaw − robot_yaw)</text>
+
+          <!-- observation concat box -->
+          <rect x="680" y="130" width="270" height="280" rx="18" fill="#275778" opacity="0.97"></rect>
+          <text x="700" y="168" font-size="20" font-weight="700" fill="#fffaf3">Observation (141-dim)</text>
+          <text x="700" y="198" font-size="14" fill="#d7ab47">pose_cmd        [0:4]</text>
+          <text x="700" y="220" font-size="14" fill="#fffaf3">lin_vel          [4:7]</text>
+          <text x="700" y="242" font-size="14" fill="#fffaf3">ang_vel          [7:10]</text>
+          <text x="700" y="264" font-size="14" fill="#fffaf3">last_action     [10:13]</text>
+          <text x="700" y="286" font-size="14" fill="#fffaf3">scan (128 rays) [13:141]</text>
+          <text x="700" y="316" font-size="13" fill="#a0b8c8">scan values clipped to max_range</text>
+          <text x="700" y="334" font-size="13" fill="#a0b8c8">then divided by max_range → [0,1]</text>
+          <text x="700" y="360" font-size="13" fill="#a0b8c8">last_action fed back each step</text>
+          <text x="700" y="382" font-size="13" fill="#a0b8c8">(action history for the policy)</text>
+
+          <!-- policy box -->
+          <rect x="1040" y="170" width="186" height="100" rx="18" fill="#275778" opacity="0.97"></rect>
+          <text x="1058" y="206" font-size="20" font-weight="700" fill="#fffaf3">JIT Policy</text>
+          <text x="1058" y="228" font-size="13" fill="#fffaf3">obs (1×141) → action (3,)</text>
+          <text x="1058" y="248" font-size="13" fill="#fffaf3">15 Hz inference on CPU/GPU</text>
+
+          <!-- cmd_vel box -->
+          <rect x="1040" y="320" width="186" height="100" rx="18" fill="#5c4c88" opacity="0.97"></rect>
+          <text x="1058" y="356" font-size="20" font-weight="700" fill="#fffaf3">/cmd_vel</text>
+          <text x="1058" y="378" font-size="13" fill="#fffaf3">TwistStamped</text>
+          <text x="1058" y="398" font-size="13" fill="#fffaf3">vx · scale, vy · scale, wz · scale</text>
+
+          <!-- goal reached annotation -->
+          <rect x="680" y="450" width="270" height="72" rx="16" fill="#e2eddc" opacity="0.95"></rect>
+          <text x="700" y="480" font-size="17" font-weight="700" fill="#466d35">Goal-reached guard</text>
+          <text x="700" y="500" font-size="13" fill="#466d35">dist &lt; 0.1 m AND |Δψ| &lt; 0.2 rad</text>
+          <text x="700" y="516" font-size="13" fill="#466d35">→ publish zero cmd, await new goal</text>
+
+          <!-- arrows: goal + TF → pose command -->
+          <line x1="280" y1="104" x2="360" y2="104" stroke="#6c5b48" stroke-width="3" marker-end="url(#arrow-nav)"></line>
+          <line x1="280" y1="224" x2="360" y2="124" stroke="#6c5b48" stroke-width="3" marker-end="url(#arrow-nav)"></line>
+
+          <!-- arrow: occupancy grid → occupancy_scan -->
+          <line x1="280" y1="344" x2="360" y2="344" stroke="#6c5b48" stroke-width="3" marker-end="url(#arrow-nav)"></line>
+
+          <!-- arrows: pose_cmd, scan, vel → obs -->
+          <line x1="590" y1="124" x2="680" y2="200" stroke="#6c5b48" stroke-width="3" marker-end="url(#arrow-nav)"></line>
+          <line x1="590" y1="344" x2="680" y2="280" stroke="#6c5b48" stroke-width="3" marker-end="url(#arrow-nav)"></line>
+          <line x1="280" y1="472" x2="680" y2="310" stroke="#6c5b48" stroke-width="3" marker-end="url(#arrow-nav)"></line>
+
+          <!-- obs → policy -->
+          <line x1="950" y1="270" x2="1040" y2="220" stroke="#6c5b48" stroke-width="3" marker-end="url(#arrow-nav)"></line>
+
+          <!-- policy → cmd_vel -->
+          <line x1="1133" y1="270" x2="1133" y2="320" stroke="#6c5b48" stroke-width="3" marker-end="url(#arrow-nav)"></line>
+
+          <!-- feedback: last_action loop -->
+          <path d="M 1133 420 C 1133 460 820 490 815 490 C 810 490 810 410 810 410" fill="none" stroke="#6c5b48" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrow-nav)"></path>
+          <text x="870" y="478" font-size="12" fill="#53646d">last_action feedback</text>
+
+          <!-- goal-reached side note -->
+          <line x1="950" y1="380" x2="985" y2="486" stroke="#6c5b48" stroke-width="2" stroke-dasharray="4 3"></line>
+        </svg>
+        <p class="caption">
+          <strong>Coordinate transform detail.</strong> The navigation node receives the goal in the map frame (<span class="mono">camera_init_correct</span>) and the robot pose from TF. It converts the world-frame displacement into the robot body frame with a yaw-only inverse rotation — identical to <span class="mono">quat_rotate_inverse(yaw_quat(q), target_vec)</span> in simulation — so the policy sees a body-relative goal vector regardless of robot heading. The z component uses a fixed configured height (<span class="mono">goal_z</span>, default 0.35 m) rather than the raw goal z, keeping the policy input near its training distribution. The heading error is wrapped into (−π, π] so the shortest angular distance is always presented. The 128-element scan from <span class="mono">occupancy_scan</span> is normalized to [0, 1] before concatenation.
+        </p>
+      </div>
+    </section>
+
     <div class="footer">
       Open this file directly in a browser. It is self-contained and now documents the current package architecture for
       <span class="mono">source/unitree_mujoco/ros2_ws/src/go2_dds_ros2_bridge</span> after the removal of the KISS-ICP and EKF fusion path.
+      Section 5 covers the navigation stack added in 2026-06: <span class="mono">occupancy_scan</span> (grid → LaserScan) and <span class="mono">navigation</span> (goal → JIT policy → /cmd_vel).
     </div>
   </main>
 
@@ -954,6 +1077,73 @@
           "Because the output QoS is transient local, late subscribers can still receive the most recent grid."
         ],
         code: "Entry point: Occupancy2DNode\nPrimary data path: /cloud_registered -> extract_xyz_points() -> transform into camera_init_correct -> z filtering in corrected frame -> optional debug PointCloud2 -> RollingOccupancyMap -> nav_msgs/OccupancyGrid\nNotable hooks: debug flag and debug_filtered_pointcloud_topic, correction-transform gate, max_tf_age_sec freshness guard, rolling cell recentering, transient-local output QoS"
+      },
+      occupancy_scan: {
+        title: "occupancy_scan",
+        subtitle: "Converts the rolling 2D occupancy grid into a fixed-angle LaserScan by ray-casting from the robot position, ready for direct consumption by the navigation policy.",
+        responsibilities: [
+          "Subscribes to nav_msgs/OccupancyGrid on /fast_occupancy (produced by the occupancy_2d node).",
+          "Looks up the robot pose in the map frame via TF at each grid update, extracting x, y, and yaw.",
+          "Casts num_rays evenly-spaced rays over the configured FOV centred on the robot's current heading; each ray advances at half-cell steps until it either exits the grid or hits a cell whose value exceeds occupancy_threshold.",
+          "Publishes the resulting distance array as a sensor_msgs/LaserScan on /occupancy_scan with BEST_EFFORT QoS.",
+          "Optionally publishes a debug nav_msgs/OccupancyGrid showing only the ray end-points on /occupancy_scan/debug_costmap.",
+          "Uses a numba @njit kernel (cast_rays) for ray marching when numba is available, falling back transparently to pure Python."
+        ],
+        meta: [
+          "File: go2_dds_ros2_bridge/nodes/occupancy_scan_node.py",
+          "Input: /fast_occupancy (OccupancyGrid, reliable keep-last)",
+          "Output: /occupancy_scan (LaserScan, BEST_EFFORT volatile)",
+          "Default rays: 128 over 180° FOV, max range 20 m",
+          "Occupancy threshold: 50 (cell value > threshold = obstacle)",
+          "Max TF age: 1.0 s"
+        ],
+        reading: [
+          "Start with OccupancyScanConfig and parse_args() to find every tuning knob: num_rays, fov_deg, max_range_m, occupancy_threshold, max_tf_age_sec.",
+          "The cast_rays() function is the algorithmic core. It operates in the map frame (not the robot frame), using world-space cos/sin angles derived from robot yaw, so the scan is always forward-facing.",
+          "Note the step = resolution * 0.5 choice: each ray advances in half-cell increments to avoid skipping thin walls.",
+          "The angle array is built as yaw + linspace(-fov/2, fov/2), so index 0 is the robot's hard-left and index N-1 is hard-right, matching the LaserScan angle_min / angle_max convention.",
+          "_build_debug_costmap() plots ray endpoints back onto a copy of the grid for easy RViz inspection."
+        ],
+        launch: [
+          "Run this node after occupancy_2d so /fast_occupancy is already being published.",
+          "Pass --num-rays 128 --fov-deg 180 to match the navigation policy's expected scan dimensionality.",
+          "The output topic /occupancy_scan must match the --scan-topic argument of the navigation node."
+        ],
+        code: "Entry point: OccupancyScanNode\nPrimary data path: OccupancyGrid -> _grid_callback() -> TF lookup (robot x/y/yaw) -> cast_rays() numba kernel -> LaserScan + debug OccupancyGrid\nNotable hooks: numba NUMBA_AVAILABLE fallback, cast_rays step = resolution*0.5, angle_offsets = linspace(-fov/2, fov/2, num_rays)"
+      },
+      navigation: {
+        title: "navigation",
+        subtitle: "End-to-end goal-to-velocity bridge: transforms a map-frame goal pose into a body-frame pose command, bundles sensor observations, runs a JIT locomotion policy, and publishes velocity commands.",
+        responsibilities: [
+          "Loads a TorchScript JIT policy (.pt) and runs it at a configurable rate (default 15 Hz).",
+          "Subscribes to: PoseStamped goal (/goal_pose, e.g. from RViz 2D Nav Goal), TwistStamped body-frame velocity (/estimated_velocity), Imu angular velocity (/imu/data_fastlio), and LaserScan obstacles (/occupancy_scan).",
+          "At each step, looks up the robot pose (position + yaw) in the map frame via TF and computes a 4-element body-frame pose command: [dx_body, dy_body, dz, heading_err].",
+          "Concatenates the pose command, lin_vel (3), ang_vel (3), last_action (3), and the 128-ray scan into a 141-dimensional observation tensor.",
+          "Runs the policy: obs (1×141) -> action (3,) = [vx, vy, wz], applies per-axis scale factors, and publishes as TwistStamped on /cmd_vel.",
+          "Detects goal reached (xy distance < goal_reached_distance AND |heading_err| < goal_reached_angle) and publishes zero commands until a new goal arrives."
+        ],
+        meta: [
+          "File: go2_dds_ros2_bridge/nodes/navigation_node.py",
+          "Policy input: 141-dim float32 tensor [pose_cmd(4), lin_vel(3), ang_vel(3), last_action(3), scan(128)]",
+          "Policy output: 3-dim float32 tensor [vx, vy, wz]",
+          "Output topic: /cmd_vel (TwistStamped)",
+          "Default inference rate: 15 Hz",
+          "Goal reached: 0.1 m distance AND 0.2 rad heading error"
+        ],
+        reading: [
+          "Start with parse_args() and NavigationConfig to understand every external knob, particularly --lidar-max-distance and --num-lidar-rays, which must match the training distribution.",
+          "_build_pose_command() is the key geometric transform. It rotates the world-frame displacement (dx, dy) into the robot body frame using a yaw-only inverse rotation (cos_y * dx + sin_y * dy), exactly matching quat_rotate_inverse(yaw_quat(q), target_vec) from simulation.",
+          "The scan input is pre-normalized in _scan_callback(): raw ranges are clipped to lidar_max_distance and divided by it, so the policy sees values in [0, 1].",
+          "_policy_step() guards on all five data sources being non-None and the scan length matching num_lidar_rays before running inference.",
+          "_last_action caches the most recent policy output and is fed back as part of the observation, giving the policy one step of action history."
+        ],
+        launch: [
+          "Pass --policy-path to the compiled .pt file. The node will exit immediately if the path is empty.",
+          "--scan-topic must match the output of the occupancy_scan node (/occupancy_scan by default).",
+          "--lidar-max-distance and --num-lidar-rays must match the values used during policy training.",
+          "cmd_scale_vx, cmd_scale_vy, cmd_scale_wz let you apply per-axis gains post-inference without retraining."
+        ],
+        code: "Entry point: NavigationNode\nObservation layout (141-dim): [dx_body, dy_body, dz, heading_err | lin_vel.xyz | ang_vel.xyz | last_action.xyz | scan[0..127]]\nPose transform: dx_body = cos(yaw)*dx + sin(yaw)*dy, dy_body = -sin(yaw)*dx + cos(yaw)*dy\nHeading error: (goal_yaw - robot_yaw + pi) % (2*pi) - pi\nGoal check: hypot(pose_cmd[0], pose_cmd[1]) <= goal_reached_distance AND abs(pose_cmd[3]) <= goal_reached_angle"
       },
       rviz2: {
         title: "rviz2",
