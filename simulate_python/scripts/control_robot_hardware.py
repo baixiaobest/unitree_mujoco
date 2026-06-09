@@ -154,6 +154,7 @@ def main():
         policy_mode=args.policy_mode,
         runtime_mode=args.run_mode,
         debug_print=args.debug_print,
+        rate=50,
     )
 
     if not args.no_status_monitor:

@@ -35,8 +35,7 @@ class GO2HardwareEnvironment(Go2Environment):
     
     def __init__(self, robot_comm, model_path, device="cpu", up_down_test=False, rate=200, kp=25.0, kd=0.5,
                  log_dir="logs", log_frequency=10, enable_logging=True, policy_mode="position_control",
-                 runtime_mode="hardware",
-                 jit_history_length=10, debug_print=False):
+                 runtime_mode="hardware", debug_print=False):
         super().__init__(robot_comm, device, kp=kp, kd=kd)
 
         self.model_path = model_path
@@ -44,7 +43,6 @@ class GO2HardwareEnvironment(Go2Environment):
         self.rate = rate
         self.policy_mode = policy_mode
         self.runtime_mode = runtime_mode
-        self.policy_history_length = jit_history_length
         self.debug_print = debug_print
         self.robot_initialized = False
         self._rate_window_start_time = time()
@@ -58,18 +56,20 @@ class GO2HardwareEnvironment(Go2Environment):
         self.command_observation_name = (
             "velocity_commands" if self.policy_mode == "velocity_control" else "pose_commands"
         )
-        
+
+        self.policy = torch.jit.load(self.model_path, map_location=self.device)
+        self.policy_history_length = int(self.policy.horizon)
+        print(f"Loaded JIT horizon from model: {self.policy_history_length}")
+
         # Initialize high-level services only
         self._init_unitree_services()
-        
+
         # Observation manager and other components
         self._init_observation_manager()
         self._init_command_manager()
-        
+
         self.num_joints = 12
         self.desired_positions = [0.0] * self.num_joints
-        
-        self.policy = torch.jit.load(self.model_path, map_location=self.device)
         self._last_policy_output = torch.zeros(self.num_joints, dtype=torch.float32, device=self.device)
         self._last_estimated_base_lin_vel = None
         self._pending_remote_command = None
