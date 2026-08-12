@@ -18,6 +18,28 @@ filter; stable 20-message windows):
     | 95% front return support             | 2 clouds, about 130 ms| Dense virtual front-scan cadence: 7.68 Hz|
     +--------------------------------------+----------------------+------------------------------------------+
 
+Measured ground-relative obstacle-height envelope (stationary, level robot;
+240 raw clouds; obstacle-height band z=0.10--1.50 m above ground; lidar origin
+height 0.30 m; cap plot clipped at 10 m):
+
+    +--------------------------------------+----------------------+------------------------------------------+
+    | Base azimuth                         | Useful range cap     | Interpretation                           |
+    +======================================+======================+==========================================+
+    | Front, about -75 to +90 deg          | >= 10 m (clipped)    | Broad long-range front lobe.             |
+    | Right side, -90 deg                  | about 6.3 m          | Useful lateral coverage.                 |
+    | Left side, +90 deg                   | >= 10 m (clipped)    | Useful lateral coverage.                 |
+    | Rear-side, +/-105 deg                | about 1.5--1.8 m     | Coverage falls rapidly behind the sides. |
+    | Rear-side, +/-120 deg                | about 0.8 m          | Limited rear-side obstacle coverage.     |
+    | Rear-side, +/-135 deg                | about 0.5--0.6 m     | Near-rear only.                          |
+    | Direct rear, +/-180 deg              | about 0.4--0.5 m     | No meaningful long-range rear coverage.  |
+    +--------------------------------------+----------------------+------------------------------------------+
+
+The cap is a function of azimuth, not one constant rear range.  In Cartesian
+ground-plane coordinates it is a broad front half-disc plus short rear-side
+extensions.  Use an azimuth lookup/interpolation when reproducing it in
+simulation.  Values reported as >=10 m only establish coverage to the chosen
+plot cap; they are not a measured maximum sensor range.
+
 The 7.68 Hz figure is an observed two-cloud *return-coverage assembly* rate,
 not the lidar's raw output rate.  Empty angular bins contain no returned point;
 they must not automatically be interpreted as free-space rays.
@@ -27,6 +49,23 @@ deskew their points to one reference pose, then height-filter and bin the front
 180 degrees.  The resulting virtual scan is acquired over roughly 130 ms.
 Alternatively, retain every 15.36 Hz partial cloud only with a validity mask
 and a policy trained for that partial representation.
+
+The optional height-envelope diagnostic characterizes the tilted sensor's
+*geometric obstacle coverage* in ``base_link``.  It converts each observed ray
+direction into the horizontal distance interval for which the ray lies inside a
+chosen ground-relative obstacle-height slab (by default z=0.10--1.50 m above
+ground, with lidar height 0.30 m). Its output is a
+polar range cap r_cap(base azimuth): this is the directly usable description of
+the broad front lobe and the limited rear-side rectangle.  It is not a return
+coverage metric: a missing bin means the calibration scene did not supply a
+returned beam direction, not necessarily that the lidar cannot see there.
+
+For a trustworthy envelope, keep the robot stationary and level, use the raw
+cloud with the repository's lidar extrinsic, and provide high-return vertical
+targets around the robot (for example, an octagon of boards).  Run long enough
+to span the scanner pattern.  Repeat with boards at several radii to validate
+the reported range boundary.  Do not infer this geometry from an arbitrary
+room: absent objects and poor reflectance are indistinguishable from no beam.
 """
 
 from __future__ import annotations
@@ -35,6 +74,7 @@ import argparse
 import math
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from time import monotonic_ns
 
 import numpy as np
@@ -43,7 +83,11 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import PointCloud2, PointField
 
-from go2_dds_ros2_bridge.tf_utils import DEFAULT_LIDAR_TF_RPY_DEG, rotation_matrix_from_rpy_degrees
+from go2_dds_ros2_bridge.tf_utils import (
+    DEFAULT_LIDAR_TF_RPY_DEG,
+    DEFAULT_LIDAR_TF_XYZ,
+    rotation_matrix_from_rpy_degrees,
+)
 
 
 DEFAULT_INPUT_TOPIC = "/utlidar/time_corrected/cloud"
@@ -53,6 +97,15 @@ DEFAULT_FOV_DEG = 180.0
 DEFAULT_COVERAGE_FRACTION = 0.95
 DEFAULT_MIN_RANGE_M = 0.0
 DEFAULT_TIMESTAMP_SLICES = 8
+DEFAULT_HEIGHT_ENVELOPE_MIN_GROUND_Z_M = 0.10
+DEFAULT_HEIGHT_ENVELOPE_MAX_GROUND_Z_M = 1.50
+DEFAULT_LIDAR_HEIGHT_ABOVE_GROUND_M = 0.30
+DEFAULT_HEIGHT_ENVELOPE_MAX_RANGE_M = 10.0
+DEFAULT_HEIGHT_ENVELOPE_AZIMUTH_BINS = 72
+DEFAULT_HEIGHT_ENVELOPE_ACCUMULATION_MESSAGES = 120
+DEFAULT_HEIGHT_ENVELOPE_PRINT_STEP_DEG = 15.0
+DEFAULT_HEIGHT_ENVELOPE_PLOT_PATH = ""
+DEFAULT_HEIGHT_ENVELOPE_RETURN_PLOT_SAMPLES_PER_CLOUD = 2000
 TIMESTAMP_FIELD_NAMES = ("t", "timestamp", "timestamps", "time", "time_stamp")
 POINT_FIELD_DTYPES = {
     PointField.INT8: np.dtype(np.int8),
@@ -104,6 +157,16 @@ class ExperimentConfig:
     timestamp_slices: int
     min_z_m: float
     max_z_m: float
+    measure_height_envelope: bool
+    height_envelope_min_ground_z_m: float
+    height_envelope_max_ground_z_m: float
+    lidar_height_above_ground_m: float
+    height_envelope_max_range_m: float
+    height_envelope_azimuth_bins: int
+    height_envelope_accumulation_messages: int
+    height_envelope_print_step_deg: float
+    height_envelope_plot_path: str
+    height_envelope_return_plot_samples_per_cloud: int
 
 
 @dataclass(frozen=True)
@@ -121,6 +184,9 @@ class CloudInspection:
     timestamp_field_name: str | None
     timestamp_type_name: str | None
     timestamp_stats: tuple[float, float, float] | None
+    height_envelope_azimuth_rad: np.ndarray
+    height_envelope_far_range_m: np.ndarray
+    height_envelope_return_xyz_m: np.ndarray
 
     @property
     def front_bin_count(self) -> int:
@@ -205,6 +271,78 @@ def parse_args() -> ExperimentConfig:
         default=float("inf"),
         help="Ignore points above this Z value in the cloud frame; default keeps all heights.",
     )
+    parser.add_argument(
+        "--measure-height-envelope",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Estimate the base-frame obstacle-height visibility envelope from returned beam directions. "
+            "This needs a stationary, level robot and a calibration scene with returns around the robot."
+        ),
+    )
+    parser.add_argument(
+        "--height-envelope-min-ground-z-m",
+        type=float,
+        default=DEFAULT_HEIGHT_ENVELOPE_MIN_GROUND_Z_M,
+        help="Lower obstacle height above level ground used by the visibility-envelope measurement.",
+    )
+    parser.add_argument(
+        "--height-envelope-max-ground-z-m",
+        type=float,
+        default=DEFAULT_HEIGHT_ENVELOPE_MAX_GROUND_Z_M,
+        help="Upper obstacle height above level ground used by the visibility-envelope measurement.",
+    )
+    parser.add_argument(
+        "--lidar-height-above-ground-m",
+        type=float,
+        default=DEFAULT_LIDAR_HEIGHT_ABOVE_GROUND_M,
+        help=(
+            "Measured vertical lidar-origin height above level ground while standing. The default is 0.30 m. "
+            "It is combined with the configured base_link <- lidar extrinsic to derive the base-frame slab."
+        ),
+    )
+    parser.add_argument(
+        "--height-envelope-max-range-m",
+        type=float,
+        default=DEFAULT_HEIGHT_ENVELOPE_MAX_RANGE_M,
+        help="Clip the reported base-frame visibility envelope at this horizontal range.",
+    )
+    parser.add_argument(
+        "--height-envelope-azimuth-bins",
+        type=int,
+        default=DEFAULT_HEIGHT_ENVELOPE_AZIMUTH_BINS,
+        help="Number of base-frame azimuth bins for the height-envelope measurement.",
+    )
+    parser.add_argument(
+        "--height-envelope-accumulation-messages",
+        type=int,
+        default=DEFAULT_HEIGHT_ENVELOPE_ACCUMULATION_MESSAGES,
+        help="Partial-cloud messages accumulated before emitting one height-envelope result.",
+    )
+    parser.add_argument(
+        "--height-envelope-print-step-deg",
+        type=float,
+        default=DEFAULT_HEIGHT_ENVELOPE_PRINT_STEP_DEG,
+        help="Angular spacing of the compact r_cap(azimuth) list in the height-envelope log.",
+    )
+    parser.add_argument(
+        "--height-envelope-plot-path",
+        type=str,
+        default=DEFAULT_HEIGHT_ENVELOPE_PLOT_PATH,
+        help=(
+            "Write the accumulated base-frame coverage plot to this PNG/PDF/SVG path after each envelope "
+            "window. Empty (the default) disables plotting and avoids requiring matplotlib."
+        ),
+    )
+    parser.add_argument(
+        "--height-envelope-return-plot-samples-per-cloud",
+        type=int,
+        default=DEFAULT_HEIGHT_ENVELOPE_RETURN_PLOT_SAMPLES_PER_CLOUD,
+        help=(
+            "Maximum height-filtered, base-frame returned points retained from each partial cloud for the "
+            "coverage plot. Set to 0 to omit the measured-return layer."
+        ),
+    )
     non_ros_args = rclpy.utilities.remove_ros_args(args=sys.argv)[1:]
     args = parser.parse_args(non_ros_args)
     if args.azimuth_bins < 2:
@@ -219,6 +357,20 @@ def parse_args() -> ExperimentConfig:
         raise SystemExit("--timestamp-slices must be at least 2")
     if args.min_z_m > args.max_z_m:
         raise SystemExit("--min-z-m must not exceed --max-z-m")
+    if args.height_envelope_min_ground_z_m >= args.height_envelope_max_ground_z_m:
+        raise SystemExit("--height-envelope-min-ground-z-m must be smaller than --height-envelope-max-ground-z-m")
+    if args.lidar_height_above_ground_m <= 0.0:
+        raise SystemExit("--lidar-height-above-ground-m must be positive")
+    if args.height_envelope_max_range_m <= 0.0:
+        raise SystemExit("--height-envelope-max-range-m must be positive")
+    if args.height_envelope_azimuth_bins < 8:
+        raise SystemExit("--height-envelope-azimuth-bins must be at least 8")
+    if args.height_envelope_accumulation_messages < 1:
+        raise SystemExit("--height-envelope-accumulation-messages must be positive")
+    if args.height_envelope_print_step_deg <= 0.0 or args.height_envelope_print_step_deg > 180.0:
+        raise SystemExit("--height-envelope-print-step-deg must be in (0, 180]")
+    if args.height_envelope_return_plot_samples_per_cloud < 0:
+        raise SystemExit("--height-envelope-return-plot-samples-per-cloud must be non-negative")
     return ExperimentConfig(
         input_topic=args.input_topic,
         log_every_messages=max(args.log_every_messages, 1),
@@ -230,6 +382,16 @@ def parse_args() -> ExperimentConfig:
         timestamp_slices=int(args.timestamp_slices),
         min_z_m=float(args.min_z_m),
         max_z_m=float(args.max_z_m),
+        measure_height_envelope=bool(args.measure_height_envelope),
+        height_envelope_min_ground_z_m=float(args.height_envelope_min_ground_z_m),
+        height_envelope_max_ground_z_m=float(args.height_envelope_max_ground_z_m),
+        lidar_height_above_ground_m=float(args.lidar_height_above_ground_m),
+        height_envelope_max_range_m=float(args.height_envelope_max_range_m),
+        height_envelope_azimuth_bins=int(args.height_envelope_azimuth_bins),
+        height_envelope_accumulation_messages=int(args.height_envelope_accumulation_messages),
+        height_envelope_print_step_deg=float(args.height_envelope_print_step_deg),
+        height_envelope_plot_path=str(args.height_envelope_plot_path),
+        height_envelope_return_plot_samples_per_cloud=int(args.height_envelope_return_plot_samples_per_cloud),
     )
 
 
@@ -315,6 +477,23 @@ class CloudExperimentNode(Node):
         self._last_full_scan_end_ns: int | None = None
         self._full_scan_count = 0
         self._coverage_target_bins = int(math.ceil(self._config.coverage_fraction * self._config.azimuth_bins))
+        self._rotation_base_from_lidar = rotation_matrix_from_rpy_degrees(*DEFAULT_LIDAR_TF_RPY_DEG)
+        self._lidar_origin_in_base_m = np.asarray(DEFAULT_LIDAR_TF_XYZ, dtype=np.float64)
+        self._base_height_above_ground_m = (
+            self._config.lidar_height_above_ground_m - float(self._lidar_origin_in_base_m[2])
+        )
+        self._height_envelope_min_base_z_m = (
+            self._config.height_envelope_min_ground_z_m - self._base_height_above_ground_m
+        )
+        self._height_envelope_max_base_z_m = (
+            self._config.height_envelope_max_ground_z_m - self._base_height_above_ground_m
+        )
+        self._height_envelope_far_range_m = np.full(
+            self._config.height_envelope_azimuth_bins, np.nan, dtype=np.float64
+        )
+        self._height_envelope_ray_counts = np.zeros(self._config.height_envelope_azimuth_bins, dtype=np.int64)
+        self._height_envelope_return_xyz_chunks: list[np.ndarray] = []
+        self._height_envelope_message_count = 0
 
         self.get_logger().info(
             "Inspecting PointCloud2 topic '%s'. A summary will be logged every %d messages. "
@@ -336,6 +515,25 @@ class CloudExperimentNode(Node):
                 self._config.max_z_m,
             )
         )
+        if self._config.measure_height_envelope:
+            self.get_logger().info(
+                "Height-envelope measurement enabled: transforming returned beam directions with the configured "
+                "base_link <- utlidar_lidar extrinsic, then finding the farthest horizontal point of each beam "
+                "within ground-relative z=[%.2f, %.2f]m (base_link z=[%.2f, %.2f]m using lidar height %.2fm). "
+                "Accumulating %d clouds into %d azimuth bins, clipped at %.1fm; "
+                "retaining up to %d actual returns/cloud for the optional plot."
+                % (
+                    self._config.height_envelope_min_ground_z_m,
+                    self._config.height_envelope_max_ground_z_m,
+                    self._height_envelope_min_base_z_m,
+                    self._height_envelope_max_base_z_m,
+                    self._config.lidar_height_above_ground_m,
+                    self._config.height_envelope_accumulation_messages,
+                    self._config.height_envelope_azimuth_bins,
+                    self._config.height_envelope_max_range_m,
+                    self._config.height_envelope_return_plot_samples_per_cloud,
+                )
+            )
 
     def _cloud_callback(self, msg: PointCloud2) -> None:
         receive_ns = monotonic_ns()
@@ -387,6 +585,11 @@ class CloudExperimentNode(Node):
         self._packet_time_slice_counts.append(inspection.time_slice_count)
         sample_time_ns = header_stamp_ns if header_stamp_ns > 0 else receive_ns
         self._update_full_scan_measurement(inspection.front_coverage_mask, sample_time_ns)
+        self._update_height_envelope(
+            inspection.height_envelope_azimuth_rad,
+            inspection.height_envelope_far_range_m,
+            inspection.height_envelope_return_xyz_m,
+        )
 
         timestamp_field_name = inspection.timestamp_field_name
         timestamp_type_name = inspection.timestamp_type_name
@@ -450,6 +653,9 @@ class CloudExperimentNode(Node):
             & (points[:, 2] <= self._config.max_z_m)
         )
         selected_points = points[selected_mask]
+        finite_points = points[mask]
+        height_envelope_azimuth_rad, height_envelope_far_range_m = self._height_envelope_samples(finite_points)
+        height_envelope_return_xyz_m = self._height_envelope_return_samples(finite_points)
         azimuth_min_deg = float("nan")
         azimuth_max_deg = float("nan")
         front_coverage_mask = np.zeros(self._config.azimuth_bins, dtype=bool)
@@ -485,6 +691,9 @@ class CloudExperimentNode(Node):
                 timestamp_field_name=None,
                 timestamp_type_name=None,
                 timestamp_stats=None,
+                height_envelope_azimuth_rad=height_envelope_azimuth_rad,
+                height_envelope_far_range_m=height_envelope_far_range_m,
+                height_envelope_return_xyz_m=height_envelope_return_xyz_m,
             )
 
         raw_timestamps = np.asarray(cloud[timestamp_field_name], dtype=np.float64).reshape(-1)
@@ -533,7 +742,92 @@ class CloudExperimentNode(Node):
             timestamp_field_name=timestamp_field_name,
             timestamp_type_name=self._field_type_name(msg, timestamp_field_name),
             timestamp_stats=timestamp_stats,
+            height_envelope_azimuth_rad=height_envelope_azimuth_rad,
+            height_envelope_far_range_m=height_envelope_far_range_m,
+            height_envelope_return_xyz_m=height_envelope_return_xyz_m,
         )
+
+    def _height_envelope_samples(self, points_lidar: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Return body azimuth and far useful range for each observed beam direction.
+
+        A returned point gives us a sampled ray direction even when its return was
+        from the ground.  With the static lidar extrinsic, its height at horizontal
+        distance ``rho`` from the lidar is ``origin_z + dz / hypot(dx, dy) * rho``.
+        Intersecting that line with the configured obstacle-height slab gives the
+        distance interval at which that ray could observe an obstacle represented
+        by the policy.  This describes the tilted sensor geometry rather than the
+        particular scene's obstacle layout.
+        """
+        if not self._config.measure_height_envelope or points_lidar.size == 0:
+            return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+
+        directions_base = points_lidar @ self._rotation_base_from_lidar.T
+        direction_norms = np.linalg.norm(directions_base, axis=1)
+        valid_directions = direction_norms > 1e-6
+        if not np.any(valid_directions):
+            return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+        directions_base = directions_base[valid_directions] / direction_norms[valid_directions, None]
+
+        horizontal_norms = np.hypot(directions_base[:, 0], directions_base[:, 1])
+        valid_horizontal = horizontal_norms > 1e-6
+        if not np.any(valid_horizontal):
+            return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+        directions_base = directions_base[valid_horizontal]
+        horizontal_norms = horizontal_norms[valid_horizontal]
+
+        slopes = directions_base[:, 2] / horizontal_norms
+        origin_z_m = float(self._lidar_origin_in_base_m[2])
+        lower_z_m = self._height_envelope_min_base_z_m
+        upper_z_m = self._height_envelope_max_base_z_m
+        max_range_m = self._config.height_envelope_max_range_m
+        range_low_m = np.empty_like(slopes)
+        range_high_m = np.empty_like(slopes)
+        nearly_level = np.abs(slopes) < 1e-8
+        within_slab = (origin_z_m >= lower_z_m) & (origin_z_m <= upper_z_m)
+        range_low_m[nearly_level] = 0.0 if within_slab else max_range_m + 1.0
+        range_high_m[nearly_level] = max_range_m if within_slab else -1.0
+        nonlevel = ~nearly_level
+        lower_crossing_m = (lower_z_m - origin_z_m) / slopes[nonlevel]
+        upper_crossing_m = (upper_z_m - origin_z_m) / slopes[nonlevel]
+        range_low_m[nonlevel] = np.minimum(lower_crossing_m, upper_crossing_m)
+        range_high_m[nonlevel] = np.maximum(lower_crossing_m, upper_crossing_m)
+        range_low_m = np.maximum(range_low_m, 0.0)
+        range_high_m = np.minimum(range_high_m, max_range_m)
+        valid_interval = range_high_m >= range_low_m
+        if not np.any(valid_interval):
+            return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+
+        # Attribute the far endpoint to the azimuth around base_link, not around
+        # the offset lidar.  The difference matters for short rear-side coverage.
+        horizontal_direction = directions_base[valid_interval, :2] / horizontal_norms[valid_interval, None]
+        far_xy_m = self._lidar_origin_in_base_m[:2] + horizontal_direction * range_high_m[valid_interval, None]
+        far_base_range_m = np.hypot(far_xy_m[:, 0], far_xy_m[:, 1])
+        far_base_azimuth_rad = np.arctan2(far_xy_m[:, 1], far_xy_m[:, 0])
+        return far_base_azimuth_rad, far_base_range_m
+
+    def _height_envelope_return_samples(self, points_lidar: np.ndarray) -> np.ndarray:
+        """Return actual points for the plot, including ground-level returns.
+
+        This is deliberately separate from ``_height_envelope_samples``. The
+        latter answers where *a beam direction could be useful*; this function
+        answers where an object actually produced a return in this recording.
+        It intentionally does *not* apply the obstacle-height slab: that makes
+        the plot agree with RViz and exposes whether an apparent rear return is
+        a ground hit or an obstacle-height hit.
+        """
+        max_samples = self._config.height_envelope_return_plot_samples_per_cloud
+        if not self._config.measure_height_envelope or max_samples == 0 or points_lidar.size == 0:
+            return np.empty((0, 3), dtype=np.float64)
+        points_base = points_lidar @ self._rotation_base_from_lidar.T + self._lidar_origin_in_base_m
+        xy_range_m = np.hypot(points_base[:, 0], points_base[:, 1])
+        return_xyz_m = points_base[xy_range_m <= self._config.height_envelope_max_range_m].copy()
+        # The XY coordinates remain in base_link; the plotted colour is made
+        # ground-relative so it can be directly compared with obstacle height.
+        return_xyz_m[:, 2] += self._base_height_above_ground_m
+        if return_xyz_m.shape[0] <= max_samples:
+            return return_xyz_m
+        sample_indices = np.linspace(0, return_xyz_m.shape[0] - 1, num=max_samples, dtype=np.int64)
+        return return_xyz_m[sample_indices]
 
     def _time_slice_azimuth_signature(
         self, azimuth_rad: np.ndarray, timestamps: np.ndarray
@@ -621,6 +915,252 @@ class CloudExperimentNode(Node):
         self._active_coverage_mask = None
         self._active_scan_start_ns = None
         self._active_scan_packet_count = 0
+
+    def _update_height_envelope(
+        self,
+        azimuth_rad: np.ndarray,
+        far_range_m: np.ndarray,
+        return_xyz_m: np.ndarray,
+    ) -> None:
+        """Accumulate one stationary calibration's body-frame ray-height envelope."""
+        if not self._config.measure_height_envelope:
+            return
+        self._height_envelope_message_count += 1
+        if azimuth_rad.size:
+            bin_positions = (azimuth_rad + math.pi) / (2.0 * math.pi)
+            bin_indices = np.minimum(
+                (bin_positions * self._config.height_envelope_azimuth_bins).astype(np.int64),
+                self._config.height_envelope_azimuth_bins - 1,
+            )
+            finite = np.isfinite(far_range_m)
+            bin_indices = bin_indices[finite]
+            far_range_m = far_range_m[finite]
+            if bin_indices.size:
+                current = np.nan_to_num(self._height_envelope_far_range_m, nan=-float("inf"))
+                np.maximum.at(current, bin_indices, far_range_m)
+                self._height_envelope_far_range_m = np.where(np.isfinite(current), current, np.nan)
+                np.add.at(self._height_envelope_ray_counts, bin_indices, 1)
+        if return_xyz_m.size:
+            self._height_envelope_return_xyz_chunks.append(return_xyz_m)
+
+        if self._height_envelope_message_count < self._config.height_envelope_accumulation_messages:
+            return
+        self.get_logger().info(self._height_envelope_summary())
+        self._save_height_envelope_plot()
+        self._height_envelope_far_range_m.fill(np.nan)
+        self._height_envelope_ray_counts.fill(0)
+        self._height_envelope_return_xyz_chunks = []
+        self._height_envelope_message_count = 0
+
+    def _height_envelope_summary(self) -> str:
+        bin_count = self._config.height_envelope_azimuth_bins
+        bin_centers_rad = -math.pi + (np.arange(bin_count, dtype=np.float64) + 0.5) * (2.0 * math.pi / bin_count)
+        bin_centers_deg = np.degrees(bin_centers_rad)
+        valid = np.isfinite(self._height_envelope_far_range_m)
+
+        def zone_summary(name: str, zone_mask: np.ndarray) -> str:
+            values = self._height_envelope_far_range_m[zone_mask & valid]
+            available_bins = int(np.count_nonzero(zone_mask & valid))
+            total_bins = int(np.count_nonzero(zone_mask))
+            if values.size == 0:
+                return f"{name}=unobserved(0/{total_bins})"
+            p05, p50, p95 = np.percentile(values, (5.0, 50.0, 95.0))
+            return "%s_r_cap_p05/p50/p95=%.2f/%.2f/%.2fm(%d/%d)" % (
+                name,
+                p05,
+                p50,
+                p95,
+                available_bins,
+                total_bins,
+            )
+
+        # base_link convention: +x is front and +y is left.
+        front = np.abs(bin_centers_deg) <= 90.0
+        left_rear = (bin_centers_deg > 90.0) & (bin_centers_deg < 180.0)
+        rear = np.abs(bin_centers_deg) >= 150.0
+        right_rear = (bin_centers_deg < -90.0) & (bin_centers_deg > -180.0)
+        samples_per_observed_bin = self._height_envelope_ray_counts[valid]
+        mean_samples = self._mean_or_nan(samples_per_observed_bin.astype(np.float64).tolist())
+
+        output_angles_deg = np.arange(-180.0, 180.0, self._config.height_envelope_print_step_deg)
+        sampled_caps: list[str] = []
+        for requested_angle_deg in output_angles_deg:
+            circular_delta_deg = (bin_centers_deg - requested_angle_deg + 180.0) % 360.0 - 180.0
+            index = int(np.argmin(np.abs(circular_delta_deg)))
+            cap_m = self._height_envelope_far_range_m[index]
+            value = "--" if not math.isfinite(float(cap_m)) else f"{cap_m:.2f}"
+            sampled_caps.append(f"{requested_angle_deg:+.0f}:{value}")
+
+        return (
+            "Height-envelope summary: clouds=%d ground_z=[%.2f,%.2f]m base_z=[%.2f,%.2f]m "
+            "lidar_height_above_ground=%.2fm max_range=%.1fm "
+            "observed_azimuth_bins=%d/%d ray_samples_per_observed_bin=%.0f "
+            "%s %s %s %s r_cap_m_by_base_azimuth_deg={%s}"
+            % (
+                self._height_envelope_message_count,
+                self._config.height_envelope_min_ground_z_m,
+                self._config.height_envelope_max_ground_z_m,
+                self._height_envelope_min_base_z_m,
+                self._height_envelope_max_base_z_m,
+                self._config.lidar_height_above_ground_m,
+                self._config.height_envelope_max_range_m,
+                int(np.count_nonzero(valid)),
+                bin_count,
+                mean_samples,
+                zone_summary("front", front),
+                zone_summary("left_rear", left_rear),
+                zone_summary("rear", rear),
+                zone_summary("right_rear", right_rear),
+                ",".join(sampled_caps),
+            )
+        )
+
+    def _save_height_envelope_plot(self) -> None:
+        """Save a top-down coverage boundary and an azimuth-versus-range view.
+
+        Matplotlib is intentionally imported only here: timing-only uses of this
+        node should not acquire an optional plotting dependency.
+        """
+        if not self._config.height_envelope_plot_path:
+            return
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except ImportError:
+            self.get_logger().error(
+                "Cannot write --height-envelope-plot-path because matplotlib is unavailable. "
+                "Install python3-matplotlib or omit this option."
+            )
+            return
+
+        path = Path(self._config.height_envelope_plot_path).expanduser()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            self.get_logger().error(f"Cannot create height-envelope plot directory '{path.parent}': {error}")
+            return
+
+        bin_count = self._config.height_envelope_azimuth_bins
+        azimuth_rad = -math.pi + (np.arange(bin_count, dtype=np.float64) + 0.5) * (2.0 * math.pi / bin_count)
+        caps_m = self._height_envelope_far_range_m.copy()
+        valid = np.isfinite(caps_m)
+        return_xyz_m = (
+            np.concatenate(self._height_envelope_return_xyz_chunks, axis=0)
+            if self._height_envelope_return_xyz_chunks
+            else np.empty((0, 3), dtype=np.float64)
+        )
+        if not np.any(valid) and not return_xyz_m.size:
+            self.get_logger().warning("Height-envelope plot was not written: no valid beam directions or returns.")
+            return
+
+        figure, (top_down_axis, cap_axis) = plt.subplots(1, 2, figsize=(14.0, 6.5), constrained_layout=True)
+        # Plot only contiguous observed sections; joining gaps would falsely
+        # imply coverage where no returned ray direction was sampled.
+        changes = np.flatnonzero(np.diff(valid.astype(np.int8)) != 0) + 1
+        sections = np.split(np.arange(bin_count), changes)
+        for section in sections:
+            if section.size == 0 or not valid[section[0]]:
+                continue
+            section_angles = azimuth_rad[section]
+            section_caps = caps_m[section]
+            boundary_x_m = section_caps * np.cos(section_angles)
+            boundary_y_m = section_caps * np.sin(section_angles)
+            top_down_axis.plot(boundary_x_m, boundary_y_m, color="tab:blue", linewidth=2.5)
+            top_down_axis.fill(
+                np.concatenate(([0.0], boundary_x_m, [0.0])),
+                np.concatenate(([0.0], boundary_y_m, [0.0])),
+                color="tab:blue",
+                alpha=0.18,
+            )
+
+        if return_xyz_m.size:
+            return_scatter = top_down_axis.scatter(
+                return_xyz_m[:, 0],
+                return_xyz_m[:, 1],
+                s=1.5,
+                c=return_xyz_m[:, 2],
+                cmap="coolwarm",
+                alpha=0.18,
+                rasterized=True,
+                label="all actual returns",
+            )
+            colorbar = figure.colorbar(return_scatter, ax=top_down_axis, shrink=0.72)
+            colorbar.set_label("return height above ground (m)")
+
+        body_length_m, body_width_m = 0.70, 0.35
+        top_down_axis.add_patch(
+            plt.Rectangle(
+                (-0.5 * body_length_m, -0.5 * body_width_m),
+                body_length_m,
+                body_width_m,
+                facecolor="0.2",
+                edgecolor="black",
+                alpha=0.75,
+                label="robot body",
+            )
+        )
+        top_down_axis.plot(
+            self._lidar_origin_in_base_m[0],
+            self._lidar_origin_in_base_m[1],
+            marker="*",
+            markersize=12,
+            color="tab:red",
+            label="lidar origin",
+        )
+        top_down_axis.annotate(
+            "front (+x)",
+            xy=(self._config.height_envelope_max_range_m * 0.9, 0.0),
+            xytext=(self._config.height_envelope_max_range_m * 0.5, 0.4),
+            arrowprops={"arrowstyle": "->"},
+        )
+        top_down_axis.set_aspect("equal", adjustable="box")
+        top_down_axis.set_xlim(-self._config.height_envelope_max_range_m, self._config.height_envelope_max_range_m)
+        top_down_axis.set_ylim(-self._config.height_envelope_max_range_m, self._config.height_envelope_max_range_m)
+        top_down_axis.set_xlabel("base x (m): forward")
+        top_down_axis.set_ylabel("base y (m): left")
+        top_down_axis.set_title(
+            "Coverage envelope + all actual returns\n(top-down ground plane; colour is height, points are not free-space rays)"
+        )
+        top_down_axis.grid(True, alpha=0.3)
+        top_down_axis.legend(loc="upper left")
+
+        cap_axis.plot(np.degrees(azimuth_rad[valid]), caps_m[valid], marker=".", color="tab:blue")
+        cap_axis.axvspan(-90.0, 90.0, color="tab:green", alpha=0.08, label="front half-plane")
+        cap_axis.axvspan(-180.0, -90.0, color="tab:orange", alpha=0.08, label="right rear")
+        cap_axis.axvspan(90.0, 180.0, color="tab:red", alpha=0.08, label="left rear")
+        cap_axis.set_xlim(-180.0, 180.0)
+        cap_axis.set_ylim(0.0, self._config.height_envelope_max_range_m * 1.05)
+        cap_axis.set_xticks(np.arange(-180.0, 181.0, 45.0))
+        cap_axis.set_xlabel("base azimuth (deg): 0 front, +90 left, -90 right, ±180 rear")
+        cap_axis.set_ylabel("maximum useful obstacle range r_cap (m)")
+        cap_axis.set_title(
+            "Range cap where a sampled beam lies at ground height z=[%.2f, %.2f] m"
+            % (
+                self._config.height_envelope_min_ground_z_m,
+                self._config.height_envelope_max_ground_z_m,
+            )
+        )
+        cap_axis.grid(True, alpha=0.3)
+        cap_axis.legend(loc="upper center")
+        figure.suptitle(
+            "Tilted lidar coverage; source=%d partial clouds, lidar origin=(%.3f, %.3f, %.3f) m in base_link"
+            % (
+                self._height_envelope_message_count,
+                self._lidar_origin_in_base_m[0],
+                self._lidar_origin_in_base_m[1],
+                self._lidar_origin_in_base_m[2],
+            )
+        )
+        try:
+            figure.savefig(path, dpi=180)
+        except OSError as error:
+            self.get_logger().error(f"Failed to write height-envelope plot '{path}': {error}")
+        else:
+            self.get_logger().info(f"Wrote height-envelope plot: {path}")
+        finally:
+            plt.close(figure)
 
     @staticmethod
     def _field_type_name(msg: PointCloud2, field_name: str) -> str | None:
