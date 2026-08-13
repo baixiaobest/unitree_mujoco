@@ -49,23 +49,6 @@ deskew their points to one reference pose, then height-filter and bin the front
 180 degrees.  The resulting virtual scan is acquired over roughly 130 ms.
 Alternatively, retain every 15.36 Hz partial cloud only with a validity mask
 and a policy trained for that partial representation.
-
-The optional height-envelope diagnostic characterizes the tilted sensor's
-*geometric obstacle coverage* in ``base_link``.  It converts each observed ray
-direction into the horizontal distance interval for which the ray lies inside a
-chosen ground-relative obstacle-height slab (by default z=0.10--1.50 m above
-ground, with lidar height 0.30 m). Its output is a
-polar range cap r_cap(base azimuth): this is the directly usable description of
-the broad front lobe and the limited rear-side rectangle.  It is not a return
-coverage metric: a missing bin means the calibration scene did not supply a
-returned beam direction, not necessarily that the lidar cannot see there.
-
-For a trustworthy envelope, keep the robot stationary and level, use the raw
-cloud with the repository's lidar extrinsic, and provide high-return vertical
-targets around the robot (for example, an octagon of boards).  Run long enough
-to span the scanner pattern.  Repeat with boards at several radii to validate
-the reported range boundary.  Do not infer this geometry from an arbitrary
-room: absent objects and poor reflectance are indistinguishable from no beam.
 """
 
 from __future__ import annotations
