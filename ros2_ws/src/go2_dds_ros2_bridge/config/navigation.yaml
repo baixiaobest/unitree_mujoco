@@ -4,13 +4,15 @@ navigation:
     goal_topic: /goal_pose
     velocity_topic: /estimated_velocity
     imu_topic: /imu/data_fastlio
-    scan_topic: /occupancy_scan
+    temporal_lidar_topic: /temporal_lidar/observation
     cmd_topic: /cmd_vel
     map_frame: camera_init_correct
     body_frame: base_link
     policy_hz: 15.0
     lidar_max_distance: 20.0
-    num_lidar_rays: 128
+    temporal_lidar_horizon: 4
+    temporal_lidar_fov_bins: 128
+    temporal_lidar_timeout_sec: 0.5
     cmd_scale_vx: 0.5
     cmd_scale_vy: 0.5
     cmd_scale_wz: 0.5

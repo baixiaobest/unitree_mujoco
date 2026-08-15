@@ -16,22 +16,25 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
-from sensor_msgs.msg import Imu, LaserScan
+from sensor_msgs.msg import Imu
 from tf2_ros import Buffer, TransformException, TransformListener
 
+from go2_dds_ros2_bridge_msgs.msg import TemporalLidarObservation
 from go2_dds_ros2_bridge.tf_utils import rotation_matrix_from_quaternion_xyzw
 
 DEFAULT_POLICY_PATH = ""
 DEFAULT_GOAL_TOPIC = "/goal_pose"
 DEFAULT_VELOCITY_TOPIC = "/estimated_velocity"
 DEFAULT_IMU_TOPIC = "/imu/data_fastlio"
-DEFAULT_SCAN_TOPIC = "/occupancy_scan"
+DEFAULT_TEMPORAL_LIDAR_TOPIC = "/temporal_lidar/observation"
 DEFAULT_CMD_TOPIC = "/cmd_vel"
 DEFAULT_MAP_FRAME = "camera_init_correct"
 DEFAULT_BODY_FRAME = "base_link"
 DEFAULT_POLICY_HZ = 15.0
 DEFAULT_LIDAR_MAX_DISTANCE = 20.0
-DEFAULT_NUM_LIDAR_RAYS = 128
+DEFAULT_TEMPORAL_LIDAR_HORIZON = 4
+DEFAULT_TEMPORAL_LIDAR_FOV_BINS = 128
+DEFAULT_TEMPORAL_LIDAR_TIMEOUT_SEC = 0.5
 DEFAULT_CMD_SCALE_VX = 1.0
 DEFAULT_CMD_SCALE_VY = 1.0
 DEFAULT_CMD_SCALE_WZ = 1.0
@@ -40,7 +43,7 @@ DEFAULT_MAX_TF_AGE_SEC = 1.0
 DEFAULT_GOAL_REACHED_DISTANCE = 0.1
 DEFAULT_GOAL_REACHED_ANGLE = 0.2
 
-SCAN_QOS = QoSProfile(
+TEMPORAL_LIDAR_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
     durability=DurabilityPolicy.VOLATILE,
     history=HistoryPolicy.KEEP_LAST,
@@ -54,13 +57,15 @@ class NavigationConfig:
     goal_topic: str
     velocity_topic: str
     imu_topic: str
-    scan_topic: str
+    temporal_lidar_topic: str
     cmd_topic: str
     map_frame: str
     body_frame: str
     policy_hz: float
     lidar_max_distance: float
-    num_lidar_rays: int
+    temporal_lidar_horizon: int
+    temporal_lidar_fov_bins: int
+    temporal_lidar_timeout_sec: float
     cmd_scale_vx: float
     cmd_scale_vy: float
     cmd_scale_wz: float
@@ -83,8 +88,8 @@ def parse_args() -> NavigationConfig:
                         help="TwistStamped topic for body-frame linear velocity estimates.")
     parser.add_argument("--imu-topic", type=str, default=DEFAULT_IMU_TOPIC,
                         help="Imu topic for angular velocity.")
-    parser.add_argument("--scan-topic", type=str, default=DEFAULT_SCAN_TOPIC,
-                        help="LaserScan topic from the occupancy scan node.")
+    parser.add_argument("--temporal-lidar-topic", type=str, default=DEFAULT_TEMPORAL_LIDAR_TOPIC,
+                        help="TemporalLidarObservation topic produced from dense registered clouds.")
     parser.add_argument("--cmd-topic", type=str, default=DEFAULT_CMD_TOPIC,
                         help="TwistStamped topic to publish velocity commands.")
     parser.add_argument("--map-frame", type=str, default=DEFAULT_MAP_FRAME,
@@ -95,8 +100,12 @@ def parse_args() -> NavigationConfig:
                         help="Policy inference rate in Hz.")
     parser.add_argument("--lidar-max-distance", type=float, default=DEFAULT_LIDAR_MAX_DISTANCE,
                         help="Maximum lidar range used during training (scales scan input).")
-    parser.add_argument("--num-lidar-rays", type=int, default=DEFAULT_NUM_LIDAR_RAYS,
-                        help="Expected number of lidar rays in the scan message.")
+    parser.add_argument("--temporal-lidar-horizon", type=int, default=DEFAULT_TEMPORAL_LIDAR_HORIZON,
+                        help="Number of newest-first lidar frames expected from the temporal lidar node.")
+    parser.add_argument("--temporal-lidar-fov-bins", type=int, default=DEFAULT_TEMPORAL_LIDAR_FOV_BINS,
+                        help="Number of front-FOV bins in each temporal lidar frame.")
+    parser.add_argument("--temporal-lidar-timeout-sec", type=float, default=DEFAULT_TEMPORAL_LIDAR_TIMEOUT_SEC,
+                        help="Stop navigation when no completed lidar scan arrives within this duration.")
     parser.add_argument("--cmd-scale-vx", type=float, default=DEFAULT_CMD_SCALE_VX,
                         help="Scale factor applied to the policy's vx output.")
     parser.add_argument("--cmd-scale-vy", type=float, default=DEFAULT_CMD_SCALE_VY,
@@ -121,21 +130,25 @@ def parse_args() -> NavigationConfig:
         raise SystemExit("--policy-hz must be positive")
     if args.lidar_max_distance <= 0.0:
         raise SystemExit("--lidar-max-distance must be positive")
-    if args.num_lidar_rays < 1:
-        raise SystemExit("--num-lidar-rays must be at least 1")
+    if args.temporal_lidar_horizon < 1 or args.temporal_lidar_fov_bins < 1:
+        raise SystemExit("temporal lidar horizon and FOV bins must be positive")
+    if args.temporal_lidar_timeout_sec <= 0.0:
+        raise SystemExit("--temporal-lidar-timeout-sec must be positive")
 
     return NavigationConfig(
         policy_path=args.policy_path,
         goal_topic=args.goal_topic,
         velocity_topic=args.velocity_topic,
         imu_topic=args.imu_topic,
-        scan_topic=args.scan_topic,
+        temporal_lidar_topic=args.temporal_lidar_topic,
         cmd_topic=args.cmd_topic,
         map_frame=args.map_frame,
         body_frame=args.body_frame,
         policy_hz=float(args.policy_hz),
         lidar_max_distance=float(args.lidar_max_distance),
-        num_lidar_rays=int(args.num_lidar_rays),
+        temporal_lidar_horizon=int(args.temporal_lidar_horizon),
+        temporal_lidar_fov_bins=int(args.temporal_lidar_fov_bins),
+        temporal_lidar_timeout_sec=float(args.temporal_lidar_timeout_sec),
         cmd_scale_vx=float(args.cmd_scale_vx),
         cmd_scale_vy=float(args.cmd_scale_vy),
         cmd_scale_wz=float(args.cmd_scale_wz),
@@ -155,13 +168,15 @@ class NavigationNode(Node):
         self.declare_parameter("goal_topic", config.goal_topic)
         self.declare_parameter("velocity_topic", config.velocity_topic)
         self.declare_parameter("imu_topic", config.imu_topic)
-        self.declare_parameter("scan_topic", config.scan_topic)
+        self.declare_parameter("temporal_lidar_topic", config.temporal_lidar_topic)
         self.declare_parameter("cmd_topic", config.cmd_topic)
         self.declare_parameter("map_frame", config.map_frame)
         self.declare_parameter("body_frame", config.body_frame)
         self.declare_parameter("policy_hz", config.policy_hz)
         self.declare_parameter("lidar_max_distance", config.lidar_max_distance)
-        self.declare_parameter("num_lidar_rays", config.num_lidar_rays)
+        self.declare_parameter("temporal_lidar_horizon", config.temporal_lidar_horizon)
+        self.declare_parameter("temporal_lidar_fov_bins", config.temporal_lidar_fov_bins)
+        self.declare_parameter("temporal_lidar_timeout_sec", config.temporal_lidar_timeout_sec)
         self.declare_parameter("cmd_scale_vx", config.cmd_scale_vx)
         self.declare_parameter("cmd_scale_vy", config.cmd_scale_vy)
         self.declare_parameter("cmd_scale_wz", config.cmd_scale_wz)
@@ -176,13 +191,15 @@ class NavigationNode(Node):
             goal_topic=str(self.get_parameter("goal_topic").value),
             velocity_topic=str(self.get_parameter("velocity_topic").value),
             imu_topic=str(self.get_parameter("imu_topic").value),
-            scan_topic=str(self.get_parameter("scan_topic").value),
+            temporal_lidar_topic=str(self.get_parameter("temporal_lidar_topic").value),
             cmd_topic=str(self.get_parameter("cmd_topic").value),
             map_frame=str(self.get_parameter("map_frame").value),
             body_frame=str(self.get_parameter("body_frame").value),
             policy_hz=float(self.get_parameter("policy_hz").value),
             lidar_max_distance=float(self.get_parameter("lidar_max_distance").value),
-            num_lidar_rays=int(self.get_parameter("num_lidar_rays").value),
+            temporal_lidar_horizon=int(self.get_parameter("temporal_lidar_horizon").value),
+            temporal_lidar_fov_bins=int(self.get_parameter("temporal_lidar_fov_bins").value),
+            temporal_lidar_timeout_sec=float(self.get_parameter("temporal_lidar_timeout_sec").value),
             cmd_scale_vx=float(self.get_parameter("cmd_scale_vx").value),
             cmd_scale_vy=float(self.get_parameter("cmd_scale_vy").value),
             cmd_scale_wz=float(self.get_parameter("cmd_scale_wz").value),
@@ -214,8 +231,11 @@ class NavigationNode(Node):
         self._imu_sub = self.create_subscription(
             Imu, self._config.imu_topic, self._imu_callback, 10
         )
-        self._scan_sub = self.create_subscription(
-            LaserScan, self._config.scan_topic, self._scan_callback, SCAN_QOS
+        self._temporal_lidar_sub = self.create_subscription(
+            TemporalLidarObservation,
+            self._config.temporal_lidar_topic,
+            self._temporal_lidar_callback,
+            TEMPORAL_LIDAR_QOS,
         )
         self._cmd_publisher = self.create_publisher(
             TwistStamped, self._config.cmd_topic, 10
@@ -225,7 +245,8 @@ class NavigationNode(Node):
         self._goal_yaw_world: float | None = None
         self._lin_vel: np.ndarray | None = None
         self._ang_vel: np.ndarray | None = None
-        self._scan: np.ndarray | None = None
+        self._temporal_lidar: np.ndarray | None = None
+        self._latest_lidar_scan_stamp_ns: int | None = None
         self._last_action = torch.zeros(3, dtype=torch.float32)
         self._goal_reached: bool = False
 
@@ -235,21 +256,22 @@ class NavigationNode(Node):
         self._policy_timer = self.create_timer(1.0 / self._config.policy_hz, self._policy_step)
 
         self.get_logger().info(
-            "Navigation node: policy='%s', goal='%s', vel='%s', imu='%s', scan='%s', cmd='%s'. "
-            "Map frame: '%s', body frame: '%s'. %.1f Hz, lidar_max=%.1f, rays=%d, "
+            "Navigation node: policy='%s', goal='%s', vel='%s', imu='%s', temporal lidar='%s', cmd='%s'. "
+            "Map frame: '%s', body frame: '%s'. %.1f Hz, lidar_max=%.1f, temporal shape=(2,%d,%d), "
             "cmd_scale=(%.2f, %.2f, %.2f), goal_z=%.3f, device=%s."
             % (
                 self._config.policy_path,
                 self._config.goal_topic,
                 self._config.velocity_topic,
                 self._config.imu_topic,
-                self._config.scan_topic,
+                self._config.temporal_lidar_topic,
                 self._config.cmd_topic,
                 self._config.map_frame,
                 self._config.body_frame,
                 self._config.policy_hz,
                 self._config.lidar_max_distance,
-                self._config.num_lidar_rays,
+                self._config.temporal_lidar_horizon,
+                self._config.temporal_lidar_fov_bins,
                 self._config.cmd_scale_vx,
                 self._config.cmd_scale_vy,
                 self._config.cmd_scale_wz,
@@ -283,11 +305,21 @@ class NavigationNode(Node):
             dtype=np.float32,
         )
 
-    def _scan_callback(self, msg: LaserScan) -> None:
-        ranges = np.clip(
-            np.array(msg.ranges, dtype=np.float32), 0.0, self._config.lidar_max_distance
+    def _temporal_lidar_callback(self, msg: TemporalLidarObservation) -> None:
+        frame_size = self._config.temporal_lidar_horizon * self._config.temporal_lidar_fov_bins
+        if len(msg.distances) != frame_size or len(msg.validity) != frame_size:
+            self.get_logger().error(
+                "Ignoring temporal lidar with %d distances/%d validity values; expected %d each."
+                % (len(msg.distances), len(msg.validity), frame_size)
+            )
+            return
+        distances = np.clip(np.asarray(msg.distances, dtype=np.float32), 0.0, 1.0)
+        validity = np.asarray(msg.validity, dtype=np.float32)
+        validity = np.where(validity > 0.0, 1.0, 0.0).astype(np.float32)
+        self._temporal_lidar = np.concatenate(
+            (np.array((np.clip(msg.normalized_scan_age, 0.0, 1.0),), dtype=np.float32), distances, validity)
         )
-        self._scan = ranges / self._config.lidar_max_distance
+        self._latest_lidar_scan_stamp_ns = Time.from_msg(msg.scan_stamp).nanoseconds
 
     def _transform_age_sec(self, transform) -> float:
         transform_stamp = Time.from_msg(transform.header.stamp)
@@ -370,11 +402,15 @@ class NavigationNode(Node):
 
         if any(
             v is None
-            for v in [self._goal_pos_world, self._goal_yaw_world, self._lin_vel, self._ang_vel, self._scan]
+            for v in [self._goal_pos_world, self._goal_yaw_world, self._lin_vel, self._ang_vel, self._temporal_lidar]
         ):
             return
 
-        if len(self._scan) != self._config.num_lidar_rays:
+        if self._latest_lidar_scan_stamp_ns is None:
+            return
+        lidar_age_s = (self.get_clock().now().nanoseconds - self._latest_lidar_scan_stamp_ns) / 1e9
+        if lidar_age_s > self._config.temporal_lidar_timeout_sec:
+            self._publish_zero_cmd()
             return
 
         pose_result = self._lookup_robot_pose()
@@ -400,8 +436,8 @@ class NavigationNode(Node):
             self._lin_vel,               # (3,)  base_lin_vel
             self._ang_vel,               # (3,)  imu_ang_vel
             self._last_action.numpy(),   # (3,)  actions (last output)
-            self._scan,                  # (128,) obstacle_scan
-        ]).astype(np.float32)            # (141,) total
+            self._temporal_lidar,         # (1 + 2 * 4 * 128,) scan_age + temporal lidar
+        ]).astype(np.float32)            # (1038,) total
 
         obs_t = torch.from_numpy(obs).unsqueeze(0).to(self._device)
         with torch.no_grad():

@@ -62,6 +62,7 @@ def _make_runtime_nodes(context, *args, **kwargs):
     occupancy_config = LaunchConfiguration("occupancy_config").perform(context)
     occupancy_scan_config = LaunchConfiguration("occupancy_scan_config").perform(context)
     occupancy_scan_output_topic = LaunchConfiguration("occupancy_scan_output_topic").perform(context)
+    temporal_lidar_config = LaunchConfiguration("temporal_lidar_config").perform(context)
     navigation_config = LaunchConfiguration("navigation_config").perform(context)
     navigation_policy_path = LaunchConfiguration("navigation_policy_path").perform(context)
     rviz_config = LaunchConfiguration("rviz_config")
@@ -73,6 +74,17 @@ def _make_runtime_nodes(context, *args, **kwargs):
     body_to_base_translation = (-DEFAULT_IMU_TF_XYZ[0], -DEFAULT_IMU_TF_XYZ[1], -DEFAULT_IMU_TF_XYZ[2])
 
     return [
+        Node(
+            package="go2_dds_ros2_bridge",
+            executable="temporal_lidar",
+            name="temporal_lidar",
+            output="screen",
+            parameters=[
+                temporal_lidar_config,
+                {"map_frame": corrected_map_frame},
+            ],
+            condition=IfCondition(LaunchConfiguration("temporal_lidar")),
+        ),
         Node(
             package="go2_dds_ros2_bridge",
             executable="clock_offset_bridge",
@@ -260,7 +272,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "occupancy",
                 default_value="true",
-                description="Launch the rolling 2D occupancy mapper on /cloud_registered.",
+                description="Launch the legacy rolling 2D occupancy mapper on /cloud_registered.",
             ),
             DeclareLaunchArgument(
                 "occupancy_config",
@@ -272,7 +284,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "occupancy_scan",
                 default_value="true",
-                description="Launch the occupancy ray-cast scan node that converts the 2D grid to a LaserScan.",
+                description="Launch the legacy occupancy ray-cast LaserScan node.",
             ),
             DeclareLaunchArgument(
                 "occupancy_scan_config",
@@ -285,6 +297,18 @@ def generate_launch_description() -> LaunchDescription:
                 "occupancy_scan_output_topic",
                 default_value="/occupancy_scan",
                 description="LaserScan topic published by the occupancy scan node.",
+            ),
+            DeclareLaunchArgument(
+                "temporal_lidar",
+                default_value="true",
+                description="Launch the dense registered-cloud temporal lidar policy-observation node.",
+            ),
+            DeclareLaunchArgument(
+                "temporal_lidar_config",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("go2_dds_ros2_bridge"), "config", "temporal_lidar.yaml"]
+                ),
+                description="Path to the temporal registered-cloud lidar parameter YAML file.",
             ),
             DeclareLaunchArgument(
                 "navigation",
