@@ -5,48 +5,42 @@ import numpy as np
 from go2_dds_ros2_bridge.temporal_lidar_processing import (
     CompletedScan,
     CompletedScanHistory,
+    deskew_points_to_reference_base,
     FOV_BINS,
     MAX_DISTANCE_M,
-    TwoCloudAssembler,
     WORLD_BINS,
     front_arc_bin_indices,
+    is_adjacent_cloud_pair,
     normalized_scan_age,
     polar_bins_to_base_points,
     project_history_to_polar_bins,
     project_history_to_front_arc,
+    reduce_front_capture_rays,
+    upsample_polar_bins,
 )
 
 
 def test_history_keeps_newest_four_scans():
     history = CompletedScanHistory(depth=4)
     for stamp in range(5):
-        history.push(CompletedScan(stamp_ns=stamp, points_xyz_m=np.empty((0, 3))))
+        history.push(
+            CompletedScan(
+                stamp_ns=stamp,
+                endpoints_xyz_m=np.empty((0, 3)),
+                ray_states=np.empty(0, dtype=np.uint8),
+            )
+        )
     assert [scan.stamp_ns for scan in history.newest_first()] == [4, 3, 2, 1]
     assert len(history) == 4
 
 
-def test_two_cloud_assembler_completes_only_adjacent_raw_clouds():
-    assembler = TwoCloudAssembler(raw_cloud_period_s=0.065, intercloud_tolerance_s=0.01)
-    first = np.array(((1.0, 0.0, 0.3),))
-    second = np.array(((2.0, 0.0, 0.3),))
-    completed, rejected = assembler.push(first, 1_000_000_000)
-    assert completed is None and not rejected
-    free_endpoints = np.array(((20.0, 0.0, 0.3),))
-    completed, rejected = assembler.push(second, 1_065_000_000, free_endpoints_xyz_m=free_endpoints)
-    assert not rejected
-    assert completed is not None
-    assert completed.stamp_ns == 1_065_000_000
-    assert completed.points_xyz_m.shape == (2, 3)
-    assert np.array_equal(completed.free_endpoints_xyz_m, free_endpoints)
-
-
-def test_two_cloud_assembler_discards_a_gapped_partial_pair():
-    assembler = TwoCloudAssembler(raw_cloud_period_s=0.065, intercloud_tolerance_s=0.01)
-    assembler.push(np.empty((0, 3)), 1_000_000_000)
-    completed, rejected = assembler.push(np.empty((0, 3)), 1_120_000_000)
-    assert completed is None and rejected
-    completed, rejected = assembler.push(np.empty((0, 3)), 1_185_000_000)
-    assert not rejected and completed is not None
+def test_adjacent_cloud_pair_accepts_expected_interval_only():
+    assert is_adjacent_cloud_pair(
+        1_000_000_000, 1_065_000_000, expected_period_s=0.065, tolerance_s=0.01
+    )
+    assert not is_adjacent_cloud_pair(
+        1_000_000_000, 1_120_000_000, expected_period_s=0.065, tolerance_s=0.01
+    )
 
 
 def test_scan_age_matches_training_normalization_and_clamping():
@@ -56,7 +50,13 @@ def test_scan_age_matches_training_normalization_and_clamping():
 
 def test_uncovered_bins_are_max_range_and_invalid():
     distances, validity = project_history_to_front_arc(
-        (CompletedScan(stamp_ns=1, points_xyz_m=np.empty((0, 3))),),
+        (
+            CompletedScan(
+                stamp_ns=1,
+                endpoints_xyz_m=np.empty((0, 3)),
+                ray_states=np.empty(0, dtype=np.uint8),
+            ),
+        ),
         current_xy_m=np.array((0.0, 0.0)),
         current_yaw_rad=0.0,
     )
@@ -66,40 +66,80 @@ def test_uncovered_bins_are_max_range_and_invalid():
     assert np.all(validity == 0)
 
 
-def test_full_coverage_free_rays_make_every_front_bin_valid_at_max_range():
-    angles = np.linspace(-math.pi, math.pi, WORLD_BINS, endpoint=True)
-    free_endpoints = np.column_stack((
-        MAX_DISTANCE_M * np.cos(angles),
-        MAX_DISTANCE_M * np.sin(angles),
-        np.zeros(WORLD_BINS),
-    ))
+def test_front_capture_ray_reducer_builds_fixed_hit_free_fan_and_discards_rear():
+    # Four front rays are centred at -67.5, -22.5, 22.5 and 67.5 degrees.
+    points = np.array(
+        (
+            (2.0, 0.0, 0.3),
+            (4.0, 0.0, 0.4),
+            (-1.0, 0.0, 0.3),  # Direct rear: must not enter the front scan.
+        )
+    )
+    endpoints, states = reduce_front_capture_rays(
+        points, capture_rays=4, fov_degrees=180.0, range_percentile=0.0
+    )
+    assert endpoints.shape == (4, 3)
+    assert np.array_equal(states, np.array((1, 1, 2, 1), dtype=np.uint8))
+    assert np.isclose(np.linalg.norm(endpoints[2, :2]), 2.0)
+    assert np.isclose(math.atan2(endpoints[2, 1], endpoints[2, 0]), math.radians(22.5))
+    assert np.allclose(np.linalg.norm(endpoints[states == 1, :2], axis=1), MAX_DISTANCE_M)
+
+
+def test_empty_cloud_produces_valid_free_rays_only_in_front_fan():
+    endpoints, states = reduce_front_capture_rays(np.empty((0, 3)))
+    history = (CompletedScan(stamp_ns=1, endpoints_xyz_m=endpoints, ray_states=states),)
+    distances, validity = project_history_to_polar_bins(history, current_xy_m=np.zeros(2))
+    front = front_arc_bin_indices(0.0)
+    rear = np.setdiff1d(np.arange(WORLD_BINS), front)
+    assert np.all(distances[0, front] == 1.0)
+    assert np.all(validity[0, front] == 1)
+    assert np.all(validity[0, rear] == 0)
+
+
+def test_coarse_world_bins_repeat_into_the_policy_virtual_grid():
+    distances = np.array(((0.15, 1.0, 0.40, 0.75),), dtype=np.float32)
+    validity = np.array(((1, 1, 0, 1),), dtype=np.uint8)
+    upsampled_distances, upsampled_validity = upsample_polar_bins(
+        distances, validity, target_bins=8
+    )
+    assert np.allclose(upsampled_distances, ((0.15, 0.15, 1.0, 1.0, 0.40, 0.40, 0.75, 0.75),))
+    assert np.array_equal(upsampled_validity, ((1, 1, 1, 1, 0, 0, 1, 1),))
+
+
+def test_free_ray_stays_at_max_range_after_reprojection():
+    scan = CompletedScan(
+        stamp_ns=1,
+        endpoints_xyz_m=np.array(((MAX_DISTANCE_M, 0.0, 0.0),)),
+        ray_states=np.array((1,), dtype=np.uint8),
+    )
     distances, validity = project_history_to_front_arc(
-        (CompletedScan(stamp_ns=1, points_xyz_m=np.empty((0, 3)), free_endpoints_xyz_m=free_endpoints),),
-        current_xy_m=np.zeros(2),
-        current_yaw_rad=0.0,
+        (scan,), current_xy_m=np.array((1.0, 0.0)), current_yaw_rad=0.0
     )
-    assert np.all(distances[0] == 1.0)
-    assert np.all(validity[0] == 1)
-    assert np.all(validity[1:] == 0)
-
-
-def test_physical_return_overrides_a_free_ray_in_its_world_bin():
-    history = (
-        CompletedScan(
-            stamp_ns=1,
-            points_xyz_m=np.array(((2.0, 0.0, 0.3),)),
-            free_endpoints_xyz_m=np.array(((MAX_DISTANCE_M, 0.0, 0.3),)),
-        ),
-    )
-    distances, validity = project_history_to_front_arc(history, current_xy_m=np.zeros(2), current_yaw_rad=0.0)
     center = FOV_BINS // 2
     assert validity[0, center] == 1
-    assert np.isclose(distances[0, center], 2.0 / MAX_DISTANCE_M)
+    assert distances[0, center] == 1.0
+
+
+def test_deskew_interpolates_rolling_points_into_reference_base():
+    points = np.array(((1.0, 0.0, 0.0), (1.0, 0.0, 0.0)))
+    deskewed = deskew_points_to_reference_base(
+        points,
+        np.array((0.0, 1.0)),
+        start_translation_w_m=np.array((0.0, 0.0, 0.0)),
+        start_rotation_w_lidar=np.eye(3),
+        end_translation_w_m=np.array((1.0, 0.0, 0.0)),
+        end_rotation_w_lidar=np.eye(3),
+        reference_translation_w_m=np.array((1.0, 0.0, 0.0)),
+        reference_rotation_w_base=np.eye(3),
+    )
+    assert np.allclose(deskewed, np.array(((0.0, 0.0, 0.0), (1.0, 0.0, 0.0))))
 
 
 def test_nearest_world_return_wins_and_front_arc_is_yaw_centered():
     points = np.array(((2.0, 0.0, 0.3), (5.0, 0.0, 0.3)))
-    history = (CompletedScan(stamp_ns=1, points_xyz_m=points),)
+    history = (
+        CompletedScan(stamp_ns=1, endpoints_xyz_m=points, ray_states=np.array((2, 2), dtype=np.uint8)),
+    )
     distances, validity = project_history_to_front_arc(history, current_xy_m=np.zeros(2), current_yaw_rad=0.0)
     center = FOV_BINS // 2
     assert validity[0, center] == 1
@@ -107,7 +147,13 @@ def test_nearest_world_return_wins_and_front_arc_is_yaw_centered():
 
 
 def test_world_returns_reenter_front_arc_after_robot_turns_back():
-    history = (CompletedScan(stamp_ns=1, points_xyz_m=np.array(((4.0, 0.0, 0.3),))),)
+    history = (
+        CompletedScan(
+            stamp_ns=1,
+            endpoints_xyz_m=np.array(((4.0, 0.0, 0.3),)),
+            ray_states=np.array((2,), dtype=np.uint8),
+        ),
+    )
     _, right_validity = project_history_to_front_arc(
         history, current_xy_m=np.zeros(2), current_yaw_rad=-math.pi / 2.0
     )
@@ -119,7 +165,13 @@ def test_world_returns_reenter_front_arc_after_robot_turns_back():
 
 
 def test_full_360_debug_bins_retain_return_outside_current_front_arc():
-    history = (CompletedScan(stamp_ns=1, points_xyz_m=np.array(((-4.0, 0.0, 0.3),))),)
+    history = (
+        CompletedScan(
+            stamp_ns=1,
+            endpoints_xyz_m=np.array(((-4.0, 0.0, 0.3),)),
+            ray_states=np.array((2,), dtype=np.uint8),
+        ),
+    )
     distances, validity = project_history_to_polar_bins(history, current_xy_m=np.zeros(2))
     rear_bin = 0
     assert distances.shape == (4, WORLD_BINS)

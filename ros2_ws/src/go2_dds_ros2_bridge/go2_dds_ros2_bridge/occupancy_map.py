@@ -31,6 +31,7 @@ POINT_FIELD_DTYPES = {
     PointField.FLOAT32: np.dtype(np.float32),
     PointField.FLOAT64: np.dtype(np.float64),
 }
+POINT_TIME_FIELD_NAMES = ("t", "timestamp", "timestamps", "time", "time_stamp")
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,65 @@ def extract_xyz_points(cloud_msg: PointCloud2) -> np.ndarray:
 
     return np.ascontiguousarray(
         np.column_stack((x_values[finite_mask], y_values[finite_mask], z_values[finite_mask])), dtype=np.float64
+    )
+
+
+def extract_xyz_time_points(
+    cloud_msg: PointCloud2,
+    *,
+    time_field_name: str | None = None,
+) -> tuple[np.ndarray, np.ndarray, str]:
+    """Extract finite XYZ points and their per-point time offsets.
+
+    The returned offsets preserve the cloud field's native unit. Callers must
+    apply their configured seconds scale before using them as ROS timestamps.
+    """
+    if cloud_msg.width <= 0 or cloud_msg.height <= 0 or not cloud_msg.data:
+        raise ValueError("Point cloud is empty and cannot provide point timestamps")
+
+    cloud_dtype = dtype_from_fields(cloud_msg.fields, cloud_msg.point_step, cloud_msg.is_bigendian)
+    packed_row_step = int(cloud_msg.width) * int(cloud_msg.point_step)
+    row_step = int(cloud_msg.row_step) if cloud_msg.row_step > 0 else packed_row_step
+    if row_step < packed_row_step:
+        raise ValueError(f"row_step={row_step} is smaller than width * point_step={packed_row_step}")
+    expected_buffer_size = row_step * int(cloud_msg.height)
+    if len(cloud_msg.data) < expected_buffer_size:
+        raise ValueError(
+            f"PointCloud2 data buffer is too small: len(data)={len(cloud_msg.data)} expected>={expected_buffer_size}"
+        )
+
+    cloud = np.ndarray(
+        shape=(int(cloud_msg.height), int(cloud_msg.width)),
+        dtype=cloud_dtype,
+        buffer=cloud_msg.data,
+        strides=(row_step, int(cloud_msg.point_step)),
+    )
+    packed_cloud = np.array(cloud.reshape(-1), copy=False)
+    field_names = packed_cloud.dtype.names or ()
+    for field_name in ("x", "y", "z"):
+        if field_name not in field_names:
+            raise ValueError(f"Point cloud is missing required '{field_name}' field")
+    resolved_time_field = time_field_name or next(
+        (candidate for candidate in POINT_TIME_FIELD_NAMES if candidate in field_names), None
+    )
+    if resolved_time_field is None or resolved_time_field not in field_names:
+        raise ValueError("Point cloud is missing a supported per-point time field")
+
+    x_values = np.asarray(packed_cloud["x"], dtype=np.float64)
+    y_values = np.asarray(packed_cloud["y"], dtype=np.float64)
+    z_values = np.asarray(packed_cloud["z"], dtype=np.float64)
+    time_values = np.asarray(packed_cloud[resolved_time_field], dtype=np.float64)
+    finite_mask = (
+        np.isfinite(x_values) & np.isfinite(y_values) & np.isfinite(z_values) & np.isfinite(time_values)
+    )
+    if not np.any(finite_mask):
+        raise ValueError("Point cloud contains no finite XYZ/time samples")
+    return (
+        np.ascontiguousarray(
+            np.column_stack((x_values[finite_mask], y_values[finite_mask], z_values[finite_mask])), dtype=np.float64
+        ),
+        np.ascontiguousarray(time_values[finite_mask], dtype=np.float64),
+        resolved_time_field,
     )
 
 

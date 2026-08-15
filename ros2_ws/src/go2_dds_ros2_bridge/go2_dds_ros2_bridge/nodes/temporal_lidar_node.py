@@ -20,18 +20,24 @@ from sensor_msgs.msg import PointCloud2, PointField
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from go2_dds_ros2_bridge_msgs.msg import TemporalLidarObservation
-from go2_dds_ros2_bridge.occupancy_map import extract_xyz_points
+from go2_dds_ros2_bridge.occupancy_map import extract_xyz_time_points
 from go2_dds_ros2_bridge.temporal_lidar_processing import (
+    CAPTURE_FOV_DEG,
+    CAPTURE_RAYS,
+    CompletedScan,
     CompletedScanHistory,
     FOV_BINS,
     HISTORY_FRAMES,
     MAX_DISTANCE_M,
-    TwoCloudAssembler,
     WORLD_BINS,
+    deskew_points_to_reference_base,
     front_arc_bin_indices,
+    is_adjacent_cloud_pair,
     normalized_scan_age,
     polar_bins_to_base_points,
     project_history_to_polar_bins,
+    reduce_front_capture_rays,
+    upsample_polar_bins,
 )
 from go2_dds_ros2_bridge.tf_utils import rotation_matrix_from_quaternion_xyzw
 
@@ -42,7 +48,7 @@ DEFAULT_MAP_FRAME = "camera_init_correct"
 DEFAULT_BASE_FRAME = "base_link"
 DEFAULT_RAW_CLOUD_PERIOD_S = 0.065
 DEFAULT_INTERCLOUD_TOLERANCE_S = 0.025
-DEFAULT_POLICY_HZ = 15.0
+DEFAULT_POLICY_HZ = 12.5
 DEFAULT_PROCESSING_HZ = 100.0
 DEFAULT_TF_WAIT_S = 0.25
 DEFAULT_MAX_PENDING_CLOUDS = 16
@@ -53,6 +59,13 @@ DEFAULT_SCAN_AGE_MAX_S = 0.250
 DEFAULT_DEBUG_ENABLED = True
 DEFAULT_DEBUG_TOPIC_PREFIX = "/temporal_lidar/debug"
 DEFAULT_FREEZE_OBSERVATION = False
+DEFAULT_POINT_TIME_FIELD = "time"
+DEFAULT_POINT_TIME_SCALE_S = 1.0
+DEFAULT_CAPTURE_RAYS = CAPTURE_RAYS
+DEFAULT_CAPTURE_FOV_DEG = CAPTURE_FOV_DEG
+DEFAULT_MIN_POINTS_PER_CAPTURE_RAY = 1
+DEFAULT_CAPTURE_RETURN_PERCENTILE = 0.1
+DEFAULT_WORLD_BINS = WORLD_BINS
 
 FRAME_COLORS_RGB = (0xFF3333, 0x33CCFF, 0x66FF66, 0xCC66FF)
 
@@ -87,6 +100,13 @@ class TemporalLidarConfig:
     debug_enabled: bool
     debug_topic_prefix: str
     freeze_observation: bool
+    point_time_field: str
+    point_time_scale_s: float
+    capture_rays: int
+    capture_fov_deg: float
+    min_points_per_capture_ray: int
+    capture_return_percentile: float
+    world_bins: int
 
 
 def parse_args() -> TemporalLidarConfig:
@@ -107,6 +127,13 @@ def parse_args() -> TemporalLidarConfig:
     parser.add_argument("--scan-age-max-s", type=float, default=DEFAULT_SCAN_AGE_MAX_S)
     parser.add_argument("--debug-enabled", action=argparse.BooleanOptionalAction, default=DEFAULT_DEBUG_ENABLED)
     parser.add_argument("--debug-topic-prefix", default=DEFAULT_DEBUG_TOPIC_PREFIX)
+    parser.add_argument("--point-time-field", default=DEFAULT_POINT_TIME_FIELD)
+    parser.add_argument("--point-time-scale-s", type=float, default=DEFAULT_POINT_TIME_SCALE_S)
+    parser.add_argument("--capture-rays", type=int, default=DEFAULT_CAPTURE_RAYS)
+    parser.add_argument("--capture-fov-deg", type=float, default=DEFAULT_CAPTURE_FOV_DEG)
+    parser.add_argument("--min-points-per-capture-ray", type=int, default=DEFAULT_MIN_POINTS_PER_CAPTURE_RAY)
+    parser.add_argument("--capture-return-percentile", type=float, default=DEFAULT_CAPTURE_RETURN_PERCENTILE)
+    parser.add_argument("--world-bins", type=int, default=DEFAULT_WORLD_BINS)
     parser.add_argument(
         "--freeze-observation",
         action=argparse.BooleanOptionalAction,
@@ -125,6 +152,14 @@ def parse_args() -> TemporalLidarConfig:
         raise SystemExit("tf-wait-s and max-pending-clouds must be positive")
     if args.max_z_m <= args.min_z_m or args.scan_age_max_s <= 0:
         raise SystemExit("max-z-m must exceed min-z-m and scan-age-max-s must be positive")
+    if not args.point_time_field or args.point_time_scale_s <= 0.0:
+        raise SystemExit("point-time-field must be non-empty and point-time-scale-s must be positive")
+    if args.capture_rays <= 0 or not 0.0 < args.capture_fov_deg <= 360.0:
+        raise SystemExit("capture-rays must be positive and capture-fov-deg must be in (0, 360]")
+    if args.min_points_per_capture_ray <= 0 or not 0.0 <= args.capture_return_percentile <= 1.0:
+        raise SystemExit("Invalid capture-ray return-reduction parameters")
+    if args.world_bins <= 0 or args.world_bins > WORLD_BINS or WORLD_BINS % args.world_bins != 0:
+        raise SystemExit("world-bins must be a positive divisor of %d" % WORLD_BINS)
     if not args.debug_topic_prefix:
         raise SystemExit("debug-topic-prefix must not be empty")
     return TemporalLidarConfig(**vars(args))
@@ -135,6 +170,15 @@ class PendingCloud:
     message: PointCloud2
     stamp: Time
     received_ns: int
+
+
+@dataclass(frozen=True)
+class DecodedRollingCloud:
+    points_lidar_m: np.ndarray
+    time_offsets_s: np.ndarray
+    start_stamp_ns: int
+    end_stamp_ns: int
+    frame_id: str
 
 
 class TemporalLidarNode(Node):
@@ -149,9 +193,6 @@ class TemporalLidarNode(Node):
         self._frozen_distances: np.ndarray | None = None
         self._frozen_validity: np.ndarray | None = None
         self._frozen_normalized_scan_age: float | None = None
-        self._assembler = TwoCloudAssembler(
-            self._config.raw_cloud_period_s, self._config.intercloud_tolerance_s
-        )
         self._pending_clouds: deque[PendingCloud] = deque()
         self._tf_warning_last_ns = 0
         self._gap_warning_last_ns = 0
@@ -173,11 +214,14 @@ class TemporalLidarNode(Node):
         self._process_timer = self.create_timer(1.0 / self._config.processing_hz, self._process_pending_cloud)
         self._observation_timer = self.create_timer(1.0 / self._config.policy_hz, self._publish_observation)
         self.get_logger().info(
-            "Temporal lidar: '%s' -> '%s'; two consecutive corrected raw clouds (expected %.3fs apart) "
-            "per completed scan, %d-frame history, %.1f Hz policy output; deferred TF processing at %.1f Hz. "
+            "Temporal lidar: '%s' -> '%s'; two rolling corrected raw clouds (expected %.3fs apart) are deskewed "
+            "to cloud-two end time, reduced to %d fixed hit/free rays across the front %.0f degrees, then retained "
+            "as %d world-frame "
+            "histories at %.1f Hz policy output. Deferred TF processing at %.1f Hz. "
             "RViz bin debug: %s. Frozen-observation experiment: %s."
             % (self._config.input_topic, self._config.output_topic, self._config.raw_cloud_period_s,
-               HISTORY_FRAMES, self._config.policy_hz, self._config.processing_hz,
+               self._config.capture_rays, self._config.capture_fov_deg, HISTORY_FRAMES,
+               self._config.policy_hz, self._config.processing_hz,
                self._config.debug_topic_prefix if self._config.debug_enabled else "disabled",
                "enabled" if self._config.freeze_observation else "disabled")
         )
@@ -214,13 +258,11 @@ class TemporalLidarNode(Node):
         stamp = Time.from_msg(cloud_msg.header.stamp)
         if stamp.nanoseconds == 0:
             self._warn_throttled("Dropping corrected raw cloud without a header timestamp.")
-            self._discard_partial()
             return
         if len(self._pending_clouds) >= self._config.max_pending_clouds:
             self._pending_clouds.popleft()
-            self._discard_partial()
             self._warn_throttled(
-                "Pending corrected-raw-cloud queue is full; dropping its oldest cloud and restarting two-cloud assembly.",
+                "Pending corrected-raw-cloud queue is full; dropping its oldest cloud and restarting pair assembly.",
                 gap=True,
             )
         self._pending_clouds.append(
@@ -228,107 +270,127 @@ class TemporalLidarNode(Node):
         )
 
     def _process_pending_cloud(self) -> None:
-        """Process one queued cloud after its exact timestamped transforms are available."""
+        """Deskew and reduce the oldest valid pair once all its TF samples exist."""
         if self._frozen_distances is not None:
             self._pending_clouds.clear()
             return
-        if not self._pending_clouds:
+        if len(self._pending_clouds) < 2:
             return
-        pending = self._pending_clouds[0]
-        cloud_msg = pending.message
-        cloud_frame = cloud_msg.header.frame_id or self._config.map_frame
-        cloud_transform = self._lookup_transform(self._config.map_frame, cloud_frame, pending.stamp)
-        base_transform = self._lookup_transform(self._config.map_frame, self._config.base_frame, pending.stamp)
-        if cloud_transform is None or base_transform is None:
-            wait_s = (self.get_clock().now().nanoseconds - pending.received_ns) / 1e9
+        first, second = self._pending_clouds[0], self._pending_clouds[1]
+        interval_s = (second.stamp.nanoseconds - first.stamp.nanoseconds) / 1e9
+        if not is_adjacent_cloud_pair(
+            first.stamp.nanoseconds,
+            second.stamp.nanoseconds,
+            expected_period_s=self._config.raw_cloud_period_s,
+            tolerance_s=self._config.intercloud_tolerance_s,
+        ):
+            self._pending_clouds.popleft()
+            self._warn_throttled(
+                "Corrected-raw-cloud interval %.3fs is not %.3f±%.3fs; keeping the newer cloud as the next pair start."
+                % (interval_s, self._config.raw_cloud_period_s, self._config.intercloud_tolerance_s),
+                gap=True,
+            )
+            return
+
+        try:
+            first_cloud = self._decode_rolling_cloud(first)
+            second_cloud = self._decode_rolling_cloud(second)
+        except ValueError as error:
+            self._pending_clouds.popleft()
+            self._pending_clouds.popleft()
+            self._warn_throttled("Dropping malformed rolling-cloud pair: %s" % error, gap=True)
+            return
+
+        completed = self._complete_deskewed_pair(first_cloud, second_cloud)
+        if completed is None:
+            wait_s = (self.get_clock().now().nanoseconds - second.received_ns) / 1e9
             if wait_s <= self._config.tf_wait_s:
                 return
             self._pending_clouds.popleft()
-            self._discard_partial()
+            self._pending_clouds.popleft()
             self._warn_throttled(
-                "Dropping corrected raw cloud after waiting %.3fs for its timestamped transforms; restarting two-cloud assembly."
-                % wait_s,
+                "Dropping rolling-cloud pair after waiting %.3fs for deskew transforms." % wait_s,
                 gap=True,
             )
             return
-
         self._pending_clouds.popleft()
-        try:
-            points = extract_xyz_points(cloud_msg)
-        except ValueError as error:
-            self._warn_throttled("Dropping malformed corrected raw cloud: %s" % error)
-            self._discard_partial()
-            return
-        translation, rotation = cloud_transform
-        if points.size:
-            points = np.ascontiguousarray(points @ rotation.T + translation, dtype=np.float64)
-            base_translation, _ = base_transform
-            relative_xy = points[:, :2] - base_translation[:2]
-            horizontal_range = np.linalg.norm(relative_xy, axis=1)
-            valid = (
-                (points[:, 2] >= base_translation[2] + self._config.min_z_m)
-                & (points[:, 2] <= base_translation[2] + self._config.max_z_m)
-                & (horizontal_range <= self._config.max_range_m)
-            )
-            points = np.ascontiguousarray(points[valid], dtype=np.float64)
-        else:
-            points = np.empty((0, 3), dtype=np.float64)
-        base_translation, base_rotation = base_transform
-        self._accept_cloud(
-            points,
-            pending.stamp.nanoseconds,
-            self._full_scan_free_endpoints(base_translation, base_rotation),
+        self._pending_clouds.popleft()
+        self._history.push(completed)
+
+    def _decode_rolling_cloud(self, pending: PendingCloud) -> DecodedRollingCloud:
+        points, offsets, time_field = extract_xyz_time_points(
+            pending.message, time_field_name=self._config.point_time_field
+        )
+        offsets_s = offsets * self._config.point_time_scale_s
+        if np.any(offsets_s < -1e-6):
+            raise ValueError("Per-point '%s' offsets must be non-negative relative to the header timestamp" % time_field)
+        offsets_s = np.maximum(offsets_s, 0.0)
+        return DecodedRollingCloud(
+            points_lidar_m=points,
+            time_offsets_s=offsets_s,
+            start_stamp_ns=pending.stamp.nanoseconds + int(round(float(np.min(offsets_s)) * 1e9)),
+            end_stamp_ns=pending.stamp.nanoseconds + int(round(float(np.max(offsets_s)) * 1e9)),
+            frame_id=pending.message.header.frame_id or self._config.map_frame,
         )
 
-    def _discard_partial(self) -> None:
-        self._assembler.discard()
-
-    def _full_scan_free_endpoints(
-        self, base_translation: np.ndarray, base_rotation: np.ndarray
-    ) -> np.ndarray:
-        """Return the 256 world-frame max-range rays of one complete 360-degree scan.
-
-        A corrected raw PointCloud2 contains physical returns only.  Once two
-        adjacent 65-ms clouds have passed the pairing check, the hardware scan
-        contract establishes full 360-degree ray coverage.  These endpoints
-        preserve that known-free coverage independently of the point-return
-        height filter, exactly as the simulator preserves its free-space rays.
-        The assembler retains this set only when the current cloud completes a
-        valid pair, so rejected or missing pairs never fabricate a new frame.
-        """
-        yaw = math.atan2(float(base_rotation[1, 0]), float(base_rotation[0, 0]))
-        local_angles = np.linspace(-math.pi, math.pi, WORLD_BINS, endpoint=True, dtype=np.float64)
-        world_angles = yaw + local_angles
-        endpoints = np.empty((WORLD_BINS, 3), dtype=np.float64)
-        endpoints[:, 0] = base_translation[0] + self._config.max_range_m * np.cos(world_angles)
-        endpoints[:, 1] = base_translation[1] + self._config.max_range_m * np.sin(world_angles)
-        endpoints[:, 2] = base_translation[2]
-        return endpoints
-
-    def _accept_cloud(
-        self,
-        points_xyz_m: np.ndarray,
-        stamp_ns: int,
-        free_endpoints_xyz_m: np.ndarray,
-    ) -> None:
-        completed, rejected_pair = self._assembler.push(
-            points_xyz_m,
-            stamp_ns,
-            free_endpoints_xyz_m=free_endpoints_xyz_m,
-        )
-        if rejected_pair:
-            self._warn_throttled(
-                "Corrected-raw-cloud interval %.3fs is not %.3f±%.3fs; restarting two-cloud assembly."
-                % (
-                    self._assembler.last_interval_s,
-                    self._config.raw_cloud_period_s,
-                    self._config.intercloud_tolerance_s,
-                ),
-                gap=True,
+    def _complete_deskewed_pair(
+        self, first: DecodedRollingCloud, second: DecodedRollingCloud
+    ) -> "CompletedScan | None":
+        reference_stamp = Time(nanoseconds=second.end_stamp_ns)
+        reference_base = self._lookup_transform(self._config.map_frame, self._config.base_frame, reference_stamp)
+        transforms = []
+        for cloud in (first, second):
+            start = self._lookup_transform(
+                self._config.map_frame, cloud.frame_id, Time(nanoseconds=cloud.start_stamp_ns)
             )
-            return
-        if completed is not None:
-            self._history.push(completed)
+            end = self._lookup_transform(
+                self._config.map_frame, cloud.frame_id, Time(nanoseconds=cloud.end_stamp_ns)
+            )
+            transforms.append((start, end))
+        if reference_base is None or any(start is None or end is None for start, end in transforms):
+            return None
+
+        reference_translation, reference_rotation = reference_base
+        deskewed_clouds = []
+        for cloud, (start, end) in zip((first, second), transforms):
+            start_translation, start_rotation = start
+            end_translation, end_rotation = end
+            deskewed_clouds.append(
+                deskew_points_to_reference_base(
+                    cloud.points_lidar_m,
+                    cloud.time_offsets_s,
+                    start_translation_w_m=start_translation,
+                    start_rotation_w_lidar=start_rotation,
+                    end_translation_w_m=end_translation,
+                    end_rotation_w_lidar=end_rotation,
+                    reference_translation_w_m=reference_translation,
+                    reference_rotation_w_base=reference_rotation,
+                )
+            )
+        points_reference = np.concatenate(deskewed_clouds, axis=0)
+        horizontal_range = np.linalg.norm(points_reference[:, :2], axis=1)
+        height_and_range = (
+            (points_reference[:, 2] >= self._config.min_z_m)
+            & (points_reference[:, 2] <= self._config.max_z_m)
+            & (horizontal_range <= self._config.max_range_m)
+        )
+        capture_endpoints_reference, ray_states = reduce_front_capture_rays(
+            points_reference[height_and_range],
+            capture_rays=self._config.capture_rays,
+            fov_degrees=self._config.capture_fov_deg,
+            max_distance_m=self._config.max_range_m,
+            min_points_per_ray=self._config.min_points_per_capture_ray,
+            range_percentile=self._config.capture_return_percentile,
+        )
+        capture_endpoints_world = np.ascontiguousarray(
+            capture_endpoints_reference @ reference_rotation.T + reference_translation,
+            dtype=np.float64,
+        )
+        return CompletedScan(
+            stamp_ns=second.end_stamp_ns,
+            endpoints_xyz_m=capture_endpoints_world,
+            ray_states=ray_states,
+        )
 
     def _current_pose(self) -> tuple[np.ndarray, float] | None:
         result = self._lookup_transform(self._config.map_frame, self._config.base_frame, Time())
@@ -444,9 +506,13 @@ class TemporalLidarNode(Node):
         if pose is None:
             return
         current_xy, current_yaw = pose
-        world_distances, world_validity = project_history_to_polar_bins(
+        coarse_world_distances, coarse_world_validity = project_history_to_polar_bins(
             self._history.newest_first(), current_xy_m=current_xy,
             max_distance_m=self._config.max_range_m,
+            world_bins=self._config.world_bins,
+        )
+        world_distances, world_validity = upsample_polar_bins(
+            coarse_world_distances, coarse_world_validity, target_bins=WORLD_BINS
         )
         front_indices = front_arc_bin_indices(current_yaw, world_bins=WORLD_BINS, fov_bins=FOV_BINS)
         distances = world_distances[:, front_indices]
@@ -460,7 +526,6 @@ class TemporalLidarNode(Node):
             self._frozen_validity = validity.reshape(-1).copy()
             self._frozen_normalized_scan_age = normalized_age
             self._pending_clouds.clear()
-            self._assembler.discard()
             self.get_logger().warning(
                 "Frozen temporal-lidar observation after %d completed scans; live raw clouds now have no effect. "
                 "Restart with freeze_observation:=false to restore live lidar."

@@ -8,7 +8,7 @@ navigation:
     cmd_topic: /cmd_vel
     map_frame: camera_init_correct
     body_frame: base_link
-    policy_hz: 15.0
+    policy_hz: 12.5
     lidar_max_distance: 20.0
     temporal_lidar_horizon: 4
     temporal_lidar_fov_bins: 128

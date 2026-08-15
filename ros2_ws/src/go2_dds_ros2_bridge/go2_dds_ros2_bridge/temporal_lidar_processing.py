@@ -4,33 +4,34 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
+
+from go2_dds_ros2_bridge.tf_utils import quaternion_from_rotation_matrix
 
 
 HISTORY_FRAMES = 4
 WORLD_BINS = 256
 FOV_BINS = 128
 MAX_DISTANCE_M = 20.0
+CAPTURE_RAYS = 256
+CAPTURE_FOV_DEG = 180.0
 
 
 @dataclass(frozen=True)
 class CompletedScan:
-    """One completed raw-cloud scan stored in corrected world coordinates.
+    """One fixed front-fan scan stored in corrected world coordinates.
 
-    ``points_xyz_m`` contains physical surface returns.  ``free_endpoints_xyz_m``
-    contains the max-range endpoints of directions covered by a valid completed
-    scan.  This mirrors the simulator's two ray states: a surface hit has a
-    reprojected range, while a covered no-return ray is valid free space at
-    ``max_distance``.
+    ``endpoints_xyz_m`` and ``ray_states`` have one entry per capture ray.
+    State 2 marks a surface hit and state 1 marks an observed free-space ray;
+    state 0 is reserved for unavailable/reset data.  Free endpoints exist only
+    inside the captured front fan--a completed scan never fabricates rear rays.
     """
 
     stamp_ns: int
-    points_xyz_m: np.ndarray
-    free_endpoints_xyz_m: np.ndarray = field(
-        default_factory=lambda: np.empty((0, 3), dtype=np.float64)
-    )
+    endpoints_xyz_m: np.ndarray
+    ray_states: np.ndarray
 
 
 class CompletedScanHistory:
@@ -57,54 +58,175 @@ class CompletedScanHistory:
         return tuple(self._frames)
 
 
-class TwoCloudAssembler:
-    """Turn adjacent partial clouds into timestamped completed scans."""
+def is_adjacent_cloud_pair(
+    first_stamp_ns: int,
+    second_stamp_ns: int,
+    *,
+    expected_period_s: float,
+    tolerance_s: float,
+) -> bool:
+    """Return whether two raw-cloud headers form one valid partial-scan pair."""
+    if expected_period_s <= 0.0 or tolerance_s < 0.0:
+        raise ValueError("expected_period_s must be positive and tolerance_s non-negative")
+    interval_s = (second_stamp_ns - first_stamp_ns) / 1e9
+    return interval_s > 0.0 and abs(interval_s - expected_period_s) <= tolerance_s
 
-    def __init__(self, raw_cloud_period_s: float, intercloud_tolerance_s: float) -> None:
-        self.raw_cloud_period_s = raw_cloud_period_s
-        self.intercloud_tolerance_s = intercloud_tolerance_s
-        self._pending_points_xyz_m: np.ndarray | None = None
-        self._pending_stamp_ns: int | None = None
-        self.last_interval_s: float | None = None
 
-    def discard(self) -> None:
-        self._pending_points_xyz_m = None
-        self._pending_stamp_ns = None
-        self.last_interval_s = None
+def reduce_front_capture_rays(
+    points_xyz_m: np.ndarray,
+    *,
+    capture_rays: int = CAPTURE_RAYS,
+    fov_degrees: float = CAPTURE_FOV_DEG,
+    max_distance_m: float = MAX_DISTANCE_M,
+    min_points_per_ray: int = 1,
+    range_percentile: float = 0.1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce a deskewed reference-base cloud to a fixed front lidar fan.
 
-    def push(
-        self,
-        points_xyz_m: np.ndarray,
-        stamp_ns: int,
-        *,
-        free_endpoints_xyz_m: np.ndarray | None = None,
-    ) -> tuple[CompletedScan | None, bool]:
-        """Return ``(completed_scan, rejected_prior_pair)`` for one raw cloud."""
-        if self._pending_stamp_ns is None:
-            self._pending_points_xyz_m = points_xyz_m
-            self._pending_stamp_ns = stamp_ns
-            return None, False
+    A real point cloud has many returns per angular ray, unlike the simulator's
+    one raycast result.  This function chooses a stable low-percentile range in
+    each capture ray and puts that hit at the exact ray centre. Every other
+    front capture ray becomes a valid max-range free-space measurement. No rear
+    ray is generated.
 
-        interval_s = (stamp_ns - self._pending_stamp_ns) / 1e9
-        self.last_interval_s = interval_s
-        valid_interval = interval_s > 0.0 and abs(interval_s - self.raw_cloud_period_s) <= self.intercloud_tolerance_s
-        if not valid_interval:
-            self._pending_points_xyz_m = points_xyz_m
-            self._pending_stamp_ns = stamp_ns
-            return None, True
-
-        points = np.concatenate((self._pending_points_xyz_m, points_xyz_m), axis=0)
-        free_endpoints = (
-            np.empty((0, 3), dtype=np.float64)
-            if free_endpoints_xyz_m is None
-            else np.asarray(free_endpoints_xyz_m, dtype=np.float64)
+    Returns:
+        A fixed ``(capture_rays, 3)`` endpoint array and a fixed
+        ``(capture_rays,)`` uint8 state array. State 1 is free and state 2 is a
+        hit, matching the simulator's held-scan collector.
+    """
+    if capture_rays <= 0 or fov_degrees <= 0.0 or fov_degrees > 360.0:
+        raise ValueError("capture_rays must be positive and fov_degrees must be in (0, 360]")
+    if max_distance_m <= 0.0 or min_points_per_ray <= 0 or not 0.0 <= range_percentile <= 1.0:
+        raise ValueError("Invalid capture-ray reduction parameters")
+    half_fov = math.radians(fov_degrees) * 0.5
+    ray_angles = -half_fov + (np.arange(capture_rays, dtype=np.float64) + 0.5) * (
+        2.0 * half_fov / capture_rays
+    )
+    endpoints = np.column_stack(
+        (
+            max_distance_m * np.cos(ray_angles),
+            max_distance_m * np.sin(ray_angles),
+            np.zeros(capture_rays, dtype=np.float64),
         )
-        self.discard()
-        return CompletedScan(
-            stamp_ns=stamp_ns,
-            points_xyz_m=points,
-            free_endpoints_xyz_m=free_endpoints,
-        ), False
+    )
+    ray_states = np.ones(capture_rays, dtype=np.uint8)
+
+    points = np.asarray(points_xyz_m, dtype=np.float64)
+    if points.size == 0:
+        return endpoints, ray_states
+    if points.ndim != 2 or points.shape[1] < 3:
+        raise ValueError("points_xyz_m must have shape (N, >=3)")
+
+    xy = points[:, :2]
+    ranges = np.linalg.norm(xy, axis=1)
+    angles = np.arctan2(xy[:, 1], xy[:, 0])
+    valid = (
+        np.isfinite(points[:, :3]).all(axis=1)
+        & np.isfinite(ranges)
+        & (ranges > 0.0)
+        & (ranges <= max_distance_m)
+        & (angles >= -half_fov)
+        & (angles <= half_fov)
+    )
+    if not np.any(valid):
+        return endpoints, ray_states
+
+    selected_ranges = ranges[valid]
+    selected_z = points[valid, 2]
+    positions = (angles[valid] + half_fov) / (2.0 * half_fov)
+    ray_indices = np.minimum((positions * capture_rays).astype(np.int64), capture_rays - 1)
+    for ray_index in np.unique(ray_indices):
+        ray_mask = ray_indices == ray_index
+        if int(np.count_nonzero(ray_mask)) < min_points_per_ray:
+            continue
+        hit_range = float(np.quantile(selected_ranges[ray_mask], range_percentile))
+        hit_z = float(np.median(selected_z[ray_mask]))
+        ray_angle = ray_angles[ray_index]
+        endpoints[ray_index] = (hit_range * math.cos(ray_angle), hit_range * math.sin(ray_angle), hit_z)
+        ray_states[ray_index] = 2
+    return endpoints, ray_states
+
+
+def deskew_points_to_reference_base(
+    points_lidar_m: np.ndarray,
+    offsets_s: np.ndarray,
+    *,
+    start_translation_w_m: np.ndarray,
+    start_rotation_w_lidar: np.ndarray,
+    end_translation_w_m: np.ndarray,
+    end_rotation_w_lidar: np.ndarray,
+    reference_translation_w_m: np.ndarray,
+    reference_rotation_w_base: np.ndarray,
+) -> np.ndarray:
+    """Deskew one rolling cloud into a common reference ``base_link`` frame.
+
+    Start/end transforms map the lidar frame into world coordinates at the
+    earliest/latest finite point timestamp. Translation is interpolated linearly
+    and rotation with quaternion SLERP for every point timestamp.
+    """
+    points = np.asarray(points_lidar_m, dtype=np.float64)
+    offsets = np.asarray(offsets_s, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3 or offsets.shape != (points.shape[0],):
+        raise ValueError("points_lidar_m must be (N, 3) and offsets_s must be (N,)")
+    if points.size == 0:
+        return np.empty((0, 3), dtype=np.float64)
+    if not np.isfinite(points).all() or not np.isfinite(offsets).all():
+        raise ValueError("Deskew inputs must be finite")
+
+    start_translation = np.asarray(start_translation_w_m, dtype=np.float64)
+    end_translation = np.asarray(end_translation_w_m, dtype=np.float64)
+    reference_translation = np.asarray(reference_translation_w_m, dtype=np.float64)
+    start_rotation = np.asarray(start_rotation_w_lidar, dtype=np.float64)
+    end_rotation = np.asarray(end_rotation_w_lidar, dtype=np.float64)
+    reference_rotation = np.asarray(reference_rotation_w_base, dtype=np.float64)
+    if any(value.shape != (3,) for value in (start_translation, end_translation, reference_translation)):
+        raise ValueError("Translations must have shape (3,)")
+    if any(value.shape != (3, 3) for value in (start_rotation, end_rotation, reference_rotation)):
+        raise ValueError("Rotations must have shape (3, 3)")
+
+    offset_min = float(np.min(offsets))
+    offset_span = float(np.max(offsets) - offset_min)
+    alpha = np.zeros(points.shape[0], dtype=np.float64) if offset_span <= 1e-9 else (offsets - offset_min) / offset_span
+    translations = start_translation[None, :] + alpha[:, None] * (end_translation - start_translation)[None, :]
+    rotations = _slerp_rotation_matrices(start_rotation, end_rotation, alpha)
+    world_points = np.einsum("nij,nj->ni", rotations, points) + translations
+    return np.ascontiguousarray((world_points - reference_translation[None, :]) @ reference_rotation, dtype=np.float64)
+
+
+def _slerp_rotation_matrices(start_rotation: np.ndarray, end_rotation: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Vectorized quaternion SLERP, returning one rotation matrix per alpha."""
+    q0 = np.asarray(quaternion_from_rotation_matrix(start_rotation), dtype=np.float64)
+    q1 = np.asarray(quaternion_from_rotation_matrix(end_rotation), dtype=np.float64)
+    q0 /= np.linalg.norm(q0)
+    q1 /= np.linalg.norm(q1)
+    dot = float(np.dot(q0, q1))
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+    dot = float(np.clip(dot, -1.0, 1.0))
+    alpha = np.asarray(alpha, dtype=np.float64)
+    if dot > 0.9995:
+        quaternions = q0[None, :] + alpha[:, None] * (q1 - q0)[None, :]
+        quaternions /= np.linalg.norm(quaternions, axis=1, keepdims=True)
+    else:
+        theta = math.acos(dot)
+        sin_theta = math.sin(theta)
+        w0 = np.sin((1.0 - alpha) * theta) / sin_theta
+        w1 = np.sin(alpha * theta) / sin_theta
+        quaternions = w0[:, None] * q0[None, :] + w1[:, None] * q1[None, :]
+
+    x, y, z, w = (quaternions[:, index] for index in range(4))
+    rotations = np.empty((alpha.size, 3, 3), dtype=np.float64)
+    rotations[:, 0, 0] = 1.0 - 2.0 * (y * y + z * z)
+    rotations[:, 0, 1] = 2.0 * (x * y - w * z)
+    rotations[:, 0, 2] = 2.0 * (x * z + w * y)
+    rotations[:, 1, 0] = 2.0 * (x * y + w * z)
+    rotations[:, 1, 1] = 1.0 - 2.0 * (x * x + z * z)
+    rotations[:, 1, 2] = 2.0 * (y * z - w * x)
+    rotations[:, 2, 0] = 2.0 * (x * z - w * y)
+    rotations[:, 2, 1] = 2.0 * (y * z + w * x)
+    rotations[:, 2, 2] = 1.0 - 2.0 * (x * x + y * y)
+    return rotations
 
 
 def normalized_scan_age(now_ns: int, scan_stamp_ns: int, max_age_s: float) -> float:
@@ -124,10 +246,11 @@ def project_history_to_front_arc(
     fov_bins: int = FOV_BINS,
     history_frames: int = HISTORY_FRAMES,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Project stored world returns exactly as TemporalLidarScan's hit path does.
+    """Project stored world rays exactly as ``TemporalLidarScan`` does.
 
     Returned arrays have shape ``(history_frames, fov_bins)``. Missing history
-    and bins without a physical return are max-distance and invalid. The
+    is max-distance and invalid. Captured free-space rays are max-distance and
+    valid, while captured hits use their reprojected distance. The
     requested front arc is selected only after all points have been placed in a
     360-degree world-aligned bin grid, so returns remain available when the
     robot turns away and later turns back within the history horizon.
@@ -164,14 +287,12 @@ def project_history_to_polar_bins(
     world_bins: int = WORLD_BINS,
     history_frames: int = HISTORY_FRAMES,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Reduce every history frame into 360-degree polar bins.
+    """Reduce fixed hit/free front-ray history into world polar bins.
 
-    A free endpoint creates a valid max-range bin; a physical return then
-    replaces that range with the closest surface return.  Bins without either
-    remain max-range but invalid (unknown).  This is the same hit/free binning
-    contract as ``TemporalLidarScan`` in training.  The bins are world-angle
-    indexed, so the debug cloud exactly matches the polar reduction used before
-    the policy's front-arc selection.
+    Free rays use their stored endpoint only to select an angular bin; their
+    distance remains max range after robot motion. Bins without any captured
+    front ray remain invalid. The 360-degree grid is only an internal
+    reprojection domain--a completed scan never directly observes the rear.
     """
     if world_bins <= 0 or history_frames <= 0:
         raise ValueError("world_bins and history_frames must be positive")
@@ -185,41 +306,59 @@ def project_history_to_polar_bins(
         world_distances = np.full(world_bins, max_distance_m, dtype=np.float64)
         world_validity = np.zeros(world_bins, dtype=np.uint8)
 
-        free_endpoints = np.asarray(scan.free_endpoints_xyz_m, dtype=np.float64)
-        if free_endpoints.size:
-            if free_endpoints.ndim != 2 or free_endpoints.shape[1] < 2:
-                raise ValueError("Completed scan free endpoints must have shape (N, >=2)")
-            free_delta = free_endpoints[:, :2] - current_xy[None, :]
-            free_finite = np.isfinite(free_delta).all(axis=1)
-            if np.any(free_finite):
-                free_angles = np.arctan2(free_delta[free_finite, 1], free_delta[free_finite, 0])
-                free_bins = (
-                    ((free_angles + math.pi) / (2.0 * math.pi) * world_bins).astype(np.int64) % world_bins
-                )
-                # Covered no-return rays are valid but always contribute max range.
-                world_validity[free_bins] = 1
-
-        points = np.asarray(scan.points_xyz_m, dtype=np.float64)
-        if points.size:
-            if points.ndim != 2 or points.shape[1] < 2:
-                raise ValueError("Completed scan points must have shape (N, >=2)")
-            delta_xy = points[:, :2] - current_xy[None, :]
+        endpoints = np.asarray(scan.endpoints_xyz_m, dtype=np.float64)
+        ray_states = np.asarray(scan.ray_states, dtype=np.uint8)
+        if endpoints.size:
+            if endpoints.ndim != 2 or endpoints.shape[1] < 2:
+                raise ValueError("Completed scan endpoints must have shape (N, >=2)")
+            if ray_states.shape != (endpoints.shape[0],):
+                raise ValueError("Completed scan ray states must match its endpoints")
+            delta_xy = endpoints[:, :2] - current_xy[None, :]
             ranges = np.linalg.norm(delta_xy, axis=1)
-            finite = np.isfinite(ranges) & np.isfinite(delta_xy).all(axis=1)
-            if np.any(finite):
-                delta_xy = delta_xy[finite]
-                ranges = np.minimum(ranges[finite], max_distance_m)
+            real = (ray_states > 0) & np.isfinite(ranges) & np.isfinite(delta_xy).all(axis=1)
+            if np.any(real):
+                delta_xy = delta_xy[real]
+                ranges = np.minimum(ranges[real], max_distance_m)
+                real_states = ray_states[real]
                 angles = np.arctan2(delta_xy[:, 1], delta_xy[:, 0])
                 bin_indices = (
                     ((angles + math.pi) / (2.0 * math.pi) * world_bins).astype(np.int64) % world_bins
                 )
-                np.minimum.at(world_distances, bin_indices, ranges)
+                ray_distances = np.where(real_states == 2, ranges, max_distance_m)
+                np.minimum.at(world_distances, bin_indices, ray_distances)
                 world_validity[bin_indices] = 1
 
         distances[frame_index] = (world_distances / max_distance_m).astype(np.float32)
         validity[frame_index] = world_validity
 
     return distances, validity
+
+
+def upsample_polar_bins(
+    distances: np.ndarray,
+    validity: np.ndarray,
+    *,
+    target_bins: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Repeat each coarse 360-degree bin into an integer number of fine bins.
+
+    The temporal policy remains trained on a 256-bin virtual world grid and a
+    128-bin front arc.  Hardware may instead form a coarser physical grid (128
+    bins globally / 64 bins across the front), then repeat each bin so the
+    policy interface and its angular extent remain unchanged.
+    """
+    source_distances = np.asarray(distances)
+    source_validity = np.asarray(validity)
+    if source_distances.ndim != 2 or source_validity.shape != source_distances.shape:
+        raise ValueError("distances and validity must be matching two-dimensional arrays")
+    source_bins = source_distances.shape[1]
+    if source_bins <= 0 or target_bins < source_bins or target_bins % source_bins != 0:
+        raise ValueError("target_bins must be an integer multiple of the source bin count")
+    factor = target_bins // source_bins
+    return (
+        np.repeat(source_distances, factor, axis=1),
+        np.repeat(source_validity, factor, axis=1),
+    )
 
 
 def front_arc_bin_indices(
