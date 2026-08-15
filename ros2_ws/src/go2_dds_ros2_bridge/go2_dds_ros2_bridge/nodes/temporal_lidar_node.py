@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aggregate dense registered clouds into temporal policy observations."""
+"""Aggregate corrected raw clouds into temporal policy observations."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ from go2_dds_ros2_bridge.temporal_lidar_processing import (
 from go2_dds_ros2_bridge.tf_utils import rotation_matrix_from_quaternion_xyzw
 
 
-DEFAULT_INPUT_TOPIC = "/cloud_registered"
+DEFAULT_INPUT_TOPIC = "/utlidar/time_corrected/cloud"
 DEFAULT_OUTPUT_TOPIC = "/temporal_lidar/observation"
 DEFAULT_MAP_FRAME = "camera_init_correct"
 DEFAULT_BASE_FRAME = "base_link"
@@ -49,16 +49,14 @@ DEFAULT_MAX_PENDING_CLOUDS = 16
 DEFAULT_MIN_Z_M = -0.25
 DEFAULT_MAX_Z_M = 1.4
 DEFAULT_MAX_RANGE_M = MAX_DISTANCE_M
-DEFAULT_SCAN_AGE_MAX_S = 0.25
-DEFAULT_COVERAGE_FOV_DEG = 180.0
-DEFAULT_COVERAGE_RAYS_PER_COMPLETED_SCAN = 128
+DEFAULT_SCAN_AGE_MAX_S = 0.250
 DEFAULT_DEBUG_ENABLED = True
 DEFAULT_DEBUG_TOPIC_PREFIX = "/temporal_lidar/debug"
 
 FRAME_COLORS_RGB = (0xFF3333, 0x33CCFF, 0x66FF66, 0xCC66FF)
 
 CLOUD_QOS = QoSProfile(
-    reliability=ReliabilityPolicy.BEST_EFFORT,
+    reliability=ReliabilityPolicy.RELIABLE,
     history=HistoryPolicy.KEEP_LAST,
     depth=10,
 )
@@ -85,14 +83,12 @@ class TemporalLidarConfig:
     max_z_m: float
     max_range_m: float
     scan_age_max_s: float
-    coverage_fov_deg: float
-    coverage_rays_per_completed_scan: int
     debug_enabled: bool
     debug_topic_prefix: str
 
 
 def parse_args() -> TemporalLidarConfig:
-    parser = argparse.ArgumentParser(description="Build four-frame temporal lidar observations from registered clouds.")
+    parser = argparse.ArgumentParser(description="Build four-frame temporal lidar observations from corrected raw clouds.")
     parser.add_argument("--input-topic", default=DEFAULT_INPUT_TOPIC)
     parser.add_argument("--output-topic", default=DEFAULT_OUTPUT_TOPIC)
     parser.add_argument("--map-frame", default=DEFAULT_MAP_FRAME)
@@ -107,11 +103,6 @@ def parse_args() -> TemporalLidarConfig:
     parser.add_argument("--max-z-m", type=float, default=DEFAULT_MAX_Z_M)
     parser.add_argument("--max-range-m", type=float, default=DEFAULT_MAX_RANGE_M)
     parser.add_argument("--scan-age-max-s", type=float, default=DEFAULT_SCAN_AGE_MAX_S)
-    parser.add_argument("--coverage-fov-deg", type=float, default=DEFAULT_COVERAGE_FOV_DEG,
-                        help="Angular span of each completed scan's known-free coverage.")
-    parser.add_argument("--coverage-rays-per-completed-scan", type=int,
-                        default=DEFAULT_COVERAGE_RAYS_PER_COMPLETED_SCAN,
-                        help="Number of max-range coverage rays synthesized for a completed scan.")
     parser.add_argument("--debug-enabled", action=argparse.BooleanOptionalAction, default=DEFAULT_DEBUG_ENABLED)
     parser.add_argument("--debug-topic-prefix", default=DEFAULT_DEBUG_TOPIC_PREFIX)
     args = parser.parse_args(rclpy.utilities.remove_ros_args(args=sys.argv)[1:])
@@ -123,10 +114,6 @@ def parse_args() -> TemporalLidarConfig:
         raise SystemExit("tf-wait-s and max-pending-clouds must be positive")
     if args.max_z_m <= args.min_z_m or args.scan_age_max_s <= 0:
         raise SystemExit("max-z-m must exceed min-z-m and scan-age-max-s must be positive")
-    if not 0.0 < args.coverage_fov_deg <= 360.0:
-        raise SystemExit("coverage-fov-deg must lie in (0, 360]")
-    if args.coverage_rays_per_completed_scan <= 0:
-        raise SystemExit("coverage-rays-per-completed-scan must be positive")
     if not args.debug_topic_prefix:
         raise SystemExit("debug-topic-prefix must not be empty")
     return TemporalLidarConfig(**vars(args))
@@ -172,7 +159,7 @@ class TemporalLidarNode(Node):
         self._process_timer = self.create_timer(1.0 / self._config.processing_hz, self._process_pending_cloud)
         self._observation_timer = self.create_timer(1.0 / self._config.policy_hz, self._publish_observation)
         self.get_logger().info(
-            "Temporal lidar: '%s' -> '%s'; two consecutive registered clouds (expected %.3fs apart) "
+            "Temporal lidar: '%s' -> '%s'; two consecutive corrected raw clouds (expected %.3fs apart) "
             "per completed scan, %d-frame history, %.1f Hz policy output; deferred TF processing at %.1f Hz. "
             "RViz bin debug: %s."
             % (self._config.input_topic, self._config.output_topic, self._config.raw_cloud_period_s,
@@ -209,14 +196,14 @@ class TemporalLidarNode(Node):
     def _cloud_callback(self, cloud_msg: PointCloud2) -> None:
         stamp = Time.from_msg(cloud_msg.header.stamp)
         if stamp.nanoseconds == 0:
-            self._warn_throttled("Dropping registered cloud without a header timestamp.")
+            self._warn_throttled("Dropping corrected raw cloud without a header timestamp.")
             self._discard_partial()
             return
         if len(self._pending_clouds) >= self._config.max_pending_clouds:
             self._pending_clouds.popleft()
             self._discard_partial()
             self._warn_throttled(
-                "Pending registered-cloud queue is full; dropping its oldest cloud and restarting two-cloud assembly.",
+                "Pending corrected-raw-cloud queue is full; dropping its oldest cloud and restarting two-cloud assembly.",
                 gap=True,
             )
         self._pending_clouds.append(
@@ -239,7 +226,7 @@ class TemporalLidarNode(Node):
             self._pending_clouds.popleft()
             self._discard_partial()
             self._warn_throttled(
-                "Dropping registered cloud after waiting %.3fs for its timestamped transforms; restarting two-cloud assembly."
+                "Dropping corrected raw cloud after waiting %.3fs for its timestamped transforms; restarting two-cloud assembly."
                 % wait_s,
                 gap=True,
             )
@@ -249,7 +236,7 @@ class TemporalLidarNode(Node):
         try:
             points = extract_xyz_points(cloud_msg)
         except ValueError as error:
-            self._warn_throttled("Dropping malformed registered cloud: %s" % error)
+            self._warn_throttled("Dropping malformed corrected raw cloud: %s" % error)
             self._discard_partial()
             return
         translation, rotation = cloud_transform
@@ -266,36 +253,33 @@ class TemporalLidarNode(Node):
             points = np.ascontiguousarray(points[valid], dtype=np.float64)
         else:
             points = np.empty((0, 3), dtype=np.float64)
-        coverage_endpoints = self._coverage_endpoints(
-            base_translation, base_transform[1]
+        base_translation, base_rotation = base_transform
+        self._accept_cloud(
+            points,
+            pending.stamp.nanoseconds,
+            self._full_scan_free_endpoints(base_translation, base_rotation),
         )
-        self._accept_cloud(points, pending.stamp.nanoseconds, coverage_endpoints)
 
     def _discard_partial(self) -> None:
         self._assembler.discard()
 
-    def _coverage_endpoints(
+    def _full_scan_free_endpoints(
         self, base_translation: np.ndarray, base_rotation: np.ndarray
     ) -> np.ndarray:
-        """Build world-frame max-range endpoints for known-free ray directions.
+        """Return the 256 world-frame max-range rays of one complete 360-degree scan.
 
-        The training collector emits 128 completed-scan rays across the robot's
-        front 180-degree fan.  A cloud has no explicit no-return records, so we
-        retain that sensor coverage separately from physical point returns.
-        During later reprojection each endpoint keeps its direction but remains
-        at max range, exactly like the training observation's free-space rays.
+        A corrected raw PointCloud2 contains physical returns only.  Once two
+        adjacent 65-ms clouds have passed the pairing check, the hardware scan
+        contract establishes full 360-degree ray coverage.  These endpoints
+        preserve that known-free coverage independently of the point-return
+        height filter, exactly as the simulator preserves its free-space rays.
+        The assembler retains this set only when the current cloud completes a
+        valid pair, so rejected or missing pairs never fabricate a new frame.
         """
         yaw = math.atan2(float(base_rotation[1, 0]), float(base_rotation[0, 0]))
-        half_fov_rad = math.radians(self._config.coverage_fov_deg) / 2.0
-        local_angles = np.linspace(
-            -half_fov_rad,
-            half_fov_rad,
-            self._config.coverage_rays_per_completed_scan,
-            endpoint=True,
-            dtype=np.float64,
-        )
+        local_angles = np.linspace(-math.pi, math.pi, WORLD_BINS, endpoint=True, dtype=np.float64)
         world_angles = yaw + local_angles
-        endpoints = np.empty((local_angles.size, 3), dtype=np.float64)
+        endpoints = np.empty((WORLD_BINS, 3), dtype=np.float64)
         endpoints[:, 0] = base_translation[0] + self._config.max_range_m * np.cos(world_angles)
         endpoints[:, 1] = base_translation[1] + self._config.max_range_m * np.sin(world_angles)
         endpoints[:, 2] = base_translation[2]
@@ -305,16 +289,16 @@ class TemporalLidarNode(Node):
         self,
         points_xyz_m: np.ndarray,
         stamp_ns: int,
-        coverage_endpoints_xyz_m: np.ndarray,
+        free_endpoints_xyz_m: np.ndarray,
     ) -> None:
         completed, rejected_pair = self._assembler.push(
             points_xyz_m,
             stamp_ns,
-            coverage_endpoints_xyz_m=coverage_endpoints_xyz_m,
+            free_endpoints_xyz_m=free_endpoints_xyz_m,
         )
         if rejected_pair:
             self._warn_throttled(
-                "Registered-cloud interval %.3fs is not %.3f±%.3fs; restarting two-cloud assembly."
+                "Corrected-raw-cloud interval %.3fs is not %.3f±%.3fs; restarting two-cloud assembly."
                 % (
                     self._assembler.last_interval_s,
                     self._config.raw_cloud_period_s,

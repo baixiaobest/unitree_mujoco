@@ -1,4 +1,4 @@
-"""Pure geometry and history helpers for the temporal registered-cloud lidar path."""
+"""Pure geometry and history helpers for the temporal raw-cloud lidar path."""
 
 from __future__ import annotations
 
@@ -17,23 +17,24 @@ MAX_DISTANCE_M = 20.0
 
 @dataclass(frozen=True)
 class CompletedScan:
-    """One completed 130-ms scan stored in corrected world coordinates.
+    """One completed raw-cloud scan stored in corrected world coordinates.
 
-    ``points_xyz_m`` contains surface returns.  ``coverage_endpoints_xyz_m``
-    contains max-range pseudo endpoints for directions that the scan actually
-    observed.  The latter is essential: a measured no-return is known free
-    space, whereas a direction outside the scan coverage remains unknown.
+    ``points_xyz_m`` contains physical surface returns.  ``free_endpoints_xyz_m``
+    contains the max-range endpoints of directions covered by a valid completed
+    scan.  This mirrors the simulator's two ray states: a surface hit has a
+    reprojected range, while a covered no-return ray is valid free space at
+    ``max_distance``.
     """
 
     stamp_ns: int
     points_xyz_m: np.ndarray
-    coverage_endpoints_xyz_m: np.ndarray = field(
+    free_endpoints_xyz_m: np.ndarray = field(
         default_factory=lambda: np.empty((0, 3), dtype=np.float64)
     )
 
 
 class CompletedScanHistory:
-    """Newest-first bounded history of completed registered-cloud scans."""
+    """Newest-first bounded history of completed raw-cloud scans."""
 
     def __init__(self, depth: int = HISTORY_FRAMES) -> None:
         self._frames: deque[CompletedScan] = deque(maxlen=depth)
@@ -72,7 +73,7 @@ class TwoCloudAssembler:
         points_xyz_m: np.ndarray,
         stamp_ns: int,
         *,
-        coverage_endpoints_xyz_m: np.ndarray | None = None,
+        free_endpoints_xyz_m: np.ndarray | None = None,
     ) -> tuple[CompletedScan | None, bool]:
         """Return ``(completed_scan, rejected_prior_pair)`` for one raw cloud."""
         if self._pending_stamp_ns is None:
@@ -89,16 +90,16 @@ class TwoCloudAssembler:
             return None, True
 
         points = np.concatenate((self._pending_points_xyz_m, points_xyz_m), axis=0)
-        self.discard()
-        coverage = (
+        free_endpoints = (
             np.empty((0, 3), dtype=np.float64)
-            if coverage_endpoints_xyz_m is None
-            else np.asarray(coverage_endpoints_xyz_m, dtype=np.float64)
+            if free_endpoints_xyz_m is None
+            else np.asarray(free_endpoints_xyz_m, dtype=np.float64)
         )
+        self.discard()
         return CompletedScan(
             stamp_ns=stamp_ns,
             points_xyz_m=points,
-            coverage_endpoints_xyz_m=coverage,
+            free_endpoints_xyz_m=free_endpoints,
         ), False
 
 
@@ -161,11 +162,12 @@ def project_history_to_polar_bins(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Reduce every history frame into 360-degree polar bins.
 
-    A coverage endpoint creates a valid max-range (known-free) bin; a physical
-    return then replaces that range with the closest surface return.  Bins
-    without either remain max-range but invalid (unknown).  The bins are
-    world-angle indexed, so the debug cloud exactly matches the polar reduction
-    used before the policy's front-arc selection.
+    A free endpoint creates a valid max-range bin; a physical return then
+    replaces that range with the closest surface return.  Bins without either
+    remain max-range but invalid (unknown).  This is the same hit/free binning
+    contract as ``TemporalLidarScan`` in training.  The bins are world-angle
+    indexed, so the debug cloud exactly matches the polar reduction used before
+    the policy's front-arc selection.
     """
     if world_bins <= 0 or history_frames <= 0:
         raise ValueError("world_bins and history_frames must be positive")
@@ -179,20 +181,19 @@ def project_history_to_polar_bins(
         world_distances = np.full(world_bins, max_distance_m, dtype=np.float64)
         world_validity = np.zeros(world_bins, dtype=np.uint8)
 
-        coverage = np.asarray(scan.coverage_endpoints_xyz_m, dtype=np.float64)
-        if coverage.size:
-            if coverage.ndim != 2 or coverage.shape[1] < 2:
-                raise ValueError("Completed scan coverage endpoints must have shape (N, >=2)")
-            coverage_delta = coverage[:, :2] - current_xy[None, :]
-            coverage_finite = np.isfinite(coverage_delta).all(axis=1)
-            if np.any(coverage_finite):
-                coverage_angles = np.arctan2(
-                    coverage_delta[coverage_finite, 1], coverage_delta[coverage_finite, 0]
+        free_endpoints = np.asarray(scan.free_endpoints_xyz_m, dtype=np.float64)
+        if free_endpoints.size:
+            if free_endpoints.ndim != 2 or free_endpoints.shape[1] < 2:
+                raise ValueError("Completed scan free endpoints must have shape (N, >=2)")
+            free_delta = free_endpoints[:, :2] - current_xy[None, :]
+            free_finite = np.isfinite(free_delta).all(axis=1)
+            if np.any(free_finite):
+                free_angles = np.arctan2(free_delta[free_finite, 1], free_delta[free_finite, 0])
+                free_bins = (
+                    ((free_angles + math.pi) / (2.0 * math.pi) * world_bins).astype(np.int64) % world_bins
                 )
-                coverage_bins = (
-                    ((coverage_angles + math.pi) / (2.0 * math.pi) * world_bins).astype(np.int64) % world_bins
-                )
-                world_validity[coverage_bins] = 1
+                # Covered no-return rays are valid but always contribute max range.
+                world_validity[free_bins] = 1
 
         points = np.asarray(scan.points_xyz_m, dtype=np.float64)
         if points.size:

@@ -89,7 +89,7 @@ def parse_args() -> NavigationConfig:
     parser.add_argument("--imu-topic", type=str, default=DEFAULT_IMU_TOPIC,
                         help="Imu topic for angular velocity.")
     parser.add_argument("--temporal-lidar-topic", type=str, default=DEFAULT_TEMPORAL_LIDAR_TOPIC,
-                        help="TemporalLidarObservation topic produced from dense registered clouds.")
+                        help="TemporalLidarObservation topic produced from corrected raw clouds.")
     parser.add_argument("--cmd-topic", type=str, default=DEFAULT_CMD_TOPIC,
                         help="TwistStamped topic to publish velocity commands.")
     parser.add_argument("--map-frame", type=str, default=DEFAULT_MAP_FRAME,

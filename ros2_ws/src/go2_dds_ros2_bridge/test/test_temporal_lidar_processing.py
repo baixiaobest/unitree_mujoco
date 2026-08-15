@@ -30,11 +30,13 @@ def test_two_cloud_assembler_completes_only_adjacent_raw_clouds():
     second = np.array(((2.0, 0.0, 0.3),))
     completed, rejected = assembler.push(first, 1_000_000_000)
     assert completed is None and not rejected
-    completed, rejected = assembler.push(second, 1_065_000_000)
+    free_endpoints = np.array(((20.0, 0.0, 0.3),))
+    completed, rejected = assembler.push(second, 1_065_000_000, free_endpoints_xyz_m=free_endpoints)
     assert not rejected
     assert completed is not None
     assert completed.stamp_ns == 1_065_000_000
     assert completed.points_xyz_m.shape == (2, 3)
+    assert np.array_equal(completed.free_endpoints_xyz_m, free_endpoints)
 
 
 def test_two_cloud_assembler_discards_a_gapped_partial_pair():
@@ -47,11 +49,11 @@ def test_two_cloud_assembler_discards_a_gapped_partial_pair():
 
 
 def test_scan_age_matches_training_normalization_and_clamping():
-    assert normalized_scan_age(1_125_000_000, 1_000_000_000, 0.25) == 0.5
-    assert normalized_scan_age(1_500_000_000, 1_000_000_000, 0.25) == 1.0
+    assert normalized_scan_age(1_065_000_000, 1_000_000_000, 0.13) == 0.5
+    assert normalized_scan_age(1_500_000_000, 1_000_000_000, 0.13) == 1.0
 
 
-def test_unknown_bins_are_max_range_and_invalid():
+def test_uncovered_bins_are_max_range_and_invalid():
     distances, validity = project_history_to_front_arc(
         (CompletedScan(stamp_ns=1, points_xyz_m=np.empty((0, 3))),),
         current_xy_m=np.array((0.0, 0.0)),
@@ -63,29 +65,35 @@ def test_unknown_bins_are_max_range_and_invalid():
     assert np.all(validity == 0)
 
 
-def test_covered_empty_bin_is_known_free_but_uncovered_bin_is_unknown():
-    coverage = np.array(((MAX_DISTANCE_M, 0.0, 0.0),))
-    distances, validity = project_history_to_polar_bins(
-        (CompletedScan(stamp_ns=1, points_xyz_m=np.empty((0, 3)), coverage_endpoints_xyz_m=coverage),),
+def test_full_coverage_free_rays_make_every_front_bin_valid_at_max_range():
+    angles = np.linspace(-math.pi, math.pi, WORLD_BINS, endpoint=True)
+    free_endpoints = np.column_stack((
+        MAX_DISTANCE_M * np.cos(angles),
+        MAX_DISTANCE_M * np.sin(angles),
+        np.zeros(WORLD_BINS),
+    ))
+    distances, validity = project_history_to_front_arc(
+        (CompletedScan(stamp_ns=1, points_xyz_m=np.empty((0, 3)), free_endpoints_xyz_m=free_endpoints),),
         current_xy_m=np.zeros(2),
+        current_yaw_rad=0.0,
     )
-    front_bin = WORLD_BINS // 2
-    assert distances[0, front_bin] == 1.0
-    assert validity[0, front_bin] == 1
-    assert distances[0, 0] == 1.0
-    assert validity[0, 0] == 0
+    assert np.all(distances[0] == 1.0)
+    assert np.all(validity[0] == 1)
+    assert np.all(validity[1:] == 0)
 
 
-def test_surface_return_overrides_known_free_coverage_range():
-    coverage = np.array(((MAX_DISTANCE_M, 0.0, 0.0),))
-    points = np.array(((2.0, 0.0, 0.3),))
-    distances, validity = project_history_to_polar_bins(
-        (CompletedScan(stamp_ns=1, points_xyz_m=points, coverage_endpoints_xyz_m=coverage),),
-        current_xy_m=np.zeros(2),
+def test_physical_return_overrides_a_free_ray_in_its_world_bin():
+    history = (
+        CompletedScan(
+            stamp_ns=1,
+            points_xyz_m=np.array(((2.0, 0.0, 0.3),)),
+            free_endpoints_xyz_m=np.array(((MAX_DISTANCE_M, 0.0, 0.3),)),
+        ),
     )
-    front_bin = WORLD_BINS // 2
-    assert validity[0, front_bin] == 1
-    assert np.isclose(distances[0, front_bin], 2.0 / MAX_DISTANCE_M)
+    distances, validity = project_history_to_front_arc(history, current_xy_m=np.zeros(2), current_yaw_rad=0.0)
+    center = FOV_BINS // 2
+    assert validity[0, center] == 1
+    assert np.isclose(distances[0, center], 2.0 / MAX_DISTANCE_M)
 
 
 def test_nearest_world_return_wins_and_front_arc_is_yaw_centered():
