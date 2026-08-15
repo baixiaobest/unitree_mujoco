@@ -20,8 +20,13 @@ temporal_lidar:
     max_z_m: 1.4
     max_range_m: 20.0
     # The 130-ms checkpoint normalizes held completed-scan age by one scan period.
-    scan_age_max_s: 0.250
+    scan_age_max_s: 0.130
     # RViz-only clouds reconstructed from the exact polar bins sent to policy.
     # frame_0 is newest; frame_3 is oldest.  Disable on constrained systems.
     debug_enabled: true
     debug_topic_prefix: /temporal_lidar/debug
+    # Lidar ablation experiment: after four completed scans have been collected,
+    # keep injecting that exact (distance, validity, scan-age) policy observation.
+    # The node republishes with a fresh scan timestamp so navigation does not fail
+    # its lidar timeout. Leave false for all normal navigation runs.
+    freeze_observation: false

@@ -22,6 +22,7 @@ def test_history_keeps_newest_four_scans():
     for stamp in range(5):
         history.push(CompletedScan(stamp_ns=stamp, points_xyz_m=np.empty((0, 3))))
     assert [scan.stamp_ns for scan in history.newest_first()] == [4, 3, 2, 1]
+    assert len(history) == 4
 
 
 def test_two_cloud_assembler_completes_only_adjacent_raw_clouds():

@@ -52,6 +52,7 @@ DEFAULT_MAX_RANGE_M = MAX_DISTANCE_M
 DEFAULT_SCAN_AGE_MAX_S = 0.250
 DEFAULT_DEBUG_ENABLED = True
 DEFAULT_DEBUG_TOPIC_PREFIX = "/temporal_lidar/debug"
+DEFAULT_FREEZE_OBSERVATION = False
 
 FRAME_COLORS_RGB = (0xFF3333, 0x33CCFF, 0x66FF66, 0xCC66FF)
 
@@ -85,6 +86,7 @@ class TemporalLidarConfig:
     scan_age_max_s: float
     debug_enabled: bool
     debug_topic_prefix: str
+    freeze_observation: bool
 
 
 def parse_args() -> TemporalLidarConfig:
@@ -105,6 +107,15 @@ def parse_args() -> TemporalLidarConfig:
     parser.add_argument("--scan-age-max-s", type=float, default=DEFAULT_SCAN_AGE_MAX_S)
     parser.add_argument("--debug-enabled", action=argparse.BooleanOptionalAction, default=DEFAULT_DEBUG_ENABLED)
     parser.add_argument("--debug-topic-prefix", default=DEFAULT_DEBUG_TOPIC_PREFIX)
+    parser.add_argument(
+        "--freeze-observation",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_FREEZE_OBSERVATION,
+        help=(
+            "After four completed scans are available, freeze their projected policy observation and "
+            "republish it with fresh ROS timestamps. Intended only for lidar-ablation experiments."
+        ),
+    )
     args = parser.parse_args(rclpy.utilities.remove_ros_args(args=sys.argv)[1:])
     if args.raw_cloud_period_s <= 0 or args.intercloud_tolerance_s < 0:
         raise SystemExit("raw-cloud-period-s must be positive and intercloud-tolerance-s non-negative")
@@ -135,6 +146,9 @@ class TemporalLidarNode(Node):
         self._tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._history = CompletedScanHistory(HISTORY_FRAMES)
+        self._frozen_distances: np.ndarray | None = None
+        self._frozen_validity: np.ndarray | None = None
+        self._frozen_normalized_scan_age: float | None = None
         self._assembler = TwoCloudAssembler(
             self._config.raw_cloud_period_s, self._config.intercloud_tolerance_s
         )
@@ -161,10 +175,11 @@ class TemporalLidarNode(Node):
         self.get_logger().info(
             "Temporal lidar: '%s' -> '%s'; two consecutive corrected raw clouds (expected %.3fs apart) "
             "per completed scan, %d-frame history, %.1f Hz policy output; deferred TF processing at %.1f Hz. "
-            "RViz bin debug: %s."
+            "RViz bin debug: %s. Frozen-observation experiment: %s."
             % (self._config.input_topic, self._config.output_topic, self._config.raw_cloud_period_s,
                HISTORY_FRAMES, self._config.policy_hz, self._config.processing_hz,
-               self._config.debug_topic_prefix if self._config.debug_enabled else "disabled")
+               self._config.debug_topic_prefix if self._config.debug_enabled else "disabled",
+               "enabled" if self._config.freeze_observation else "disabled")
         )
 
     def _warn_throttled(self, message: str, *, gap: bool = False) -> None:
@@ -194,6 +209,8 @@ class TemporalLidarNode(Node):
         )
 
     def _cloud_callback(self, cloud_msg: PointCloud2) -> None:
+        if self._frozen_distances is not None:
+            return
         stamp = Time.from_msg(cloud_msg.header.stamp)
         if stamp.nanoseconds == 0:
             self._warn_throttled("Dropping corrected raw cloud without a header timestamp.")
@@ -212,6 +229,9 @@ class TemporalLidarNode(Node):
 
     def _process_pending_cloud(self) -> None:
         """Process one queued cloud after its exact timestamped transforms are available."""
+        if self._frozen_distances is not None:
+            self._pending_clouds.clear()
+            return
         if not self._pending_clouds:
             return
         pending = self._pending_clouds[0]
@@ -401,13 +421,28 @@ class TemporalLidarNode(Node):
             )
 
     def _publish_observation(self) -> None:
+        now = self.get_clock().now()
+        if self._frozen_distances is not None:
+            # ``scan_stamp`` must be current so navigation's completed-scan timeout
+            # continues to test only the frozen lidar contents, rather than timing
+            # out the experiment. The frozen normalized age remains part of the
+            # injected policy observation.
+            message = TemporalLidarObservation()
+            message.header.stamp = now.to_msg()
+            message.header.frame_id = self._config.base_frame
+            message.scan_stamp = now.to_msg()
+            message.normalized_scan_age = self._frozen_normalized_scan_age
+            message.distances = self._frozen_distances.tolist()
+            message.validity = self._frozen_validity.tolist()
+            self._publisher.publish(message)
+            return
+
         newest_stamp_ns = self._history.newest_stamp_ns
         if newest_stamp_ns is None:
             return
         pose = self._current_pose()
         if pose is None:
             return
-        now = self.get_clock().now()
         current_xy, current_yaw = pose
         world_distances, world_validity = project_history_to_polar_bins(
             self._history.newest_first(), current_xy_m=current_xy,
@@ -416,13 +451,27 @@ class TemporalLidarNode(Node):
         front_indices = front_arc_bin_indices(current_yaw, world_bins=WORLD_BINS, fov_bins=FOV_BINS)
         distances = world_distances[:, front_indices]
         validity = world_validity[:, front_indices]
+        normalized_age = normalized_scan_age(
+            now.nanoseconds, newest_stamp_ns, self._config.scan_age_max_s
+        )
+
+        if self._config.freeze_observation and len(self._history) >= HISTORY_FRAMES:
+            self._frozen_distances = distances.reshape(-1).copy()
+            self._frozen_validity = validity.reshape(-1).copy()
+            self._frozen_normalized_scan_age = normalized_age
+            self._pending_clouds.clear()
+            self._assembler.discard()
+            self.get_logger().warning(
+                "Frozen temporal-lidar observation after %d completed scans; live raw clouds now have no effect. "
+                "Restart with freeze_observation:=false to restore live lidar."
+                % HISTORY_FRAMES
+            )
+
         message = TemporalLidarObservation()
         message.header.stamp = now.to_msg()
         message.header.frame_id = self._config.base_frame
         message.scan_stamp = Time(nanoseconds=newest_stamp_ns).to_msg()
-        message.normalized_scan_age = normalized_scan_age(
-            now.nanoseconds, newest_stamp_ns, self._config.scan_age_max_s
-        )
+        message.normalized_scan_age = normalized_age
         message.distances = distances.reshape(-1).tolist()
         message.validity = validity.reshape(-1).tolist()
         self._publisher.publish(message)

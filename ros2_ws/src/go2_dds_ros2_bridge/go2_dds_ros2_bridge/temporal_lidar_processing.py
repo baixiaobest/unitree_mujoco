@@ -45,6 +45,10 @@ class CompletedScanHistory:
     def clear(self) -> None:
         self._frames.clear()
 
+    def __len__(self) -> int:
+        """Return the number of completed scans currently retained."""
+        return len(self._frames)
+
     @property
     def newest_stamp_ns(self) -> int | None:
         return self._frames[0].stamp_ns if self._frames else None
