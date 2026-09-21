@@ -90,7 +90,7 @@ def import_raw_dds_dependencies():
 def parse_args() -> BridgeConfig:
     parser = argparse.ArgumentParser(
         description=(
-            "Measure whether Unitree LowState.tick behaves like microseconds-from-boot by comparing "
+            "Measure the Unitree LowState.tick period by comparing "
             "DDS receive intervals against tick increments."
         )
     )
@@ -189,8 +189,8 @@ class LowStateTickExperiment(Node):
         self.get_logger().info(
             "Running LowState tick experiment on '%s' (domain=%d, interface=%s, ROS_DOMAIN_ID=%s). "
             "Publishing sec/tick mean on '%s', variance on '%s', mean receive interval on '%s', mean tick increment on '%s', "
-            "and tick increment summary on '%s' every %.2fs. If tick is microseconds-from-boot, "
-            "the mean should trend toward 1e-6 sec/tick."
+            "and tick increment summary on '%s' every %.2fs. Unitree documents controller tick in "
+            "milliseconds, so hardware should trend toward 1e-3 sec/tick."
             % (
                 self._config.dds_topic,
                 self._config.dds_domain_id,

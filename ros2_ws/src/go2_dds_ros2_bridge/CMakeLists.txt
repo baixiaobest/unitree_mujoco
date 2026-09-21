@@ -58,6 +58,13 @@ install(
 
 install(
   PROGRAMS
+    go2_dds_ros2_bridge/nodes/time_sync_diagnostic_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME time_sync_diagnostic
+)
+
+install(
+  PROGRAMS
     go2_dds_ros2_bridge/nodes/occupancy_2d_node.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME occupancy_2d

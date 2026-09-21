@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import sys
+from collections import deque
 from dataclasses import dataclass
 
 import rclpy
@@ -21,7 +22,10 @@ DEFAULT_ROS_IMU_TOPIC = "/imu/data_raw"
 DEFAULT_IMU_FRAME_ID = "imu_link"
 DEFAULT_IMU_CONFIG_FILE = "imu_bridge.yaml"
 LOWSTATE_TICK_NS = 1_000_000
-TIMESTAMP_RESYNC_THRESHOLD_NS = 1.0 * LOWSTATE_TICK_NS
+LOWSTATE_TICK_WRAPAROUND = 1 << 32
+LOWSTATE_TICK_HALF_WRAPAROUND = LOWSTATE_TICK_WRAPAROUND // 2
+CLOCK_OFFSET_WINDOW_NS = 5_000_000_000
+CLOCK_OFFSET_QUANTILE = 0.05
 IMU_DEFAULT_VARIANCES = {
     "orientation": 0.05,
     "angular_velocity": 0.02,
@@ -198,6 +202,12 @@ def stamp_from_ns(stamp_ns: int) -> Time:
     return stamp
 
 
+def low_quantile(values: deque[tuple[int, int]]) -> int:
+    ordered = sorted(offset_ns for _, offset_ns in values)
+    index = min(int(math.floor((len(ordered) - 1) * CLOCK_OFFSET_QUANTILE)), len(ordered) - 1)
+    return ordered[index]
+
+
 class DdsImuBridge(Node):
     def __init__(self, config: BridgeConfig, channel_subscriber_cls, dds_lowstate_type) -> None:
         super().__init__("go2_imu_bridge")
@@ -206,9 +216,10 @@ class DdsImuBridge(Node):
         self._orientation_covariance = diagonal_covariance(self._config.orientation_variance)
         self._angular_velocity_covariance = diagonal_covariance(self._config.angular_velocity_variance)
         self._linear_acceleration_covariance = diagonal_covariance(self._config.linear_acceleration_variance)
-        self._last_receive_time_ns: int | None = None
-        self._last_reconstructed_stamp_ns: int | None = None
-        self._timestamp_resync_count = 0
+        self._last_tick_raw: int | None = None
+        self._tick_epoch = 0
+        self._offset_samples: deque[tuple[int, int]] = deque()
+        self._last_stamp_ns: int | None = None
 
         self._dds_subscriber = channel_subscriber_cls(self._config.dds_topic, dds_lowstate_type)
         self._dds_subscriber.Init(self._dds_lowstate_handler, 10)
@@ -216,7 +227,7 @@ class DdsImuBridge(Node):
         ros_domain_id = os.environ.get("ROS_DOMAIN_ID", "<unset>")
         self.get_logger().info(
             "Bridging raw DDS lowstate '%s' (domain=%d, interface=%s) to ROS2 topic '%s' as frame '%s' (ROS_DOMAIN_ID=%s). "
-            "IMU timestamps are reconstructed from the known 1 ms LowState cadence and locally re-anchored when timing error grows too large. Variances source: %s."
+            "IMU timestamps use the LowState.tick millisecond clock and a rolling low-delay host-clock map. Variances source: %s."
             % (
                 self._config.dds_topic,
                 self._config.dds_domain_id,
@@ -242,7 +253,7 @@ class DdsImuBridge(Node):
             return
 
         receive_time_ns = self.get_clock().now().nanoseconds
-        stamp_ns = self._reconstruct_stamp_ns(receive_time_ns)
+        stamp_ns = self._stamp_from_tick(int(msg.tick), receive_time_ns)
 
         ros_msg = Imu()
         ros_msg.header.stamp = stamp_from_ns(stamp_ns)
@@ -281,31 +292,38 @@ class DdsImuBridge(Node):
             values[3] / norm,
         )
 
-    def _reconstruct_stamp_ns(self, receive_time_ns: int) -> int:
-        last_receive_time_ns = self._last_receive_time_ns
-        last_reconstructed_stamp_ns = self._last_reconstructed_stamp_ns
-        if last_receive_time_ns is None or last_reconstructed_stamp_ns is None:
-            self._last_receive_time_ns = receive_time_ns
-            self._last_reconstructed_stamp_ns = receive_time_ns
-            return receive_time_ns
+    def _stamp_from_tick(self, tick_raw: int, receive_time_ns: int) -> int:
+        """Map the Unitree millisecond tick to host time without callback jitter.
 
-        receive_delta_ns = max(receive_time_ns - last_receive_time_ns, 0)
-        elapsed_ticks = max(1, int(round(receive_delta_ns / LOWSTATE_TICK_NS)))
-        reconstructed_stamp_ns = last_reconstructed_stamp_ns + elapsed_ticks * LOWSTATE_TICK_NS
-        timing_error_ns = receive_time_ns - reconstructed_stamp_ns
+        DDS callback timing is observably bursty, so it must not define sample
+        times. The receive time is only used to maintain a slowly moving clock
+        offset. LowState.tick wraps as an unsigned 32-bit millisecond counter.
+        """
+        tick_raw &= LOWSTATE_TICK_WRAPAROUND - 1
+        last_tick_raw = self._last_tick_raw
+        if last_tick_raw is not None and tick_raw < last_tick_raw:
+            if last_tick_raw - tick_raw > LOWSTATE_TICK_HALF_WRAPAROUND:
+                self._tick_epoch += LOWSTATE_TICK_WRAPAROUND
+            else:
+                # A small backward jump indicates a producer restart, not a
+                # 49-day counter wrap. Re-anchor the new clock epoch safely.
+                self._tick_epoch = 0
+                self._offset_samples.clear()
+                self.get_logger().warning("LowState.tick moved backwards; re-anchoring the IMU clock map.")
 
-        if abs(timing_error_ns) > TIMESTAMP_RESYNC_THRESHOLD_NS:
-            self._timestamp_resync_count += 1
-            if self._timestamp_resync_count <= 5:
-                self.get_logger().warning(
-                    "Resynchronizing IMU timestamp reconstruction after %d ns timing error (receive_delta=%d ns, elapsed_ticks=%d)."
-                    % (timing_error_ns, receive_delta_ns, elapsed_ticks)
-                )
-            reconstructed_stamp_ns = receive_time_ns
-
-        self._last_receive_time_ns = receive_time_ns
-        self._last_reconstructed_stamp_ns = reconstructed_stamp_ns
-        return reconstructed_stamp_ns
+        self._last_tick_raw = tick_raw
+        tick_ns = (self._tick_epoch + tick_raw) * LOWSTATE_TICK_NS
+        self._offset_samples.append((receive_time_ns, receive_time_ns - tick_ns))
+        oldest_allowed_ns = receive_time_ns - CLOCK_OFFSET_WINDOW_NS
+        while self._offset_samples and self._offset_samples[0][0] < oldest_allowed_ns:
+            self._offset_samples.popleft()
+        stamp_ns = tick_ns + low_quantile(self._offset_samples)
+        # Preserve monotonic ROS timestamps even if a source delivers an old
+        # sample after a newer one.
+        if self._last_stamp_ns is not None and stamp_ns < self._last_stamp_ns:
+            stamp_ns = self._last_stamp_ns
+        self._last_stamp_ns = stamp_ns
+        return stamp_ns
 
 def main() -> None:
     config = parse_args()
