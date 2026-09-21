@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 import threading
 import torch
 import math
+import time
 import utils.math_utils as math_utils
 from utils.locomotion_mode import (
     TOPIC_POLICY_VEL_CMD,
@@ -11,6 +12,12 @@ from utils.locomotion_mode import (
 )
 from utils.mujoco_visualizer import MujocoVisualizer
 import pygame
+
+
+# Device-add/remove notifications are delivered through pygame's event queue.
+# Keeping retries out of the 50 Hz control loop also avoids repeatedly opening a
+# device while an operating system is still finishing a Bluetooth/USB reconnect.
+CONTROLLER_RECONNECT_INTERVAL_S = 1.0
 
 @dataclass
 class CommandConfig:
@@ -160,6 +167,8 @@ class GameControllerPose2dCommand(Pose2dCommand):
         self.cfg = cfg
         self.has_controller = False
         self.controller = None
+        self._next_controller_retry_time = 0.0
+        self._controller_unavailable_reported = False
         
         # Global mode tracking
         self.global_position = None  # Fixed global position when set
@@ -169,29 +178,52 @@ class GameControllerPose2dCommand(Pose2dCommand):
         # Initialize controller
         self._init_controller()
     
+    def _disconnect_controller(self, reason: str | None = None):
+        """Forget a failed controller and schedule a later reconnect attempt."""
+        controller = self.controller
+        self.controller = None
+        self.has_controller = False
+        self._next_controller_retry_time = time.monotonic() + CONTROLLER_RECONNECT_INTERVAL_S
+        if controller is not None:
+            try:
+                controller.quit()
+            except Exception:
+                # The device may already have been removed by SDL.
+                pass
+        if reason:
+            print(f"Controller disconnected ({reason}); retrying when it is available.")
+
     def _init_controller(self):
-        """Initialize the game controller"""
+        """Discover and initialize a controller, if one is currently connected."""
+        if time.monotonic() < self._next_controller_retry_time:
+            return
         try:
-            import pygame
             if not pygame.get_init():
                 pygame.init()
             if not pygame.joystick.get_init():
                 pygame.joystick.init()
-            
+
+            # Pump before querying the count so SDL incorporates devices added
+            # after this process (or pygame) was initialized.
+            pygame.event.pump()
             if pygame.joystick.get_count() > self.cfg.controller_index:
                 self.controller = pygame.joystick.Joystick(self.cfg.controller_index)
                 self.controller.init()
                 self.has_controller = True
-                print(f"Controller initialized: {self.controller.get_name()}")
+                self._controller_unavailable_reported = False
+                print(f"Controller connected: {self.controller.get_name()}")
             else:
-                print(f"No controller found at index {self.cfg.controller_index}")
+                self.controller = None
                 self.has_controller = False
-        except ImportError:
-            print("pygame not available. Install with 'pip install pygame'")
+                self._next_controller_retry_time = time.monotonic() + CONTROLLER_RECONNECT_INTERVAL_S
+                if not self._controller_unavailable_reported:
+                    print(f"No controller found at index {self.cfg.controller_index}; waiting for one to connect.")
+                    self._controller_unavailable_reported = True
+        except Exception as exc:
+            self.controller = None
             self.has_controller = False
-        except Exception as e:
-            print(f"Error initializing controller: {e}")
-            self.has_controller = False
+            self._next_controller_retry_time = time.monotonic() + CONTROLLER_RECONNECT_INTERVAL_S
+            print(f"Error initializing controller; will retry: {exc}")
     
     def read_controller_input(self):
         """Read input from the game controller"""
@@ -204,8 +236,10 @@ class GameControllerPose2dCommand(Pose2dCommand):
             return 0.0, 0.0
         
         try:
-            import pygame
             pygame.event.pump()  # Process event queue
+            if not self.controller.get_init():
+                self._disconnect_controller("device was removed")
+                return 0.0, 0.0
             
             # Read joystick axes
             x = self.controller.get_axis(self.cfg.x_axis)
@@ -222,9 +256,8 @@ class GameControllerPose2dCommand(Pose2dCommand):
                 y = 0.0
                 
             return x, y
-        except Exception as e:
-            print(f"Error reading controller: {e}")
-            self.has_controller = False
+        except Exception as exc:
+            self._disconnect_controller(str(exc))
             return 0.0, 0.0
     
     def is_a_button_pressed(self):
@@ -233,9 +266,13 @@ class GameControllerPose2dCommand(Pose2dCommand):
             return False
         
         try:
+            pygame.event.pump()
+            if not self.controller.get_init():
+                self._disconnect_controller("device was removed")
+                return False
             return self.controller.get_button(self.cfg.a_button_index)
-        except Exception as e:
-            print(f"Error reading A button: {e}")
+        except Exception as exc:
+            self._disconnect_controller(str(exc))
             return False
     
     def calculate_command_position(self, robot_pos, robot_yaw, x_input, y_input):
@@ -364,6 +401,8 @@ class GameControllerVelocityCommand(Command):
         self._target_command = torch.zeros(3, device=device, dtype=torch.float32)
         self.has_controller = False
         self.controller = None
+        self._next_controller_retry_time = 0.0
+        self._controller_unavailable_reported = False
         self._last_update_time = None
         self._init_controller()
 
@@ -371,25 +410,52 @@ class GameControllerVelocityCommand(Command):
     def command(self):
         return self._command
 
+    def _disconnect_controller(self, reason: str | None = None) -> None:
+        """Release a removed controller and retry discovery after a short delay."""
+        controller = self.controller
+        self.controller = None
+        self.has_controller = False
+        self._next_controller_retry_time = time.monotonic() + CONTROLLER_RECONNECT_INTERVAL_S
+        if controller is not None:
+            try:
+                controller.quit()
+            except Exception:
+                # SDL can invalidate the object before this call on unplug.
+                pass
+        if reason:
+            print(f"Controller disconnected ({reason}); retrying when it is available.")
+
     def _init_controller(self):
-        """Initialize the game controller."""
+        """Discover and initialize a controller, if one is currently connected."""
+        if time.monotonic() < self._next_controller_retry_time:
+            return
         try:
             if not pygame.get_init():
                 pygame.init()
             if not pygame.joystick.get_init():
                 pygame.joystick.init()
 
+            # SDL updates the joystick list when its event queue is pumped.
+            # This is necessary when the gamepad is connected after startup.
+            pygame.event.pump()
             if pygame.joystick.get_count() > self.cfg.controller_index:
                 self.controller = pygame.joystick.Joystick(self.cfg.controller_index)
                 self.controller.init()
                 self.has_controller = True
-                print(f"Controller initialized: {self.controller.get_name()}")
+                self._controller_unavailable_reported = False
+                print(f"Controller connected: {self.controller.get_name()}")
             else:
-                print(f"No controller found at index {self.cfg.controller_index}")
+                self.controller = None
                 self.has_controller = False
+                self._next_controller_retry_time = time.monotonic() + CONTROLLER_RECONNECT_INTERVAL_S
+                if not self._controller_unavailable_reported:
+                    print(f"No controller found at index {self.cfg.controller_index}; waiting for one to connect.")
+                    self._controller_unavailable_reported = True
         except Exception as exc:
+            self.controller = None
             print(f"Error initializing controller: {exc}")
             self.has_controller = False
+            self._next_controller_retry_time = time.monotonic() + CONTROLLER_RECONNECT_INTERVAL_S
 
     def _read_axis(self, axis_index: int):
         if not self.has_controller:
@@ -401,13 +467,15 @@ class GameControllerVelocityCommand(Command):
 
         try:
             pygame.event.pump()
+            if not self.controller.get_init():
+                self._disconnect_controller("device was removed")
+                return 0.0
             value = float(self.controller.get_axis(axis_index))
             if abs(value) < self.cfg.joystick_deadzone:
                 return 0.0
             return value
         except Exception as exc:
-            print(f"Error reading controller axis {axis_index}: {exc}")
-            self.has_controller = False
+            self._disconnect_controller(f"could not read axis {axis_index}: {exc}")
             return 0.0
 
     def setup(self):
@@ -759,8 +827,12 @@ class GameControllerPolicyHybridVelocityCommand(GameControllerVelocityCommand):
             return False
         try:
             pygame.event.pump()
+            if not self.controller.get_init():
+                self._disconnect_controller("device was removed")
+                return False
             return bool(self.controller.get_button(self.cfg.toggle_button_index))
-        except Exception:
+        except Exception as exc:
+            self._disconnect_controller(f"could not read toggle button: {exc}")
             return False
 
     def _publish_mode(self) -> None:
