@@ -1,7 +1,11 @@
 cbf_control:
   ros__parameters:
-    # Used immediately whenever the CBF detects a stale or invalid input.
-    # Tune these values from a braking test for the deployed gait and speed.
+    # A short invalid-input / rejected-solve interval holds the last accepted
+    # command exactly. Only a continuous interval beyond this grace period
+    # starts a controlled-stop slew. One accepted solve cancels that slew.
+    bad_solve_grace_s: 0.25
+    # Used only after bad_solve_grace_s has elapsed. Tune these values from a
+    # braking test for the deployed gait and speed.
     policy_topic: /policy_vel
     goal_region_topic: /navigation/in_goal_region
     velocity_topic: /estimated_velocity
@@ -14,8 +18,8 @@ cbf_control:
     velocity_timeout_s: 0.10
     # A scan combines two 65-ms rolling clouds.  Check its complete age from
     # the oldest point, but do not alter the Isaac-Lab CBF clearance from it.
-    scan_timeout_s: 0.40
-    d_margin_m: 0.70
+    scan_timeout_s: 0.50
+    d_margin_m: 0.5
     d_cbf_active_m: 5.0
     gamma1: 2.0
     gamma2: 2.0
@@ -24,10 +28,16 @@ cbf_control:
     # Absolute linear Kp used for both X and Y while navigation reports that
     # the robot is within its configured goal region; it is not a multiplier.
     goal_region_kp: 2.0
-    accel_limit_x: 5.0
-    accel_limit_y: 5.0
-    velocity_limit_x: 1.5
-    velocity_limit_y: 1.5
+    accel_limit_x: 1.5
+    accel_limit_y: 1.5
+    velocity_limit_x: 1.2
+    velocity_limit_y: 1.2
+    # Independent angular command governor. The static planar CBF does not
+    # constrain yaw, so every healthy policy yaw target is bounded here before
+    # it can reach /cmd_vel. Begin conservatively and increase only after a
+    # stand-alone turning test confirms the deployed gait is stable.
+    max_yaw_rate_radps: 1.6
+    max_yaw_accel_radps2: 1.0
     tracking_tau_s: 0.30
     max_lidar_points: 64
     slack_penalty: 1000.0
@@ -37,4 +47,3 @@ cbf_control:
     max_cbf_slack: 0.5
     fallback_linear_decel_mps2: 0.5
     fallback_yaw_decel_radps2: 1.0
-    recovery_valid_cycles: 3

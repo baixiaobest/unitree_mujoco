@@ -74,13 +74,15 @@ struct Config {
   double accel_limit_y{};
   double velocity_limit_x{};
   double velocity_limit_y{};
+  double max_yaw_rate_radps{};
+  double max_yaw_accel_radps2{};
   double tracking_tau_s{};
   int max_lidar_points{};
   double slack_penalty{};
   double max_cbf_slack{};
+  double bad_solve_grace_s{};
   double fallback_linear_decel_mps2{};
   double fallback_yaw_decel_radps2{};
-  int recovery_valid_cycles{};
 };
 
 struct Point {
@@ -104,7 +106,7 @@ struct SolverResult {
   double dual_residual{};
   std::array<double, kMaxPoints> slack{};
   double update_time_s{};
-  const char * status_text{"not_run"};
+  std::string status_text{"not_run"};
 };
 
 class StaticCbfQp {
@@ -204,7 +206,7 @@ class StaticCbfQp {
     result.solved = result.status == OSQP_SOLVED || result.status == OSQP_SOLVED_INACCURATE;
     result.timed_out_or_iter_limit = result.status == OSQP_TIME_LIMIT_REACHED ||
       result.status == OSQP_MAX_ITER_REACHED;
-    result.status_text = work_->info->status;
+    result.status_text = work_->info->status == nullptr ? "unknown" : work_->info->status;
     if (work_->solution == nullptr || work_->solution->x == nullptr) {
       return result;
     }
@@ -350,21 +352,24 @@ class CbfControlNode final : public rclcpp::Node {
     config.accel_limit_y = declare_parameter<double>("accel_limit_y", 5.0);
     config.velocity_limit_x = declare_parameter<double>("velocity_limit_x", 1.5);
     config.velocity_limit_y = declare_parameter<double>("velocity_limit_y", 1.5);
+    config.max_yaw_rate_radps = declare_parameter<double>("max_yaw_rate_radps", 0.6);
+    config.max_yaw_accel_radps2 = declare_parameter<double>("max_yaw_accel_radps2", 1.0);
     config.tracking_tau_s = declare_parameter<double>("tracking_tau_s", 0.30);
     config.max_lidar_points = declare_parameter<int>("max_lidar_points", 64);
     config.slack_penalty = declare_parameter<double>("slack_penalty", 1000.0);
     config.max_cbf_slack = declare_parameter<double>("max_cbf_slack", 0.05);
+    config.bad_solve_grace_s = declare_parameter<double>("bad_solve_grace_s", 0.25);
     config.fallback_linear_decel_mps2 = declare_parameter<double>("fallback_linear_decel_mps2", 0.5);
     config.fallback_yaw_decel_radps2 = declare_parameter<double>("fallback_yaw_decel_radps2", 1.0);
-    config.recovery_valid_cycles = declare_parameter<int>("recovery_valid_cycles", 3);
     if (config.control_hz <= 0.0 || config.solver_time_limit_s <= 0.0 || config.publish_deadline_s <= config.solver_time_limit_s ||
         config.tracking_tau_s <= 0.0 || config.d_margin_m <= 0.0 || config.d_cbf_active_m < config.d_margin_m ||
         config.gamma1 <= 0.0 || config.gamma2 <= 0.0 || config.kp_x <= 0.0 || config.kp_y <= 0.0 ||
         config.goal_region_kp <= 0.0 ||
         config.accel_limit_x <= 0.0 || config.accel_limit_y <= 0.0 || config.velocity_limit_x <= 0.0 ||
-        config.velocity_limit_y <= 0.0 || config.slack_penalty <= 0.0 ||
-        config.max_cbf_slack < 0.0 ||
-        config.recovery_valid_cycles < 1 || config.goal_region_topic.empty()) {
+        config.velocity_limit_y <= 0.0 || config.max_yaw_rate_radps <= 0.0 ||
+        config.max_yaw_accel_radps2 <= 0.0 || config.slack_penalty <= 0.0 ||
+        config.max_cbf_slack < 0.0 || config.bad_solve_grace_s <= 0.0 ||
+        config.goal_region_topic.empty()) {
       throw std::runtime_error("Invalid static CBF timing or physical parameters.");
     }
     return config;
@@ -524,7 +529,12 @@ class CbfControlNode final : public rclcpp::Node {
           command_y = std::clamp(measured_y + zoh * result.u_y, -config_.velocity_limit_y, config_.velocity_limit_y);
         }
       }
-      command_wz = policy->twist.angular.z;
+      // The planar CBF-QP does not constrain yaw.  Shape yaw here at the
+      // control rate so a new policy target cannot cause either an excessive
+      // yaw rate or an abrupt angular-command step at /cmd_vel.
+      command_wz = go2_cbf_control::limited_yaw_command(
+        policy->twist.angular.z, last_command_wz_, config_.max_yaw_rate_radps,
+        config_.max_yaw_accel_radps2, step_s);
     }
     const double elapsed_s = std::chrono::duration<double>(Clock::now() - start).count();
     if (elapsed_s > config_.publish_deadline_s) {
@@ -532,23 +542,34 @@ class CbfControlNode final : public rclcpp::Node {
       fallback_reason = "control_deadline_missed";
     }
     if (result.timed_out_or_iter_limit) ++timeout_count_;
-    if (!healthy) {
-      if (!fallback_active_) ++fallback_transitions_;
-      fallback_active_ = true;
-      healthy_cycles_ = 0;
-      command_x = go2_cbf_control::approach_zero(last_command_x_, config_.fallback_linear_decel_mps2 * step_s);
-      command_y = go2_cbf_control::approach_zero(last_command_y_, config_.fallback_linear_decel_mps2 * step_s);
-      command_wz = go2_cbf_control::approach_zero(last_command_wz_, config_.fallback_yaw_decel_radps2 * step_s);
-    } else if (fallback_active_) {
-      ++healthy_cycles_;
-      if (healthy_cycles_ < config_.recovery_valid_cycles) {
-        fallback_reason = "recovery_waiting_for_healthy_cycles";
+    double bad_solve_duration_s = 0.0;
+    bool holding_last_valid_command = false;
+    if (healthy) {
+      // An accepted result immediately replaces a held or braking command.
+      // Do not latch controlled stop: a later, fresh CBF solution is more
+      // informed than the command from the failed tick.
+      bad_solve_started_at_.reset();
+      if (fallback_active_) ++fallback_transitions_;
+      fallback_active_ = false;
+    } else {
+      if (!bad_solve_started_at_) bad_solve_started_at_ = start;
+      bad_solve_duration_s = std::max(
+        0.0, std::chrono::duration<double>(start - *bad_solve_started_at_).count());
+      const auto response = go2_cbf_control::fault_response(
+        false, bad_solve_duration_s, config_.bad_solve_grace_s);
+      if (response == go2_cbf_control::FaultResponse::kHoldLastValidCommand) {
+        // A transient rejected solve must not invent a braking command. Keep
+        // republishing the last accepted command until the grace period ends.
+        holding_last_valid_command = true;
+        command_x = last_command_x_;
+        command_y = last_command_y_;
+        command_wz = last_command_wz_;
+      } else {
+        if (!fallback_active_) ++fallback_transitions_;
+        fallback_active_ = true;
         command_x = go2_cbf_control::approach_zero(last_command_x_, config_.fallback_linear_decel_mps2 * step_s);
         command_y = go2_cbf_control::approach_zero(last_command_y_, config_.fallback_linear_decel_mps2 * step_s);
         command_wz = go2_cbf_control::approach_zero(last_command_wz_, config_.fallback_yaw_decel_radps2 * step_s);
-      } else {
-        fallback_active_ = false;
-        ++fallback_transitions_;
       }
     }
     const auto publish_start = Clock::now();
@@ -558,9 +579,11 @@ class CbfControlNode final : public rclcpp::Node {
     last_command_y_ = command_y;
     last_command_wz_ = command_wz;
     update_debug(policy_age, velocity_age, scan_age, margin, in_goal_region, policy ? policy->twist.linear.x : 0.0,
-      policy ? policy->twist.linear.y : 0.0, nominal_x, nominal_y, measured_x, measured_y,
+      policy ? policy->twist.linear.y : 0.0, policy ? policy->twist.angular.z : 0.0,
+      nominal_x, nominal_y, measured_x, measured_y,
       command_x, command_y, command_wz, elapsed_s, timer_lateness_s, release_to_publish_s, result,
-      candidates, candidate_count, selected, selected_count, timeout_count_, fallback_transitions_, fallback_reason);
+      candidates, candidate_count, selected, selected_count, timeout_count_, fallback_transitions_,
+      bad_solve_duration_s, holding_last_valid_command, fallback_reason);
   }
 
   void publish_command(const double x, const double y, const double wz) {
@@ -575,24 +598,28 @@ class CbfControlNode final : public rclcpp::Node {
 
   void update_debug(
     double policy_age, double velocity_age, double scan_age, double margin, bool in_goal_region,
-    double policy_x, double policy_y,
+    double policy_x, double policy_y, double policy_wz,
     double nominal_x, double nominal_y,
     double measured_x, double measured_y, double command_x, double command_y, double command_wz, double elapsed_s,
     double timer_lateness_s, double release_to_publish_s, const SolverResult & result,
     const std::array<Point, kScanBins> & candidates, int candidate_count,
     const std::array<Point, kMaxPoints> & selected, int selected_count,
-    uint64_t timeout_count, uint64_t fallback_transitions, const char * fallback_reason)
+    uint64_t timeout_count, uint64_t fallback_transitions, double bad_solve_duration_s,
+    bool holding_last_valid_command, const char * fallback_reason)
   {
     std::unique_lock<std::mutex> lock(debug_mutex_, std::try_to_lock);
     if (!lock.owns_lock()) return;
     debug_.policy_age = policy_age; debug_.velocity_age = velocity_age; debug_.scan_age = scan_age; debug_.margin = margin;
     debug_.in_goal_region = in_goal_region;
-    debug_.policy_x = policy_x; debug_.policy_y = policy_y;
+    debug_.policy_x = policy_x; debug_.policy_y = policy_y; debug_.policy_wz = policy_wz;
     debug_.nominal_x = nominal_x; debug_.nominal_y = nominal_y; debug_.measured_x = measured_x; debug_.measured_y = measured_y;
     debug_.command_x = command_x; debug_.command_y = command_y; debug_.command_wz = command_wz; debug_.elapsed_s = elapsed_s;
     debug_.timer_lateness_s = timer_lateness_s; debug_.release_to_publish_s = release_to_publish_s;
     debug_.timeout_count = timeout_count; debug_.fallback_transitions = fallback_transitions;
-    debug_.result = result; debug_.fallback = fallback_active_; debug_.fallback_reason = fallback_reason; debug_.candidates = candidates;
+    debug_.bad_solve_duration_s = bad_solve_duration_s;
+    debug_.result = result; debug_.fallback = fallback_active_;
+    debug_.holding_last_valid_command = holding_last_valid_command;
+    debug_.fallback_reason = fallback_reason; debug_.candidates = candidates;
     debug_.candidate_count = candidate_count; debug_.selected = selected; debug_.selected_count = selected_count;
   }
 
@@ -642,27 +669,35 @@ class CbfControlNode final : public rclcpp::Node {
       copy.measured_x + copy.nominal_x / (copy.in_goal_region ? config_.goal_region_kp : config_.kp_x),
       copy.measured_y + copy.nominal_y / (copy.in_goal_region ? config_.goal_region_kp : config_.kp_y),
       1.0F, 1.0F, 0.0F));
-    markers.markers.push_back(velocity_marker(3, copy.fallback ? "fallback" : "safe", copy.command_x, copy.command_y,
-      copy.fallback ? 1.0F : 0.0F, copy.fallback ? 0.0F : 1.0F, 0.0F));
+    const bool degraded = copy.fallback || copy.holding_last_valid_command;
+    const char * command_label = copy.fallback ? "controlled_stop" :
+      (copy.holding_last_valid_command ? "holding_last_valid" : "safe");
+    markers.markers.push_back(velocity_marker(3, command_label, copy.command_x, copy.command_y,
+      degraded ? 1.0F : 0.0F, degraded ? 0.0F : 1.0F, 0.0F));
     marker_pub_->publish(markers);
     diagnostic_msgs::msg::DiagnosticStatus status;
     status.name = "go2_cbf_control";
     status.hardware_id = "go2";
-    status.level = copy.fallback ? diagnostic_msgs::msg::DiagnosticStatus::WARN : diagnostic_msgs::msg::DiagnosticStatus::OK;
-    status.message = copy.fallback ? std::string("controlled_stop: ") + copy.fallback_reason : copy.result.status_text;
+    status.level = degraded ? diagnostic_msgs::msg::DiagnosticStatus::WARN : diagnostic_msgs::msg::DiagnosticStatus::OK;
+    status.message = copy.fallback ? std::string("controlled_stop: ") + copy.fallback_reason :
+      (copy.holding_last_valid_command ? std::string("holding_last_valid_command: ") + copy.fallback_reason :
+      copy.result.status_text);
     auto add = [&status](const std::string & key, const double value) {
       diagnostic_msgs::msg::KeyValue item; item.key = key; item.value = std::to_string(value); status.values.push_back(item);
     };
     auto add_text = [&status](const std::string & key, const char * value) {
       diagnostic_msgs::msg::KeyValue item; item.key = key; item.value = value; status.values.push_back(item);
     };
-    add_text("solver_status", copy.result.status_text); add_text("fallback_reason", copy.fallback_reason);
+    add_text("solver_status", copy.result.status_text.c_str()); add_text("fallback_reason", copy.fallback_reason);
     add("policy_age_s", copy.policy_age); add("velocity_age_s", copy.velocity_age); add("scan_age_s", copy.scan_age);
     add("cbf_margin_m", copy.margin);
     add("in_goal_region", copy.in_goal_region ? 1.0 : 0.0);
     add("goal_region_kp", config_.goal_region_kp);
     add("effective_kp_x", copy.in_goal_region ? config_.goal_region_kp : config_.kp_x);
     add("effective_kp_y", copy.in_goal_region ? config_.goal_region_kp : config_.kp_y);
+    add("policy_wz_radps", copy.policy_wz); add("command_wz_radps", copy.command_wz);
+    add("max_yaw_rate_radps", config_.max_yaw_rate_radps);
+    add("max_yaw_accel_radps2", config_.max_yaw_accel_radps2);
     add("solve_time_s", copy.result.solve_time_s); add("control_elapsed_s", copy.elapsed_s);
     add("qp_update_time_s", copy.result.update_time_s); add("timer_lateness_s", copy.timer_lateness_s);
     add("release_to_publish_s", copy.release_to_publish_s); add("iterations", copy.result.iterations);
@@ -670,16 +705,19 @@ class CbfControlNode final : public rclcpp::Node {
     add("max_slack", copy.result.max_slack); add("candidate_count", static_cast<double>(copy.candidate_count));
     add("selected_count", static_cast<double>(copy.selected_count)); add("timeout_count", copy.timeout_count);
     add("fallback_transitions", copy.fallback_transitions);
+    add("bad_solve_duration_s", copy.bad_solve_duration_s);
     diagnostic_msgs::msg::DiagnosticArray array; array.header.stamp = now(); array.status.push_back(std::move(status)); status_pub_->publish(array);
   }
 
   struct DebugState {
     double policy_age{std::numeric_limits<double>::infinity()}, velocity_age{std::numeric_limits<double>::infinity()};
-    double scan_age{std::numeric_limits<double>::infinity()}, margin{}, policy_x{}, policy_y{}, nominal_x{}, nominal_y{}, measured_x{}, measured_y{};
+    double scan_age{std::numeric_limits<double>::infinity()}, margin{}, policy_x{}, policy_y{}, policy_wz{}, nominal_x{}, nominal_y{}, measured_x{}, measured_y{};
     bool in_goal_region{};
     double command_x{}, command_y{}, command_wz{}, elapsed_s{}, timer_lateness_s{}, release_to_publish_s{};
     uint64_t timeout_count{}, fallback_transitions{};
-    SolverResult result{}; bool fallback{true}; const char * fallback_reason{"not_run"};
+    double bad_solve_duration_s{};
+    SolverResult result{}; bool fallback{}; bool holding_last_valid_command{};
+    const char * fallback_reason{"not_run"};
     std::array<Point, kScanBins> candidates{}; int candidate_count{};
     std::array<Point, kMaxPoints> selected{}; int selected_count{};
   };
@@ -701,7 +739,10 @@ class CbfControlNode final : public rclcpp::Node {
   std::optional<bool> in_goal_region_;
   Clock::time_point last_control_{};
   double last_command_x_{}, last_command_y_{}, last_command_wz_{};
-  bool fallback_active_{true}; int healthy_cycles_{}; uint64_t timeout_count_{}, fallback_transitions_{}; DebugState debug_{};
+  bool fallback_active_{};
+  std::optional<Clock::time_point> bad_solve_started_at_;
+  uint64_t timeout_count_{}, fallback_transitions_{};
+  DebugState debug_{};
 };
 
 }  // namespace
