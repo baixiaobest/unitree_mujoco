@@ -6,6 +6,11 @@ navigation:
     imu_topic: /imu/data_fastlio
     temporal_lidar_topic: /temporal_lidar/observation
     cmd_topic: /cmd_vel
+    policy_vel_topic: /policy_vel
+    goal_region_topic: /navigation/in_goal_region
+    # "direct" preserves the previous navigation -> /cmd_vel path. The launch
+    # file overrides this to "cbf" when the native CBF controller is enabled.
+    command_mode: direct
     map_frame: camera_init_correct
     body_frame: base_link
     policy_hz: 12.5
@@ -20,4 +25,7 @@ navigation:
     max_tf_age_sec: 1.0
     goal_reached_distance: 0.15
     goal_reached_angle: 0.523
+    # Navigation owns the geometric goal-region condition. CBF owns the
+    # associated tracking-Kp multiplier in cbf_control.yaml.
+    goal_region_distance: 0.60
     device: cuda

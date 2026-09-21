@@ -19,17 +19,19 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointField
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from go2_dds_ros2_bridge_msgs.msg import TemporalLidarObservation
+from go2_dds_ros2_bridge_msgs.msg import CbfScan, TemporalLidarObservation
 from go2_dds_ros2_bridge.occupancy_map import extract_xyz_time_points
 from go2_dds_ros2_bridge.temporal_lidar_processing import (
     CAPTURE_FOV_DEG,
     CAPTURE_RAYS,
+    CBF_BINS,
     CompletedScan,
     CompletedScanHistory,
     FOV_BINS,
     HISTORY_FRAMES,
     MAX_DISTANCE_M,
     WORLD_BINS,
+    cbf_bins_from_capture,
     deskew_points_to_reference_base,
     front_arc_bin_indices,
     is_adjacent_cloud_pair,
@@ -44,6 +46,7 @@ from go2_dds_ros2_bridge.tf_utils import rotation_matrix_from_quaternion_xyzw
 
 DEFAULT_INPUT_TOPIC = "/utlidar/time_corrected/cloud"
 DEFAULT_OUTPUT_TOPIC = "/temporal_lidar/observation"
+DEFAULT_CBF_SCAN_TOPIC = "/cbf/scan"
 DEFAULT_MAP_FRAME = "camera_init_correct"
 DEFAULT_BASE_FRAME = "base_link"
 DEFAULT_RAW_CLOUD_PERIOD_S = 0.065
@@ -51,6 +54,13 @@ DEFAULT_INTERCLOUD_TOLERANCE_S = 0.025
 DEFAULT_POLICY_HZ = 12.5
 DEFAULT_PROCESSING_HZ = 100.0
 DEFAULT_TF_WAIT_S = 0.25
+# FAST-LIO publishes scan-end TF stamps after converting an epoch-scale double
+# back to integer nanoseconds.  Temporal lidar instead retains the corrected
+# integer cloud stamp and its per-point offset.  The two representations can
+# differ by a few hundred nanoseconds, which TF2 treats as future
+# extrapolation.  This is deliberately only 50 us: it repairs representation
+# rounding, not genuine sensor/TF latency.
+DEFAULT_TF_TIMESTAMP_TOLERANCE_S = 0.000050
 DEFAULT_MAX_PENDING_CLOUDS = 16
 DEFAULT_MIN_Z_M = -0.25
 DEFAULT_MAX_Z_M = 1.4
@@ -85,6 +95,7 @@ OBSERVATION_QOS = QoSProfile(
 class TemporalLidarConfig:
     input_topic: str
     output_topic: str
+    cbf_scan_topic: str
     map_frame: str
     base_frame: str
     raw_cloud_period_s: float
@@ -92,6 +103,7 @@ class TemporalLidarConfig:
     policy_hz: float
     processing_hz: float
     tf_wait_s: float
+    tf_timestamp_tolerance_s: float
     max_pending_clouds: int
     min_z_m: float
     max_z_m: float
@@ -113,6 +125,7 @@ def parse_args() -> TemporalLidarConfig:
     parser = argparse.ArgumentParser(description="Build four-frame temporal lidar observations from corrected raw clouds.")
     parser.add_argument("--input-topic", default=DEFAULT_INPUT_TOPIC)
     parser.add_argument("--output-topic", default=DEFAULT_OUTPUT_TOPIC)
+    parser.add_argument("--cbf-scan-topic", default=DEFAULT_CBF_SCAN_TOPIC)
     parser.add_argument("--map-frame", default=DEFAULT_MAP_FRAME)
     parser.add_argument("--base-frame", default=DEFAULT_BASE_FRAME)
     parser.add_argument("--raw-cloud-period-s", type=float, default=DEFAULT_RAW_CLOUD_PERIOD_S)
@@ -120,6 +133,12 @@ def parse_args() -> TemporalLidarConfig:
     parser.add_argument("--policy-hz", type=float, default=DEFAULT_POLICY_HZ)
     parser.add_argument("--processing-hz", type=float, default=DEFAULT_PROCESSING_HZ)
     parser.add_argument("--tf-wait-s", type=float, default=DEFAULT_TF_WAIT_S)
+    parser.add_argument(
+        "--tf-timestamp-tolerance-s",
+        type=float,
+        default=DEFAULT_TF_TIMESTAMP_TOLERANCE_S,
+        help="Maximum bounded lookback used only after an exact timestamped TF lookup fails.",
+    )
     parser.add_argument("--max-pending-clouds", type=int, default=DEFAULT_MAX_PENDING_CLOUDS)
     parser.add_argument("--min-z-m", type=float, default=DEFAULT_MIN_Z_M)
     parser.add_argument("--max-z-m", type=float, default=DEFAULT_MAX_Z_M)
@@ -150,12 +169,16 @@ def parse_args() -> TemporalLidarConfig:
         raise SystemExit("policy-hz, processing-hz, and max-range-m must be positive")
     if args.tf_wait_s <= 0 or args.max_pending_clouds <= 0:
         raise SystemExit("tf-wait-s and max-pending-clouds must be positive")
+    if not 0.0 <= args.tf_timestamp_tolerance_s <= 0.005:
+        raise SystemExit("tf-timestamp-tolerance-s must be in [0, 0.005]")
     if args.max_z_m <= args.min_z_m or args.scan_age_max_s <= 0:
         raise SystemExit("max-z-m must exceed min-z-m and scan-age-max-s must be positive")
     if not args.point_time_field or args.point_time_scale_s <= 0.0:
         raise SystemExit("point-time-field must be non-empty and point-time-scale-s must be positive")
-    if args.capture_rays <= 0 or not 0.0 < args.capture_fov_deg <= 360.0:
-        raise SystemExit("capture-rays must be positive and capture-fov-deg must be in (0, 360]")
+    if args.capture_rays <= 0 or args.capture_rays % CBF_BINS != 0 or not 0.0 < args.capture_fov_deg <= 360.0:
+        raise SystemExit(
+            "capture-rays must be a positive multiple of %d and capture-fov-deg must be in (0, 360]" % CBF_BINS
+        )
     if args.min_points_per_capture_ray <= 0 or not 0.0 <= args.capture_return_percentile <= 1.0:
         raise SystemExit("Invalid capture-ray return-reduction parameters")
     if args.world_bins <= 0 or args.world_bins > WORLD_BINS or WORLD_BINS % args.world_bins != 0:
@@ -198,6 +221,8 @@ class TemporalLidarNode(Node):
         self._gap_warning_last_ns = 0
         self._subscription = self.create_subscription(PointCloud2, self._config.input_topic, self._cloud_callback, CLOUD_QOS)
         self._publisher = self.create_publisher(TemporalLidarObservation, self._config.output_topic, OBSERVATION_QOS)
+        self._cbf_scan_publisher = self.create_publisher(CbfScan, self._config.cbf_scan_topic, OBSERVATION_QOS)
+        self._cbf_scan_sequence = 0
         self._debug_frame_publishers = []
         self._debug_all_publisher = None
         self._debug_full_360_publisher = None
@@ -237,14 +262,44 @@ class TemporalLidarNode(Node):
             self.get_logger().warning(message)
 
     def _lookup_transform(self, target_frame: str, source_frame: str, stamp: Time) -> tuple[np.ndarray, np.ndarray] | None:
-        """Look up a transform without blocking this node's single-threaded executor."""
+        """Look up a transform without blocking this node's single-threaded executor.
+
+        The first lookup is always at the exact physical timestamp.  A bounded
+        lookback is tried only if it fails, to bridge sub-microsecond rounding
+        differences between FAST-LIO's double-derived TF stamp and the cloud's
+        integer-nanosecond scan-end stamp.  It is not a general stale-TF
+        fallback: normal ``tf_wait_s`` retry/drop behavior remains in force.
+        """
         if target_frame == source_frame:
             return np.zeros(3, dtype=np.float64), np.eye(3, dtype=np.float64)
         try:
             transform = self._tf_buffer.lookup_transform(target_frame, source_frame, stamp, timeout=Duration())
-        except TransformException as error:
-            self._warn_throttled("Missing timestamped transform %s <- %s: %s" % (target_frame, source_frame, error))
-            return None
+        except TransformException as exact_error:
+            tolerance_ns = int(round(self._config.tf_timestamp_tolerance_s * 1e9))
+            if tolerance_ns <= 0 or stamp.nanoseconds <= tolerance_ns:
+                self._warn_throttled(
+                    "Missing timestamped transform %s <- %s: %s" % (target_frame, source_frame, exact_error)
+                )
+                return None
+            try:
+                transform = self._tf_buffer.lookup_transform(
+                    target_frame,
+                    source_frame,
+                    Time(nanoseconds=stamp.nanoseconds - tolerance_ns),
+                    timeout=Duration(),
+                )
+            except TransformException as fallback_error:
+                self._warn_throttled(
+                    "Missing timestamped transform %s <- %s: exact lookup: %s; %.0f-us bounded lookback: %s"
+                    % (
+                        target_frame,
+                        source_frame,
+                        exact_error,
+                        self._config.tf_timestamp_tolerance_s * 1e6,
+                        fallback_error,
+                    )
+                )
+                return None
         translation = transform.transform.translation
         rotation = transform.transform.rotation
         return (
@@ -316,6 +371,7 @@ class TemporalLidarNode(Node):
         self._pending_clouds.popleft()
         self._pending_clouds.popleft()
         self._history.push(completed)
+        self._publish_cbf_scan(completed)
 
     def _decode_rolling_cloud(self, pending: PendingCloud) -> DecodedRollingCloud:
         points, offsets, time_field = extract_xyz_time_points(
@@ -390,7 +446,25 @@ class TemporalLidarNode(Node):
             stamp_ns=second.end_stamp_ns,
             endpoints_xyz_m=capture_endpoints_world,
             ray_states=ray_states,
+            endpoints_base_m=capture_endpoints_reference,
+            scan_start_ns=min(first.start_stamp_ns, second.start_stamp_ns),
         )
+
+    def _publish_cbf_scan(self, completed: CompletedScan) -> None:
+        """Publish the newest physical hit bins used by the static CBF only."""
+        if completed.endpoints_base_m is None or completed.scan_start_ns is None:
+            self.get_logger().error("Completed scan lacks base-frame geometry; CBF scan was not published.")
+            return
+        points_xy_m, hits = cbf_bins_from_capture(completed.endpoints_base_m, completed.ray_states, cbf_bins=CBF_BINS)
+        message = CbfScan()
+        message.header.stamp = Time(nanoseconds=completed.stamp_ns).to_msg()
+        message.header.frame_id = self._config.base_frame
+        message.scan_start = Time(nanoseconds=completed.scan_start_ns).to_msg()
+        message.sequence = self._cbf_scan_sequence
+        self._cbf_scan_sequence = (self._cbf_scan_sequence + 1) & 0xFFFFFFFF
+        message.points_xy_m = points_xy_m.reshape(-1).tolist()
+        message.hits = hits.tolist()
+        self._cbf_scan_publisher.publish(message)
 
     def _current_pose(self) -> tuple[np.ndarray, float] | None:
         result = self._lookup_transform(self._config.map_frame, self._config.base_frame, Time())

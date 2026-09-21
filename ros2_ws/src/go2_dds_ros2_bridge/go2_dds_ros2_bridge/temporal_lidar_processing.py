@@ -14,6 +14,7 @@ from go2_dds_ros2_bridge.tf_utils import quaternion_from_rotation_matrix
 HISTORY_FRAMES = 4
 WORLD_BINS = 256
 FOV_BINS = 128
+CBF_BINS = 128
 MAX_DISTANCE_M = 20.0
 CAPTURE_RAYS = 256
 CAPTURE_FOV_DEG = 180.0
@@ -32,6 +33,8 @@ class CompletedScan:
     stamp_ns: int
     endpoints_xyz_m: np.ndarray
     ray_states: np.ndarray
+    endpoints_base_m: np.ndarray | None = None
+    scan_start_ns: int | None = None
 
 
 class CompletedScanHistory:
@@ -145,6 +148,41 @@ def reduce_front_capture_rays(
         endpoints[ray_index] = (hit_range * math.cos(ray_angle), hit_range * math.sin(ray_angle), hit_z)
         ray_states[ray_index] = 2
     return endpoints, ray_states
+
+
+def cbf_bins_from_capture(
+    endpoints_xyz_m: np.ndarray,
+    ray_states: np.ndarray,
+    *,
+    cbf_bins: int = CBF_BINS,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return nearest real hits in fixed front CBF bins.
+
+    The policy observation deliberately represents observed free space and
+    upsamples bins. CBF must instead retain only actual returns and must not
+    duplicate one reflection into multiple constraints.
+    """
+    endpoints = np.asarray(endpoints_xyz_m, dtype=np.float64)
+    states = np.asarray(ray_states, dtype=np.uint8)
+    if endpoints.ndim != 2 or endpoints.shape[1] < 2 or states.shape != (endpoints.shape[0],):
+        raise ValueError("endpoints_xyz_m must be (N, >=2) and ray_states must have shape (N,)")
+    if cbf_bins <= 0 or endpoints.shape[0] % cbf_bins != 0:
+        raise ValueError("capture ray count must be a positive integer multiple of cbf_bins")
+
+    rays_per_bin = endpoints.shape[0] // cbf_bins
+    points = np.zeros((cbf_bins, 2), dtype=np.float32)
+    hits = np.zeros(cbf_bins, dtype=np.uint8)
+    for bin_index in range(cbf_bins):
+        start = bin_index * rays_per_bin
+        stop = start + rays_per_bin
+        candidates = endpoints[start:stop, :2]
+        valid = (states[start:stop] == 2) & np.isfinite(candidates).all(axis=1)
+        if not np.any(valid):
+            continue
+        valid_points = candidates[valid]
+        points[bin_index] = valid_points[np.argmin(np.linalg.norm(valid_points, axis=1))]
+        hits[bin_index] = 1
+    return points, hits
 
 
 def deskew_points_to_reference_base(
