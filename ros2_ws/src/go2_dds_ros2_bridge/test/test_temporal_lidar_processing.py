@@ -6,6 +6,7 @@ from go2_dds_ros2_bridge.temporal_lidar_processing import (
     CompletedScan,
     CompletedScanHistory,
     cbf_bins_from_capture,
+    cbf_static_bins_from_points,
     deskew_points_to_reference_base,
     FOV_BINS,
     MAX_DISTANCE_M,
@@ -94,6 +95,22 @@ def test_cbf_bins_keep_only_nearest_real_hit_without_free_space_constraints():
     assert np.array_equal(hits, np.array((1, 0), dtype=np.uint8))
     assert np.allclose(points[0], (1.0, 0.0))
     assert np.allclose(points[1], (0.0, 0.0))
+
+
+def test_static_cbf_bins_keep_only_real_side_and_rear_returns():
+    points = np.array(
+        (
+            (3.0, 0.0, 0.3),  # Front: excluded; it belongs to the front bins.
+            (-1.0, 1.0, 0.3),  # Left-rear.
+            (-1.0, 0.0, 0.3),  # Rear.
+            (-1.0, -1.0, 0.3),  # Right-rear.
+        )
+    )
+    static_points, hits = cbf_static_bins_from_points(points, static_bins=4, range_percentile=0.0)
+    assert np.array_equal(hits, np.array((0, 1, 1, 1), dtype=np.uint8))
+    assert np.allclose(static_points[1], (-1.0, 1.0))
+    assert np.allclose(static_points[2], (-1.0, 0.0))
+    assert np.allclose(static_points[3], (-1.0, -1.0))
 
 
 def test_empty_cloud_produces_valid_free_rays_only_in_front_fan():

@@ -19,7 +19,7 @@ cbf_control:
     # A scan combines two 65-ms rolling clouds.  Check its complete age from
     # the oldest point, but do not alter the Isaac-Lab CBF clearance from it.
     scan_timeout_s: 0.50
-    d_margin_m: 0.5
+    d_margin_m: 0.4
     d_cbf_active_m: 5.0
     gamma1: 2.0
     gamma2: 2.0
@@ -36,8 +36,8 @@ cbf_control:
     # constrain yaw, so every healthy policy yaw target is bounded here before
     # it can reach /cmd_vel. Begin conservatively and increase only after a
     # stand-alone turning test confirms the deployed gait is stable.
-    max_yaw_rate_radps: 1.6
-    max_yaw_accel_radps2: 1.0
+    max_yaw_rate_radps: 2.0
+    max_yaw_accel_radps2: 3.0
     tracking_tau_s: 0.30
     max_lidar_points: 64
     slack_penalty: 1000.0

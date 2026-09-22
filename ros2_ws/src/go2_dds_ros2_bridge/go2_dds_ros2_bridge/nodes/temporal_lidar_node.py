@@ -25,6 +25,7 @@ from go2_dds_ros2_bridge.temporal_lidar_processing import (
     CAPTURE_FOV_DEG,
     CAPTURE_RAYS,
     CBF_BINS,
+    CBF_STATIC_BINS,
     CompletedScan,
     CompletedScanHistory,
     FOV_BINS,
@@ -32,6 +33,7 @@ from go2_dds_ros2_bridge.temporal_lidar_processing import (
     MAX_DISTANCE_M,
     WORLD_BINS,
     cbf_bins_from_capture,
+    cbf_static_bins_from_points,
     deskew_points_to_reference_base,
     front_arc_bin_indices,
     is_adjacent_cloud_pair,
@@ -64,6 +66,10 @@ DEFAULT_TF_TIMESTAMP_TOLERANCE_S = 0.000050
 DEFAULT_MAX_PENDING_CLOUDS = 16
 DEFAULT_MIN_Z_M = -0.25
 DEFAULT_MAX_Z_M = 1.4
+# Side/rear coverage is short-range and its useful obstacle returns are lower
+# than the policy's front-obstacle band. Keep this aligned with occupancy_2d
+# rather than discarding them with the front/policy threshold.
+DEFAULT_STATIC_MIN_Z_M = -0.25
 DEFAULT_MAX_RANGE_M = MAX_DISTANCE_M
 DEFAULT_SCAN_AGE_MAX_S = 0.250
 DEFAULT_DEBUG_ENABLED = True
@@ -106,6 +112,7 @@ class TemporalLidarConfig:
     tf_timestamp_tolerance_s: float
     max_pending_clouds: int
     min_z_m: float
+    static_min_z_m: float
     max_z_m: float
     max_range_m: float
     scan_age_max_s: float
@@ -141,6 +148,12 @@ def parse_args() -> TemporalLidarConfig:
     )
     parser.add_argument("--max-pending-clouds", type=int, default=DEFAULT_MAX_PENDING_CLOUDS)
     parser.add_argument("--min-z-m", type=float, default=DEFAULT_MIN_Z_M)
+    parser.add_argument(
+        "--static-min-z-m",
+        type=float,
+        default=DEFAULT_STATIC_MIN_Z_M,
+        help="Minimum base-frame height for static-only side/rear CBF returns.",
+    )
     parser.add_argument("--max-z-m", type=float, default=DEFAULT_MAX_Z_M)
     parser.add_argument("--max-range-m", type=float, default=DEFAULT_MAX_RANGE_M)
     parser.add_argument("--scan-age-max-s", type=float, default=DEFAULT_SCAN_AGE_MAX_S)
@@ -171,8 +184,8 @@ def parse_args() -> TemporalLidarConfig:
         raise SystemExit("tf-wait-s and max-pending-clouds must be positive")
     if not 0.0 <= args.tf_timestamp_tolerance_s <= 0.005:
         raise SystemExit("tf-timestamp-tolerance-s must be in [0, 0.005]")
-    if args.max_z_m <= args.min_z_m or args.scan_age_max_s <= 0:
-        raise SystemExit("max-z-m must exceed min-z-m and scan-age-max-s must be positive")
+    if args.max_z_m <= args.min_z_m or args.max_z_m <= args.static_min_z_m or args.scan_age_max_s <= 0:
+        raise SystemExit("max-z-m must exceed min-z-m and static-min-z-m; scan-age-max-s must be positive")
     if not args.point_time_field or args.point_time_scale_s <= 0.0:
         raise SystemExit("point-time-field must be non-empty and point-time-scale-s must be positive")
     if args.capture_rays <= 0 or args.capture_rays % CBF_BINS != 0 or not 0.0 < args.capture_fov_deg <= 360.0:
@@ -425,13 +438,18 @@ class TemporalLidarNode(Node):
             )
         points_reference = np.concatenate(deskewed_clouds, axis=0)
         horizontal_range = np.linalg.norm(points_reference[:, :2], axis=1)
-        height_and_range = (
+        front_height_and_range = (
             (points_reference[:, 2] >= self._config.min_z_m)
             & (points_reference[:, 2] <= self._config.max_z_m)
             & (horizontal_range <= self._config.max_range_m)
         )
+        static_height_and_range = (
+            (points_reference[:, 2] >= self._config.static_min_z_m)
+            & (points_reference[:, 2] <= self._config.max_z_m)
+            & (horizontal_range <= self._config.max_range_m)
+        )
         capture_endpoints_reference, ray_states = reduce_front_capture_rays(
-            points_reference[height_and_range],
+            points_reference[front_height_and_range],
             capture_rays=self._config.capture_rays,
             fov_degrees=self._config.capture_fov_deg,
             max_distance_m=self._config.max_range_m,
@@ -447,15 +465,26 @@ class TemporalLidarNode(Node):
             endpoints_xyz_m=capture_endpoints_world,
             ray_states=ray_states,
             endpoints_base_m=capture_endpoints_reference,
+            static_points_base_m=points_reference[static_height_and_range],
             scan_start_ns=min(first.start_stamp_ns, second.start_stamp_ns),
         )
 
     def _publish_cbf_scan(self, completed: CompletedScan) -> None:
         """Publish the newest physical hit bins used by the static CBF only."""
-        if completed.endpoints_base_m is None or completed.scan_start_ns is None:
+        if (
+            completed.endpoints_base_m is None
+            or completed.static_points_base_m is None
+            or completed.scan_start_ns is None
+        ):
             self.get_logger().error("Completed scan lacks base-frame geometry; CBF scan was not published.")
             return
         points_xy_m, hits = cbf_bins_from_capture(completed.endpoints_base_m, completed.ray_states, cbf_bins=CBF_BINS)
+        static_points_xy_m, static_hits = cbf_static_bins_from_points(
+            completed.static_points_base_m,
+            static_bins=CBF_STATIC_BINS,
+            front_fov_degrees=self._config.capture_fov_deg,
+            range_percentile=self._config.capture_return_percentile,
+        )
         message = CbfScan()
         message.header.stamp = Time(nanoseconds=completed.stamp_ns).to_msg()
         message.header.frame_id = self._config.base_frame
@@ -464,14 +493,36 @@ class TemporalLidarNode(Node):
         self._cbf_scan_sequence = (self._cbf_scan_sequence + 1) & 0xFFFFFFFF
         message.points_xy_m = points_xy_m.reshape(-1).tolist()
         message.hits = hits.tolist()
+        message.static_points_xy_m = static_points_xy_m.reshape(-1).tolist()
+        message.static_hits = static_hits.tolist()
         self._cbf_scan_publisher.publish(message)
 
-    def _current_pose(self) -> tuple[np.ndarray, float] | None:
-        result = self._lookup_transform(self._config.map_frame, self._config.base_frame, Time())
-        if result is None:
+    def _current_pose(self) -> tuple[np.ndarray, float, Time] | None:
+        """Return the latest base pose together with the TF sample time used.
+
+        The temporal history is projected into this pose's ``base_link`` frame.
+        RViz debug clouds must carry this exact timestamp: stamping them with
+        wall-clock ``now`` asks RViz for a future base transform whenever the
+        FAST-LIO pose stream is briefly behind ROS time.
+        """
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                self._config.map_frame, self._config.base_frame, Time(), timeout=Duration()
+            )
+        except TransformException as error:
+            self._warn_throttled(
+                "Missing latest transform %s <- %s: %s"
+                % (self._config.map_frame, self._config.base_frame, error)
+            )
             return None
-        translation, rotation = result
-        return translation[:2], math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        rotation_matrix = rotation_matrix_from_quaternion_xyzw(rotation.x, rotation.y, rotation.z, rotation.w)
+        return (
+            np.array((translation.x, translation.y), dtype=np.float64),
+            math.atan2(float(rotation_matrix[1, 0]), float(rotation_matrix[0, 0])),
+            Time.from_msg(transform.header.stamp),
+        )
 
     def _build_debug_cloud(self, *, stamp: Time, points_xyz_m: np.ndarray, frame_indices: np.ndarray) -> PointCloud2:
         """Build a colorized base-frame cloud; every point is one valid polar bin."""
@@ -579,7 +630,7 @@ class TemporalLidarNode(Node):
         pose = self._current_pose()
         if pose is None:
             return
-        current_xy, current_yaw = pose
+        current_xy, current_yaw, pose_stamp = pose
         coarse_world_distances, coarse_world_validity = project_history_to_polar_bins(
             self._history.newest_first(), current_xy_m=current_xy,
             max_distance_m=self._config.max_range_m,
@@ -615,7 +666,7 @@ class TemporalLidarNode(Node):
         message.validity = validity.reshape(-1).tolist()
         self._publisher.publish(message)
         self._publish_debug_clouds(
-            stamp=now,
+            stamp=pose_stamp,
             world_distances=world_distances,
             world_validity=world_validity,
             front_indices=front_indices,

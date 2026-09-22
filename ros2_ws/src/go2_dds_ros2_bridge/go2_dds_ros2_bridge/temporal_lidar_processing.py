@@ -15,6 +15,7 @@ HISTORY_FRAMES = 4
 WORLD_BINS = 256
 FOV_BINS = 128
 CBF_BINS = 128
+CBF_STATIC_BINS = 64
 MAX_DISTANCE_M = 20.0
 CAPTURE_RAYS = 256
 CAPTURE_FOV_DEG = 180.0
@@ -34,6 +35,9 @@ class CompletedScan:
     endpoints_xyz_m: np.ndarray
     ray_states: np.ndarray
     endpoints_base_m: np.ndarray | None = None
+    # Height/range-filtered real returns in the reference base frame. They feed
+    # static-only side/rear CBF bins and never invent hit/free rays there.
+    static_points_base_m: np.ndarray | None = None
     scan_start_ns: int | None = None
 
 
@@ -183,6 +187,69 @@ def cbf_bins_from_capture(
         points[bin_index] = valid_points[np.argmin(np.linalg.norm(valid_points, axis=1))]
         hits[bin_index] = 1
     return points, hits
+
+
+def cbf_static_bins_from_points(
+    points_xyz_m: np.ndarray,
+    *,
+    static_bins: int = CBF_STATIC_BINS,
+    front_fov_degrees: float = CAPTURE_FOV_DEG,
+    range_percentile: float = 0.1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce real side/rear returns into stable static-only CBF bins.
+
+    Existing front bins remain separate so future work can associate them
+    across scans for dynamic-obstacle velocity estimates. This complementary
+    arc has no free-space representation: an empty bin is unavailable, not
+    clear. Bin order is left side (+90 deg), rear, then right side (-90 deg).
+    """
+    if static_bins <= 0 or not 0.0 < front_fov_degrees < 360.0:
+        raise ValueError("static_bins must be positive and front_fov_degrees must be in (0, 360)")
+    if not 0.0 <= range_percentile <= 1.0:
+        raise ValueError("range_percentile must be in [0, 1]")
+    points = np.asarray(points_xyz_m, dtype=np.float64)
+    result_points = np.zeros((static_bins, 2), dtype=np.float32)
+    hits = np.zeros(static_bins, dtype=np.uint8)
+    if points.size == 0:
+        return result_points, hits
+    if points.ndim != 2 or points.shape[1] < 3:
+        raise ValueError("points_xyz_m must have shape (N, >=3)")
+
+    xy = points[:, :2]
+    ranges = np.linalg.norm(xy, axis=1)
+    angles = np.arctan2(xy[:, 1], xy[:, 0])
+    front_half_fov = math.radians(front_fov_degrees) * 0.5
+    # Map the complementary arc (+front-half-FOV via rear to -front-half-FOV)
+    # onto [0, span) without a discontinuity at the rear.
+    static_arc = np.mod(angles - front_half_fov, 2.0 * math.pi)
+    static_span = 2.0 * math.pi - 2.0 * front_half_fov
+    valid = (
+        np.isfinite(points[:, :3]).all(axis=1)
+        & np.isfinite(ranges)
+        & (ranges > 0.0)
+        & (static_arc > 0.0)
+        & (static_arc < static_span)
+    )
+    if not np.any(valid):
+        return result_points, hits
+    valid_arc = static_arc[valid]
+    bin_indices = np.minimum((valid_arc / static_span * static_bins).astype(np.int64), static_bins - 1)
+    valid_ranges = ranges[valid]
+    valid_angles = angles[valid]
+    for bin_index in np.unique(bin_indices):
+        bin_mask = bin_indices == bin_index
+        bin_ranges = valid_ranges[bin_mask]
+        bin_angles = valid_angles[bin_mask]
+        hit_range = float(np.quantile(bin_ranges, range_percentile))
+        # Preserve a measured direction rather than replacing it with an
+        # artificial bin-centre angle.
+        point_index = int(np.argmin(np.abs(bin_ranges - hit_range)))
+        result_points[bin_index] = (
+            hit_range * math.cos(float(bin_angles[point_index])),
+            hit_range * math.sin(float(bin_angles[point_index])),
+        )
+        hits[bin_index] = 1
+    return result_points, hits
 
 
 def deskew_points_to_reference_base(

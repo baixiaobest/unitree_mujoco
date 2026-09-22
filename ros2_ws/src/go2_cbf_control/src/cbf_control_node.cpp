@@ -31,7 +31,9 @@
 
 namespace {
 
-constexpr int kScanBins = 128;
+constexpr int kFrontScanBins = 128;
+constexpr int kStaticScanBins = 64;
+constexpr int kCandidateBins = kFrontScanBins + kStaticScanBins;
 constexpr int kMaxPoints = 64;
 constexpr int kVariables = 2 + kMaxPoints;
 constexpr int kRows = 2 * kMaxPoints + 2;
@@ -89,6 +91,7 @@ struct Point {
   double x{};
   double y{};
   double range{};
+  bool is_static{};
 };
 
 struct SolverResult {
@@ -411,17 +414,28 @@ class CbfControlNode final : public rclcpp::Node {
   bool select_points(
     const go2_dds_ros2_bridge_msgs::msg::CbfScan & scan,
     std::array<Point, kMaxPoints> & selected, int & selected_count,
-    std::array<Point, kScanBins> & candidates, int & candidate_count) const
+    std::array<Point, kCandidateBins> & candidates, int & candidate_count,
+    int & front_candidate_count, int & static_candidate_count) const
   {
-    candidate_count = 0;
-    for (int index = 0; index < kScanBins; ++index) {
-      if (scan.hits[index] > 1) return false;
-      if (scan.hits[index] == 0) continue;
-      const double x = scan.points_xy_m[2 * index];
-      const double y = scan.points_xy_m[2 * index + 1];
+    candidate_count = front_candidate_count = static_candidate_count = 0;
+    const auto append_hit = [&](const float x_value, const float y_value, const uint8_t hit, const bool is_static) {
+      if (hit > 1) return false;
+      if (hit == 0) return true;
+      const double x = x_value;
+      const double y = y_value;
       const double range = std::hypot(x, y);
-      if (!std::isfinite(x) || !std::isfinite(y) || range <= 1.0e-4 || range > config_.d_cbf_active_m) continue;
-      candidates[candidate_count++] = {x, y, range};
+      if (!std::isfinite(x) || !std::isfinite(y) || range <= 1.0e-4 || range > config_.d_cbf_active_m) return true;
+      candidates[candidate_count++] = {x, y, range, is_static};
+      if (is_static) ++static_candidate_count;
+      else ++front_candidate_count;
+      return true;
+    };
+    for (int index = 0; index < kFrontScanBins; ++index) {
+      if (!append_hit(scan.points_xy_m[2 * index], scan.points_xy_m[2 * index + 1], scan.hits[index], false)) return false;
+    }
+    for (int index = 0; index < kStaticScanBins; ++index) {
+      if (!append_hit(
+          scan.static_points_xy_m[2 * index], scan.static_points_xy_m[2 * index + 1], scan.static_hits[index], true)) return false;
     }
     std::sort(candidates.begin(), candidates.begin() + candidate_count, [](const Point & left, const Point & right) {
       return left.range < right.range;
@@ -474,8 +488,10 @@ class CbfControlNode final : public rclcpp::Node {
     else if (timer_lateness_s > config_.publish_deadline_s) fallback_reason = "timer_late";
     std::array<Point, kMaxPoints> selected{};
     int selected_count = 0;
-    std::array<Point, kScanBins> candidates{};
+    std::array<Point, kCandidateBins> candidates{};
     int candidate_count = 0;
+    int front_candidate_count = 0;
+    int static_candidate_count = 0;
     SolverResult result;
     double nominal_x = 0.0, nominal_y = 0.0, margin = config_.d_margin_m;
     double measured_x = 0.0, measured_y = 0.0, command_x = 0.0, command_y = 0.0, command_wz = 0.0;
@@ -490,7 +506,8 @@ class CbfControlNode final : public rclcpp::Node {
       }
     }
     if (healthy) {
-      healthy = select_points(*scan, selected, selected_count, candidates, candidate_count);
+      healthy = select_points(
+        *scan, selected, selected_count, candidates, candidate_count, front_candidate_count, static_candidate_count);
       if (!healthy) fallback_reason = "malformed_scan";
     }
     if (healthy) {
@@ -582,7 +599,8 @@ class CbfControlNode final : public rclcpp::Node {
       policy ? policy->twist.linear.y : 0.0, policy ? policy->twist.angular.z : 0.0,
       nominal_x, nominal_y, measured_x, measured_y,
       command_x, command_y, command_wz, elapsed_s, timer_lateness_s, release_to_publish_s, result,
-      candidates, candidate_count, selected, selected_count, timeout_count_, fallback_transitions_,
+      candidates, candidate_count, front_candidate_count, static_candidate_count, selected, selected_count,
+      timeout_count_, fallback_transitions_,
       bad_solve_duration_s, holding_last_valid_command, fallback_reason);
   }
 
@@ -602,7 +620,8 @@ class CbfControlNode final : public rclcpp::Node {
     double nominal_x, double nominal_y,
     double measured_x, double measured_y, double command_x, double command_y, double command_wz, double elapsed_s,
     double timer_lateness_s, double release_to_publish_s, const SolverResult & result,
-    const std::array<Point, kScanBins> & candidates, int candidate_count,
+    const std::array<Point, kCandidateBins> & candidates, int candidate_count,
+    int front_candidate_count, int static_candidate_count,
     const std::array<Point, kMaxPoints> & selected, int selected_count,
     uint64_t timeout_count, uint64_t fallback_transitions, double bad_solve_duration_s,
     bool holding_last_valid_command, const char * fallback_reason)
@@ -620,7 +639,10 @@ class CbfControlNode final : public rclcpp::Node {
     debug_.result = result; debug_.fallback = fallback_active_;
     debug_.holding_last_valid_command = holding_last_valid_command;
     debug_.fallback_reason = fallback_reason; debug_.candidates = candidates;
-    debug_.candidate_count = candidate_count; debug_.selected = selected; debug_.selected_count = selected_count;
+    debug_.candidate_count = candidate_count;
+    debug_.front_candidate_count = front_candidate_count;
+    debug_.static_candidate_count = static_candidate_count;
+    debug_.selected = selected; debug_.selected_count = selected_count;
   }
 
   sensor_msgs::msg::PointCloud2 make_cloud(const Point * points, const std::size_t point_count, const uint32_t rgba) const {
@@ -703,6 +725,13 @@ class CbfControlNode final : public rclcpp::Node {
     add("release_to_publish_s", copy.release_to_publish_s); add("iterations", copy.result.iterations);
     add("primal_residual", copy.result.primal_residual); add("dual_residual", copy.result.dual_residual);
     add("max_slack", copy.result.max_slack); add("candidate_count", static_cast<double>(copy.candidate_count));
+    add("front_candidate_count", static_cast<double>(copy.front_candidate_count));
+    add("static_candidate_count", static_cast<double>(copy.static_candidate_count));
+    const auto selected_static_count = static_cast<double>(std::count_if(
+      copy.selected.begin(), copy.selected.begin() + copy.selected_count,
+      [](const Point & point) { return point.is_static; }));
+    add("selected_static_count", selected_static_count);
+    add("selected_front_count", static_cast<double>(copy.selected_count) - selected_static_count);
     add("selected_count", static_cast<double>(copy.selected_count)); add("timeout_count", copy.timeout_count);
     add("fallback_transitions", copy.fallback_transitions);
     add("bad_solve_duration_s", copy.bad_solve_duration_s);
@@ -718,7 +747,7 @@ class CbfControlNode final : public rclcpp::Node {
     double bad_solve_duration_s{};
     SolverResult result{}; bool fallback{}; bool holding_last_valid_command{};
     const char * fallback_reason{"not_run"};
-    std::array<Point, kScanBins> candidates{}; int candidate_count{};
+    std::array<Point, kCandidateBins> candidates{}; int candidate_count{}, front_candidate_count{}, static_candidate_count{};
     std::array<Point, kMaxPoints> selected{}; int selected_count{};
   };
 
