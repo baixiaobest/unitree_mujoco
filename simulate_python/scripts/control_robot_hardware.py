@@ -4,10 +4,12 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 DEVICE = "cuda"
 SIMULATION_DOMAIN_ID = 1
 HARDWARE_DOMAIN_ID = 0
-SIMULATION_INTERFACE = "wlo1"
+SIMULATION_INTERFACE = "wlp128s20f3"
 HARDWARE_INTERFACE = "enp108s0"
 DEFAULT_MODEL_PATH = (
     Path(__file__).resolve().parents[3]
@@ -68,6 +70,17 @@ def parse_args():
         "--logging",
         action="store_true",
         help="Enable robot data logging in the control loop.",
+    )
+    parser.add_argument(
+        "--input-device",
+        type=str,
+        choices=("xbox", "keyboard"),
+        default="xbox",
+        help=(
+            "Source for the pose/velocity command. 'keyboard' uses WASD (+ Q/E strafe) and drives the "
+            "velocity directly with no controller/policy DDS toggle; 'xbox' is the default joystick "
+            "(velocity_control mode also listens for a POLICY-mode rt/cmd_vel feed via a button toggle)."
+        ),
     )
     return parser.parse_args()
 
@@ -154,6 +167,7 @@ def main():
         policy_mode=args.policy_mode,
         runtime_mode=args.run_mode,
         debug_print=args.debug_print,
+        input_device=args.input_device,
         rate=50,
     )
 

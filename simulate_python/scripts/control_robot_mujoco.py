@@ -1,9 +1,14 @@
+import sys
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 from env.mujoco_environment import MujocoEnvironment
 from robot_comm.robot_communication import RobotCommunication
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
 if __name__ == "__main__":
-    ChannelFactoryInitialize(1, "wlo1")
+    ChannelFactoryInitialize(1, "wlp128s20f3")
     robot_comm = RobotCommunication(device="cuda")
     env = MujocoEnvironment(robot_comm=robot_comm, 
                             model_path="../../../logs/rsl_rl/EncoderActorCriticGO2/E2ENavigation/MujocoModel/model_1000_jit.ptrom", 

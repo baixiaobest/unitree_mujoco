@@ -30,7 +30,7 @@ from utils.status_monitor_commands import (
 
 SIMULATION_DOMAIN_ID = 1
 HARDWARE_DOMAIN_ID = 0
-SIMULATION_INTERFACE = "wlo1"
+SIMULATION_INTERFACE = "wlp128s20f3"
 HARDWARE_INTERFACE = "enp108s0"
 
 
@@ -672,7 +672,7 @@ def main():
 
     # Create application
     app = QApplication(sys.argv)
-    
+
     # Create robot communication
     robot_comm = RobotCommunication(device=args.device)
     

@@ -769,6 +769,196 @@ class WasdKeyboardCommand(Pose2dCommand):
 
 
 @dataclass
+class WasdVelocityCommandConfig(CommandConfig):
+    """Configuration for WasdVelocityCommand."""
+
+    max_linear_velocity: float = 0.5
+    max_angular_velocity: float = 0.8
+    smoothing_time_constant: float = 0.5
+    visualize: bool = False
+    visualize_height: float = 0.3
+    visualize_scale: float = 0.5
+
+
+class WasdVelocityCommand(Command):
+    """Velocity command controlled by the keyboard: W/S forward-back, A/D turn, Q/E strafe.
+
+    Continuous teleop, mirroring ``GameControllerVelocityCommand``'s smoothing behavior: held keys
+    drive a target velocity, released keys return it to zero, and ``update()`` low-pass filters the
+    commanded velocity toward that target every tick.
+    """
+
+    def __init__(self, env: Environment, cfg: WasdVelocityCommandConfig, device: str = "cpu"):
+        super().__init__(env, cfg, device)
+        self.cfg = cfg
+        self._command = torch.zeros(3, device=device, dtype=torch.float32)
+        self._target_command = torch.zeros(3, device=device, dtype=torch.float32)
+        self._last_update_time = None
+        self.initialized = False
+        self._screen = None
+        self._font = None
+        self._small_font = None
+        self.keys_pressed = {
+            pygame.K_w: False,
+            pygame.K_s: False,
+            pygame.K_a: False,
+            pygame.K_d: False,
+            pygame.K_q: False,
+            pygame.K_e: False,
+        }
+        self._init_pygame()
+
+    @property
+    def command(self):
+        return self._command
+
+    _WINDOW_SIZE = (420, 260)
+    _KEY_LABELS = {
+        pygame.K_w: ("W", "fwd"),
+        pygame.K_s: ("S", "back"),
+        pygame.K_a: ("A", "turn L"),
+        pygame.K_d: ("D", "turn R"),
+        pygame.K_q: ("Q", "strafe L"),
+        pygame.K_e: ("E", "strafe R"),
+    }
+
+    def _init_pygame(self):
+        """Open a pygame window (with visible instructions) so it can receive keyboard focus/events."""
+        try:
+            if not pygame.get_init():
+                pygame.init()
+            self._screen = pygame.display.set_mode(self._WINDOW_SIZE)
+            pygame.display.set_caption("WASD Velocity Control")
+            self._font = pygame.font.SysFont(None, 28)
+            self._small_font = pygame.font.SysFont(None, 20)
+            self.initialized = True
+            self._draw()
+            print("Keyboard velocity control initialized (click this window for it to have focus)")
+        except Exception as exc:
+            print(f"Error initializing pygame for keyboard control: {exc}")
+            self.initialized = False
+
+    def _draw(self):
+        if not self.initialized or self._screen is None:
+            return
+        bg = (24, 26, 32)
+        fg = (230, 230, 230)
+        active_fg = (90, 200, 120)
+        self._screen.fill(bg)
+        title = self._font.render("Click here, then drive with:", True, fg)
+        self._screen.blit(title, (16, 12))
+        y = 50
+        for key, (label, action) in self._KEY_LABELS.items():
+            pressed = self.keys_pressed.get(key, False)
+            color = active_fg if pressed else fg
+            line = self._small_font.render(f"{label}  -  {action}", True, color)
+            self._screen.blit(line, (24, y))
+            y += 26
+        hint = self._small_font.render("Release a key to decelerate smoothly.", True, (150, 150, 150))
+        self._screen.blit(hint, (16, self._WINDOW_SIZE[1] - 30))
+        pygame.display.flip()
+
+    def _read_keys(self):
+        if not self.initialized:
+            self._init_pygame()
+            if not self.initialized:
+                return
+        try:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    self.initialized = False
+                elif event.type == pygame.KEYDOWN and event.key in self.keys_pressed:
+                    self.keys_pressed[event.key] = True
+                elif event.type == pygame.KEYUP and event.key in self.keys_pressed:
+                    self.keys_pressed[event.key] = False
+            self._draw()
+        except Exception as exc:
+            print(f"Error reading keyboard: {exc}")
+            self.initialized = False
+
+    def setup(self):
+        self._command.zero_()
+        self._target_command.zero_()
+        self._last_update_time = None
+
+    def resample(self):
+        """Read held keys and update the target base-frame velocity command."""
+        self._read_keys()
+
+        linear_x_input = float(self.keys_pressed[pygame.K_w]) - float(self.keys_pressed[pygame.K_s])
+        linear_y_input = float(self.keys_pressed[pygame.K_q]) - float(self.keys_pressed[pygame.K_e])
+        yaw_rate_input = float(self.keys_pressed[pygame.K_a]) - float(self.keys_pressed[pygame.K_d])
+
+        self._target_command = torch.tensor(
+            [
+                linear_x_input * self.cfg.max_linear_velocity,
+                linear_y_input * self.cfg.max_linear_velocity,
+                yaw_rate_input * self.cfg.max_angular_velocity,
+            ],
+            device=self.device,
+            dtype=torch.float32,
+        )
+        if self.cfg.smoothing_time_constant <= 0.0:
+            self._command = self._target_command.clone()
+
+    def update(self):
+        """Low-pass filter the target command in the robot base frame."""
+        if self.cfg.smoothing_time_constant <= 0.0:
+            self._command = self._target_command.clone()
+            return
+
+        current_time = float(self.env.time_elapsed)
+        if self._last_update_time is None:
+            dt = max(float(self.cfg.resample_interval), 1e-6)
+        else:
+            dt = max(current_time - self._last_update_time, 1e-6)
+        self._last_update_time = current_time
+
+        alpha = min(1.0, dt / (self.cfg.smoothing_time_constant + dt))
+        self._command = torch.lerp(self._command, self._target_command, alpha)
+
+    def visualize(self, visualizer: MujocoVisualizer):
+        """Draw the commanded planar velocity as an arrow above the robot base."""
+        if not self.cfg.visualize:
+            return
+
+        linear_velocity = self._command[:2]
+        speed = torch.linalg.vector_norm(linear_velocity).item()
+        if speed <= 1e-6:
+            return
+
+        base_state = self.robot_comm.get_base_state()
+        robot_pos = base_state["position"].detach().clone()
+        robot_quat = base_state["quaternion"]
+
+        arrow_start = robot_pos
+        arrow_start[2] += self.cfg.visualize_height
+
+        local_velocity = torch.tensor(
+            [self._command[0], self._command[1], 0.0],
+            device=self.device,
+            dtype=torch.float32,
+        )
+        world_velocity = math_utils.quat_rotate(robot_quat.unsqueeze(0), local_velocity.unsqueeze(0))[0]
+        direction = world_velocity / torch.linalg.vector_norm(world_velocity)
+        arrow_length = speed * self.cfg.visualize_scale
+        arrow_end = arrow_start + direction * arrow_length
+        arrow_size = [
+            MujocoVisualizer.DEFAULT_ARROW_SIZE[0],
+            MujocoVisualizer.DEFAULT_ARROW_SIZE[1],
+            max(arrow_length, 0.05),
+        ]
+
+        visualizer.add_arrow(
+            arrow_start.cpu().numpy(),
+            arrow_end.detach().cpu().numpy(),
+            size=arrow_size,
+            color=MujocoVisualizer.BLUE,
+        )
+
+
+@dataclass
 class GameControllerPolicyHybridVelocityCommandConfig(GameControllerVelocityCommandConfig):
     """Configuration for GameControllerPolicyHybridVelocityCommand."""
     toggle_button_index: int = 0  # A button

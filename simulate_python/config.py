@@ -1,9 +1,15 @@
+from pathlib import Path
+
+# Resolved relative to this file (not the process's CWD), so every script that reads
+# SIMULATION_CONFIG["ROBOT_SCENE"] works no matter where it's launched from.
+_UNITREE_MUJOCO_ROOT = Path(__file__).resolve().parent.parent
+
 SIMULATION_CONFIG = {
     "ROBOT": "go2",  # Robot name, "go2", "b2", "b2w", "h1", "go2w", "g1"
-    "ROBOT_SCENE": "../unitree_robots/go2/empty_scene.xml",  # Robot scene
+    "ROBOT_SCENE": str(_UNITREE_MUJOCO_ROOT / "unitree_robots" / "go2" / "empty_scene.xml"),  # Robot scene
 
     "DOMAIN_ID": 1,  # Domain id
-    "INTERFACE": "wlo1",  # Interface
+    "INTERFACE": "wlp128s20f3",  # Interface
 
     "USE_JOYSTICK": 0,  # Simulate Unitree WirelessController using a gamepad
     "JOYSTICK_TYPE": "xbox",  # Support "xbox" and "switch" gamepad layout

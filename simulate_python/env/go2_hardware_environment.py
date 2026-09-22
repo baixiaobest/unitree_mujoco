@@ -11,6 +11,8 @@ from mdp.commands import (
     GameControllerPolicyHybridVelocityCommandConfig,
     WasdKeyboardCommand,
     WasdKeyboardCommandConfig,
+    WasdVelocityCommand,
+    WasdVelocityCommandConfig,
 )
 from time import sleep, time
 import torch
@@ -35,7 +37,7 @@ class GO2HardwareEnvironment(Go2Environment):
     
     def __init__(self, robot_comm, model_path, device="cpu", up_down_test=False, rate=200, kp=25.0, kd=0.5,
                  log_dir="logs", log_frequency=10, enable_logging=True, policy_mode="position_control",
-                 runtime_mode="hardware", debug_print=False):
+                 runtime_mode="hardware", debug_print=False, input_device="xbox"):
         super().__init__(robot_comm, device, kp=kp, kd=kd)
 
         self.model_path = model_path
@@ -44,6 +46,9 @@ class GO2HardwareEnvironment(Go2Environment):
         self.policy_mode = policy_mode
         self.runtime_mode = runtime_mode
         self.debug_print = debug_print
+        if input_device not in {"xbox", "keyboard"}:
+            raise ValueError(f"Unsupported input_device: {input_device!r}. Expected 'xbox' or 'keyboard'.")
+        self.input_device = input_device
         self.robot_initialized = False
         self._rate_window_start_time = time()
         self._rate_window_step_count = 0
@@ -58,8 +63,20 @@ class GO2HardwareEnvironment(Go2Environment):
         )
 
         self.policy = torch.jit.load(self.model_path, map_location=self.device)
-        self.policy_history_length = int(self.policy.horizon)
-        print(f"Loaded JIT horizon from model: {self.policy_history_length}")
+        if hasattr(self.policy, "horizon"):
+            self.policy_history_length = int(self.policy.horizon)
+            print(f"Loaded JIT horizon from model: {self.policy_history_length}")
+        else:
+            # Plain `export_policy_as_jit`-style checkpoints (e.g. the standard IsaacLab RSL-RL
+            # export) have no built-in observation-history handling -- unlike EncoderActorCriticGO2
+            # exports, which expose `.horizon` so this harness knows how many past frames to stack.
+            # Falling back to 1 (no history stacking) matches ObservationConfig's own default.
+            self.policy_history_length = 1
+            print(
+                "[WARNING] Loaded model has no 'horizon' attribute (not an EncoderActorCriticGO2-style "
+                "export) -- defaulting policy_history_length=1 (no observation-history stacking). "
+                "Verify this matches how the checkpoint was actually trained."
+            )
 
         # Initialize high-level services only
         self._init_unitree_services()
@@ -336,14 +353,20 @@ class GO2HardwareEnvironment(Go2Environment):
                     "count_down",
                     "obstacle_lidar",
                 ],
+                # Order matches ObservationsCfg.PolicyCfg in locomotion_env_cfg.py exactly -- the
+                # traced TorchScript policy has no notion of names, only column position, so this
+                # must reproduce the training-time observation group's declaration order verbatim:
+                # base_lin_vel, imu_ang_vel, imu_lin_acc, projected_gravity, velocity_commands,
+                # joint_pos, joint_vel, actions (3+3+3+3+3+12+12+12 = 51 dims).
                 self.VELOCITY_CONTROL_POLICY_LAYOUT: [
-                    "actions",
+                    "base_lin_vel",
                     "imu_ang_vel",
                     "imu_lin_acc",
-                    "joint_pos",
-                    "joint_vel",
                     "projected_gravity",
                     "velocity_commands",
+                    "joint_pos",
+                    "joint_vel",
+                    "actions",
                 ],
             },
             history_length=self.policy_history_length,
@@ -353,6 +376,38 @@ class GO2HardwareEnvironment(Go2Environment):
     
     def _init_command_manager(self):
         """Initialize the command manager"""
+        if self.input_device == "keyboard":
+            velocity_command_entry = (
+                "game_controller_velocity_command",
+                WasdVelocityCommand,
+                WasdVelocityCommandConfig(
+                    resample_interval=0.05,
+                    max_linear_velocity=0.5,
+                    max_angular_velocity=0.8,
+                    visualize=self.policy_mode == "velocity_control",
+                    visualize_height=0.35,
+                    visualize_scale=0.5,
+                ),
+            )
+        else:
+            velocity_command_entry = (
+                "game_controller_velocity_command",
+                GameControllerPolicyHybridVelocityCommand,
+                GameControllerPolicyHybridVelocityCommandConfig(
+                    resample_interval=0.05,
+                    max_linear_velocity=1.0,
+                    max_angular_velocity=1.0,
+                    controller_index=0,
+                    joystick_deadzone=0.1,
+                    left_x_axis=0,
+                    left_y_axis=1,
+                    right_x_axis=3,
+                    right_y_axis=4,
+                    visualize=self.policy_mode == "velocity_control",
+                    visualize_height=0.35,
+                    visualize_scale=0.5,
+                ),
+            )
         command_cfg = CommandManagerConfig(
             commands=[
                 ("game_controller_pose_2d_command",
@@ -369,22 +424,7 @@ class GO2HardwareEnvironment(Go2Environment):
                     a_button_index=0,  # Button index for 'A' button
                     visualize=self.policy_mode == "position_control"
                 )),
-                ("game_controller_velocity_command",
-                GameControllerPolicyHybridVelocityCommand,
-                GameControllerPolicyHybridVelocityCommandConfig(
-                    resample_interval=0.05,
-                    max_linear_velocity=1.0,
-                    max_angular_velocity=1.0,
-                    controller_index=0,
-                    joystick_deadzone=0.1,
-                    left_x_axis=0,
-                    left_y_axis=1,
-                    right_x_axis=3,
-                    right_y_axis=4,
-                    visualize=self.policy_mode == "velocity_control",
-                    visualize_height=0.35,
-                    visualize_scale=0.5,
-                )),
+                velocity_command_entry,
 
                 # ("wasd_controller_pose_2d_command",
                 # WasdKeyboardCommand,
@@ -402,7 +442,12 @@ class GO2HardwareEnvironment(Go2Environment):
         self._command_manager = CommandManager(self, command_cfg, device=self.device)
 
     def _get_policy_observation(self):
-        if self.policy_mode == "velocity_control":
+        # History-stacked observations are only meaningful for policies that actually declared a
+        # multi-frame horizon (EncoderActorCriticGO2-style exports). A plain flat-MLP export (the
+        # policy_history_length=1 fallback) expects a flat (dim,) vector -- requesting a
+        # history-stacked (1, dim) tensor here would double-batch once step() adds its own
+        # unsqueeze(0), corrupting the actor's output shape.
+        if self.policy_mode == "velocity_control" and self.policy_history_length > 1:
             return self._observation_manager.get_observation(
                 layout_name=self.policy_observation_layout,
                 use_history=True,

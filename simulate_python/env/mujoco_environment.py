@@ -7,7 +7,7 @@ import numpy as np
 import math
 
 from env.environment import Environment, Go2Environment
-from comm.unitree_sdk2py_bridge import UnitreeSdk2Bridge, ElasticBand
+from robot_comm.unitree_sdk2py_bridge import UnitreeSdk2Bridge, ElasticBand
 from mdp.observation_manager import ObservationManager, ObservationConfig, ObsItem
 from mdp.command_manager import CommandManager, CommandManagerConfig
 from mdp.commands import Pose2dCommand, Pose2dCommandConfig, \
