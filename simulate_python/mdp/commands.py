@@ -19,6 +19,33 @@ import pygame
 # device while an operating system is still finishing a Bluetooth/USB reconnect.
 CONTROLLER_RECONNECT_INTERVAL_S = 1.0
 
+
+def pygame_joystick_is_attached(controller, controller_index: int) -> bool:
+    """Return whether ``controller`` still identifies a currently attached SDL device.
+
+    ``Joystick.get_init()`` alone is insufficient after a USB/Bluetooth unplug:
+    SDL can leave the old Python joystick object initialized until it is read.
+    Comparing its instance ID against the current joystick enumeration detects
+    removal even when that stale object only returns neutral axis values.
+    """
+    if controller is None or not controller.get_init():
+        return False
+
+    try:
+        instance_id = controller.get_instance_id()
+    except (AttributeError, pygame.error):
+        # pygame 1 does not expose instance IDs. The count check is weaker,
+        # but still handles the common unplug-then-reconnect path.
+        return pygame.joystick.get_count() > controller_index
+
+    try:
+        for device_index in range(pygame.joystick.get_count()):
+            if pygame.joystick.Joystick(device_index).get_instance_id() == instance_id:
+                return True
+    except pygame.error:
+        return False
+    return False
+
 @dataclass
 class CommandConfig:
     resample_interval: float
@@ -237,7 +264,7 @@ class GameControllerPose2dCommand(Pose2dCommand):
         
         try:
             pygame.event.pump()  # Process event queue
-            if not self.controller.get_init():
+            if not pygame_joystick_is_attached(self.controller, self.cfg.controller_index):
                 self._disconnect_controller("device was removed")
                 return 0.0, 0.0
             
@@ -267,7 +294,7 @@ class GameControllerPose2dCommand(Pose2dCommand):
         
         try:
             pygame.event.pump()
-            if not self.controller.get_init():
+            if not pygame_joystick_is_attached(self.controller, self.cfg.controller_index):
                 self._disconnect_controller("device was removed")
                 return False
             return self.controller.get_button(self.cfg.a_button_index)
@@ -467,7 +494,7 @@ class GameControllerVelocityCommand(Command):
 
         try:
             pygame.event.pump()
-            if not self.controller.get_init():
+            if not pygame_joystick_is_attached(self.controller, self.cfg.controller_index):
                 self._disconnect_controller("device was removed")
                 return 0.0
             value = float(self.controller.get_axis(axis_index))
@@ -827,7 +854,7 @@ class GameControllerPolicyHybridVelocityCommand(GameControllerVelocityCommand):
             return False
         try:
             pygame.event.pump()
-            if not self.controller.get_init():
+            if not pygame_joystick_is_attached(self.controller, self.cfg.controller_index):
                 self._disconnect_controller("device was removed")
                 return False
             return bool(self.controller.get_button(self.cfg.toggle_button_index))
