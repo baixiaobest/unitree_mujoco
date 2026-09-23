@@ -65,6 +65,8 @@ def _make_runtime_nodes(context, *args, **kwargs):
     temporal_lidar_config = LaunchConfiguration("temporal_lidar_config").perform(context)
     navigation_config = LaunchConfiguration("navigation_config").perform(context)
     navigation_policy_path = LaunchConfiguration("navigation_policy_path").perform(context)
+    cbf_enabled = LaunchConfiguration("cbf").perform(context).strip().lower() in ("true", "1", "yes")
+    cbf_config = LaunchConfiguration("cbf_config").perform(context)
     rviz_config = LaunchConfiguration("rviz_config")
 
     # FAST-LIO expects the pose of the frame that the incoming points are expressed in.
@@ -196,8 +198,17 @@ def _make_runtime_nodes(context, *args, **kwargs):
             parameters=[
                 navigation_config,
                 *([ {"policy_path": navigation_policy_path} ] if navigation_policy_path else []),
+                {"command_mode": "cbf" if cbf_enabled else "direct"},
             ],
             condition=IfCondition(LaunchConfiguration("navigation")),
+        ),
+        Node(
+            package="go2_cbf_control",
+            executable="cbf_control",
+            name="cbf_control",
+            output="screen",
+            parameters=[cbf_config],
+            condition=IfCondition(LaunchConfiguration("cbf")),
         ),
         Node(
             package="rviz2",
@@ -326,6 +337,18 @@ def generate_launch_description() -> LaunchDescription:
                 "navigation_policy_path",
                 default_value="",
                 description="Path to the JIT navigation policy file (.pt).",
+            ),
+            DeclareLaunchArgument(
+                "cbf",
+                default_value="true",
+                description="Route navigation through the native static CBF controller (default). Set false to use legacy direct /cmd_vel navigation.",
+            ),
+            DeclareLaunchArgument(
+                "cbf_config",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("go2_cbf_control"), "config", "cbf_control.yaml"]
+                ),
+                description="Path to the native CBF controller parameter YAML file.",
             ),
             DeclareLaunchArgument(
                 "rviz",

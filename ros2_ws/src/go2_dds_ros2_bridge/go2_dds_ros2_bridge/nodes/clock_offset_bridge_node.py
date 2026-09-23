@@ -7,6 +7,7 @@ import math
 import os
 import sys
 import threading
+from collections import deque
 from dataclasses import dataclass
 from time import time_ns
 
@@ -33,6 +34,7 @@ from go2_dds_ros2_bridge.tf_utils import (
 DEFAULT_DDS_TOPIC = "rt/utlidar/cloud"
 DEFAULT_ROS_TOPIC = "/go2_clock_offset_sec"
 DEFAULT_OUTPUT_TOPIC = "/utlidar/time_corrected/cloud"
+DEFAULT_UNFILTERED_OUTPUT_TOPIC = "/utlidar/time_corrected/cloud_unfiltered"
 DEFAULT_TF_PARENT_FRAME = "base_link"
 DEFAULT_TF_CHILD_FRAME = "utlidar_lidar"
 OUTPUT_CLOUD_QOS = QoSProfile(
@@ -55,6 +57,15 @@ POINT_FIELD_DTYPES = {
     PointField.FLOAT32: np.dtype(np.float32),
     PointField.FLOAT64: np.dtype(np.float64),
 }
+POINT_TIME_FIELD_NAMES = ("t", "timestamp", "timestamps", "time", "time_stamp")
+POINT_TIME_UNIT_SCALES = {
+    "seconds": 1.0,
+    "milliseconds": 1e-3,
+    "microseconds": 1e-6,
+    "nanoseconds": 1e-9,
+}
+DEFAULT_OFFSET_WINDOW_SEC = 5.0
+DEFAULT_OFFSET_QUANTILE = 0.05
 
 
 @dataclass(frozen=True)
@@ -62,10 +73,13 @@ class BridgeConfig:
     dds_topic: str
     ros_topic: str
     output_topic: str
+    unfiltered_output_topic: str
     dds_domain_id: int
     dds_interface: str
     publish_hz: float
     filter_alpha: float
+    offset_window_sec: float
+    offset_quantile: float
     publish_tf: bool
     filter_front_legs: bool
 
@@ -116,6 +130,15 @@ def parse_args() -> BridgeConfig:
         help="ROS2 PointCloud2 topic published with corrected local timestamps.",
     )
     parser.add_argument(
+        "--unfiltered-output-topic",
+        type=str,
+        default=DEFAULT_UNFILTERED_OUTPUT_TOPIC,
+        help=(
+            "Diagnostic PointCloud2 topic published with corrected timestamps before front-leg masking. "
+            "Pass an empty string to disable it."
+        ),
+    )
+    parser.add_argument(
         "--publish-hz",
         type=float,
         default=20.0,
@@ -125,7 +148,19 @@ def parse_args() -> BridgeConfig:
         "--filter-alpha",
         type=float,
         default=0.05,
-        help="Low-pass filter alpha applied to each new offset sample, in (0, 1].",
+        help="Deprecated compatibility option; use --offset-window-sec and --offset-quantile instead.",
+    )
+    parser.add_argument(
+        "--offset-window-sec",
+        type=float,
+        default=DEFAULT_OFFSET_WINDOW_SEC,
+        help="Duration of the rolling receive-to-scan-end offset window.",
+    )
+    parser.add_argument(
+        "--offset-quantile",
+        type=float,
+        default=DEFAULT_OFFSET_QUANTILE,
+        help="Low quantile used to reject variable DDS delivery delay, in [0, 0.5].",
     )
     parser.add_argument(
         "--publish-tf",
@@ -149,10 +184,13 @@ def parse_args() -> BridgeConfig:
         dds_topic=args.dds_topic,
         ros_topic=args.ros_topic,
         output_topic=args.output_topic,
+        unfiltered_output_topic=args.unfiltered_output_topic,
         dds_domain_id=runtime_profile.domain_id,
         dds_interface=runtime_profile.interface,
         publish_hz=max(args.publish_hz, 1.0),
         filter_alpha=filter_alpha,
+        offset_window_sec=max(float(args.offset_window_sec), 0.25),
+        offset_quantile=min(max(float(args.offset_quantile), 0.0), 0.5),
         publish_tf=args.publish_tf,
         filter_front_legs=args.filter_front_legs,
     )
@@ -185,14 +223,73 @@ def dtype_from_fields(fields: list[PointField], point_step: int, is_bigendian: b
     )
 
 
+def point_time_range_sec(msg, reference_interval_sec: float) -> tuple[str | None, float | None]:
+    """Return the relative scan-end time encoded in a Unitree PointCloud2 message.
+
+    The Unitree cloud header marks the start of a rolling scan. Its per-point
+    time field is relative to that header and must stay relative after the
+    header is translated into the host-clock domain.
+    """
+    dtype = dtype_from_fields(msg.fields, int(msg.point_step), bool(msg.is_bigendian))
+    field_names = dtype.names or ()
+    field_name = next((name for name in POINT_TIME_FIELD_NAMES if name in field_names), None)
+    if field_name is None:
+        return None, None
+
+    width = int(msg.width)
+    height = int(msg.height)
+    point_step = int(msg.point_step)
+    if width <= 0 or height <= 0 or point_step <= 0:
+        return field_name, None
+    row_step = int(msg.row_step)
+    packed_row_step = width * point_step
+    if row_step <= 0:
+        row_step = packed_row_step
+    if row_step < packed_row_step or len(msg.data) < row_step * height:
+        return field_name, None
+
+    cloud = np.ndarray(
+        shape=(height, width),
+        dtype=dtype,
+        buffer=bytes(msg.data),
+        strides=(row_step, point_step),
+    )
+    values = np.asarray(cloud[field_name], dtype=np.float64).reshape(-1)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return field_name, None
+
+    raw_span = float(np.max(values) - np.min(values))
+    if not math.isfinite(reference_interval_sec) or reference_interval_sec <= 0.0 or raw_span <= 0.0:
+        return field_name, None
+    unit = min(
+        POINT_TIME_UNIT_SCALES,
+        key=lambda candidate: abs(math.log10(raw_span * POINT_TIME_UNIT_SCALES[candidate] / reference_interval_sec)),
+    )
+    return field_name, max(float(np.max(values)), 0.0) * POINT_TIME_UNIT_SCALES[unit]
+
+
+def low_quantile(values: deque[tuple[int, float]], quantile: float) -> float:
+    ordered = sorted(value for _, value in values)
+    index = min(int(math.floor((len(ordered) - 1) * quantile)), len(ordered) - 1)
+    return ordered[index]
+
+
 class Go2ClockOffsetBridge(Node):
     def __init__(self, config: BridgeConfig, channel_subscriber_cls, point_cloud_type) -> None:
         super().__init__("go2_clock_offset_bridge")
         self._config = config
         self._publisher = self.create_publisher(Float64, self._config.ros_topic, 10)
         self._cloud_publisher = self.create_publisher(PointCloud2, self._config.output_topic, OUTPUT_CLOUD_QOS)
+        self._unfiltered_cloud_publisher = (
+            self.create_publisher(PointCloud2, self._config.unfiltered_output_topic, OUTPUT_CLOUD_QOS)
+            if self._config.unfiltered_output_topic
+            else None
+        )
         self._sample_lock = threading.Lock()
         self._filtered_offset_sec: float | None = None
+        self._offset_samples: deque[tuple[int, float]] = deque()
+        self._last_remote_stamp_ns: int | None = None
         self._message_version = 0
         self._last_published_version = 0
         self._sample_count = 0
@@ -216,18 +313,20 @@ class Go2ClockOffsetBridge(Node):
 
         ros_domain_id = os.environ.get("ROS_DOMAIN_ID", "<unset>")
         self.get_logger().info(
-            "Estimating GO2 clock offset from DDS topic '%s' (domain=%d, interface=%s, using cloud header stamp) "
-            "and re-publishing corrected clouds on '%s' (ROS_DOMAIN_ID=%s, alpha=%.4f, publish_tf=%s, filter_front_legs=%s). "
-            "Publishing LiDAR TF %s -> %s with fixed xyz=(%.4f, %.4f, %.4f) and configurable rpy_deg=(%.2f, %.2f, %.2f)"
+            "Estimating GO2 clock offset from DDS topic '%s' (domain=%d, interface=%s, using scan-end timing) "
+            "and re-publishing corrected clouds on '%s' (ROS_DOMAIN_ID=%s, publish_tf=%s, filter_front_legs=%s, "
+            "unfiltered_debug_topic=%s). "
+            "Publishing LiDAR TF %s -> %s with fixed xyz=(%.4f, %.4f, %.4f) and configurable rpy_deg=(%.2f, %.2f, %.2f). "
+            "Offset window=%.2fs, quantile=%.3f"
             % (
                 self._config.dds_topic,
                 self._config.dds_domain_id,
                 self._config.dds_interface,
                 self._config.output_topic,
                 ros_domain_id,
-                self._config.filter_alpha,
                 self._config.publish_tf,
                 self._config.filter_front_legs,
+                self._config.unfiltered_output_topic or "disabled",
                 DEFAULT_TF_PARENT_FRAME,
                 DEFAULT_TF_CHILD_FRAME,
                 DEFAULT_LIDAR_TF_XYZ[0],
@@ -236,6 +335,8 @@ class Go2ClockOffsetBridge(Node):
                 self._lidar_tf_rpy_deg[0],
                 self._lidar_tf_rpy_deg[1],
                 self._lidar_tf_rpy_deg[2],
+                self._config.offset_window_sec,
+                self._config.offset_quantile,
             )
         )
 
@@ -315,17 +416,38 @@ class Go2ClockOffsetBridge(Node):
             return
 
         local_receive_ns = time_ns()
-        raw_offset_sec = (local_receive_ns - remote_stamp_ns) * 1e-9
-        corrected_stamp_ns = remote_stamp_ns + int(round(raw_offset_sec * 1_000_000_000.0))
-        if corrected_stamp_ns < 0:
-            corrected_stamp_ns = 0
+        with self._sample_lock:
+            previous_remote_stamp_ns = self._last_remote_stamp_ns
+            self._last_remote_stamp_ns = remote_stamp_ns
+        reference_interval_sec = (
+            (remote_stamp_ns - previous_remote_stamp_ns) * 1e-9
+            if previous_remote_stamp_ns is not None
+            else float("nan")
+        )
+        try:
+            _, scan_duration_sec = point_time_range_sec(msg, reference_interval_sec)
+        except (TypeError, ValueError) as error:
+            self.get_logger().warning(f"Could not decode the cloud point-time field; using header-only timing: {error}")
+            scan_duration_sec = None
+
+        # The cloud header is scan start but this callback arrives after scan
+        # completion. Estimate the remote-to-host offset from scan end, then
+        # apply it to the original start stamp. Using receive_time - scan_start
+        # (the old behaviour) made every point in the scan appear in the future.
+        remote_end_ns = remote_stamp_ns
+        if scan_duration_sec is not None:
+            remote_end_ns += int(round(scan_duration_sec * 1_000_000_000.0))
+        raw_offset_sec = (local_receive_ns - remote_end_ns) * 1e-9
 
         with self._sample_lock:
-            if self._filtered_offset_sec is None:
-                self._filtered_offset_sec = raw_offset_sec
-            else:
-                alpha = self._config.filter_alpha
-                self._filtered_offset_sec = (1.0 - alpha) * self._filtered_offset_sec + alpha * raw_offset_sec
+            self._offset_samples.append((local_receive_ns, raw_offset_sec))
+            oldest_allowed_ns = local_receive_ns - int(self._config.offset_window_sec * 1_000_000_000.0)
+            while self._offset_samples and self._offset_samples[0][0] < oldest_allowed_ns:
+                self._offset_samples.popleft()
+            self._filtered_offset_sec = low_quantile(self._offset_samples, self._config.offset_quantile)
+            corrected_stamp_ns = remote_stamp_ns + int(round(self._filtered_offset_sec * 1_000_000_000.0))
+            if corrected_stamp_ns < 0:
+                corrected_stamp_ns = 0
             self._message_version += 1
             self._sample_count += 1
             filtered_offset_sec = self._filtered_offset_sec
@@ -340,6 +462,10 @@ class Go2ClockOffsetBridge(Node):
             )
 
         self._publish_lidar_tf(self._ns_to_stamp(corrected_stamp_ns))
+        if self._unfiltered_cloud_publisher is not None:
+            self._unfiltered_cloud_publisher.publish(
+                self._make_corrected_cloud_message(msg, corrected_stamp_ns, apply_front_leg_filter=False)
+            )
         self._cloud_publisher.publish(self._make_corrected_cloud_message(msg, corrected_stamp_ns))
 
     @staticmethod
@@ -357,7 +483,11 @@ class Go2ClockOffsetBridge(Node):
         stamp.nanosec = int(stamp_ns % 1_000_000_000)
         return stamp
 
-    def _make_corrected_cloud_message(self, dds_msg, corrected_stamp_ns: int) -> PointCloud2:
+    def _make_corrected_cloud_message(
+        self, dds_msg, corrected_stamp_ns: int, *, apply_front_leg_filter: bool | None = None
+    ) -> PointCloud2:
+        if apply_front_leg_filter is None:
+            apply_front_leg_filter = self._config.filter_front_legs
         ros_msg = PointCloud2()
         ros_msg.header.stamp = self._ns_to_stamp(corrected_stamp_ns)
         ros_msg.header.frame_id = dds_msg.header.frame_id
@@ -372,7 +502,7 @@ class Go2ClockOffsetBridge(Node):
         ]
         ros_msg.is_bigendian = bool(dds_msg.is_bigendian)
         ros_msg.point_step = int(dds_msg.point_step)
-        if self._config.filter_front_legs:
+        if apply_front_leg_filter:
             try:
                 filtered_data, filtered_width, removed_count = self._filter_front_leg_points(
                     fields=ros_msg.fields,

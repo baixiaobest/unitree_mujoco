@@ -7,6 +7,7 @@ find_package(std_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/CbfScan.msg"
   "msg/TemporalLidarObservation.msg"
   DEPENDENCIES std_msgs builtin_interfaces
 )

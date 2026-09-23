@@ -17,6 +17,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import Imu
+from std_msgs.msg import Bool
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from go2_dds_ros2_bridge_msgs.msg import TemporalLidarObservation
@@ -28,6 +29,9 @@ DEFAULT_VELOCITY_TOPIC = "/estimated_velocity"
 DEFAULT_IMU_TOPIC = "/imu/data_fastlio"
 DEFAULT_TEMPORAL_LIDAR_TOPIC = "/temporal_lidar/observation"
 DEFAULT_CMD_TOPIC = "/cmd_vel"
+DEFAULT_POLICY_VEL_TOPIC = "/policy_vel"
+DEFAULT_GOAL_REGION_TOPIC = "/navigation/in_goal_region"
+DEFAULT_COMMAND_MODE = "direct"
 DEFAULT_MAP_FRAME = "camera_init_correct"
 DEFAULT_BODY_FRAME = "base_link"
 DEFAULT_POLICY_HZ = 12.5
@@ -42,6 +46,7 @@ DEFAULT_GOAL_Z = 0.35
 DEFAULT_MAX_TF_AGE_SEC = 1.0
 DEFAULT_GOAL_REACHED_DISTANCE = 0.1
 DEFAULT_GOAL_REACHED_ANGLE = 0.2
+DEFAULT_GOAL_REGION_DISTANCE = 0.6
 
 TEMPORAL_LIDAR_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -59,6 +64,9 @@ class NavigationConfig:
     imu_topic: str
     temporal_lidar_topic: str
     cmd_topic: str
+    policy_vel_topic: str
+    goal_region_topic: str
+    command_mode: str
     map_frame: str
     body_frame: str
     policy_hz: float
@@ -73,6 +81,7 @@ class NavigationConfig:
     max_tf_age_sec: float
     goal_reached_distance: float
     goal_reached_angle: float
+    goal_region_distance: float
     device: str
 
 
@@ -92,6 +101,12 @@ def parse_args() -> NavigationConfig:
                         help="TemporalLidarObservation topic produced from corrected raw clouds.")
     parser.add_argument("--cmd-topic", type=str, default=DEFAULT_CMD_TOPIC,
                         help="TwistStamped topic to publish velocity commands.")
+    parser.add_argument("--policy-vel-topic", type=str, default=DEFAULT_POLICY_VEL_TOPIC,
+                        help="Scaled body-frame policy target published before CBF filtering.")
+    parser.add_argument("--goal-region-topic", type=str, default=DEFAULT_GOAL_REGION_TOPIC,
+                        help="Bool topic that reports whether the robot is in the CBF goal region.")
+    parser.add_argument("--command-mode", choices=("direct", "cbf"), default=DEFAULT_COMMAND_MODE,
+                        help="Publish policy output directly or hand it to the CBF controller.")
     parser.add_argument("--map-frame", type=str, default=DEFAULT_MAP_FRAME,
                         help="Map/world TF frame (goal is expressed in this frame).")
     parser.add_argument("--body-frame", type=str, default=DEFAULT_BODY_FRAME,
@@ -120,6 +135,8 @@ def parse_args() -> NavigationConfig:
                         help="XY distance threshold (m) to consider the goal reached.")
     parser.add_argument("--goal-reached-angle", type=float, default=DEFAULT_GOAL_REACHED_ANGLE,
                         help="Heading error threshold (rad) to consider the goal reached.")
+    parser.add_argument("--goal-region-distance", type=float, default=DEFAULT_GOAL_REGION_DISTANCE,
+                        help="Apply the reduced CBF tracking Kp at or inside this XY goal distance (m).")
     parser.add_argument("--device", type=str, default="cpu",
                         help="Torch device for policy inference ('cpu' or 'cuda').")
 
@@ -134,6 +151,8 @@ def parse_args() -> NavigationConfig:
         raise SystemExit("temporal lidar horizon and FOV bins must be positive")
     if args.temporal_lidar_timeout_sec <= 0.0:
         raise SystemExit("--temporal-lidar-timeout-sec must be positive")
+    if args.goal_region_distance <= 0.0:
+        raise SystemExit("--goal-region-distance must be positive")
 
     return NavigationConfig(
         policy_path=args.policy_path,
@@ -142,6 +161,9 @@ def parse_args() -> NavigationConfig:
         imu_topic=args.imu_topic,
         temporal_lidar_topic=args.temporal_lidar_topic,
         cmd_topic=args.cmd_topic,
+        policy_vel_topic=args.policy_vel_topic,
+        goal_region_topic=args.goal_region_topic,
+        command_mode=args.command_mode,
         map_frame=args.map_frame,
         body_frame=args.body_frame,
         policy_hz=float(args.policy_hz),
@@ -156,6 +178,7 @@ def parse_args() -> NavigationConfig:
         max_tf_age_sec=float(args.max_tf_age_sec),
         goal_reached_distance=float(args.goal_reached_distance),
         goal_reached_angle=float(args.goal_reached_angle),
+        goal_region_distance=float(args.goal_region_distance),
         device=args.device,
     )
 
@@ -170,6 +193,9 @@ class NavigationNode(Node):
         self.declare_parameter("imu_topic", config.imu_topic)
         self.declare_parameter("temporal_lidar_topic", config.temporal_lidar_topic)
         self.declare_parameter("cmd_topic", config.cmd_topic)
+        self.declare_parameter("policy_vel_topic", config.policy_vel_topic)
+        self.declare_parameter("goal_region_topic", config.goal_region_topic)
+        self.declare_parameter("command_mode", config.command_mode)
         self.declare_parameter("map_frame", config.map_frame)
         self.declare_parameter("body_frame", config.body_frame)
         self.declare_parameter("policy_hz", config.policy_hz)
@@ -184,6 +210,7 @@ class NavigationNode(Node):
         self.declare_parameter("max_tf_age_sec", config.max_tf_age_sec)
         self.declare_parameter("goal_reached_distance", config.goal_reached_distance)
         self.declare_parameter("goal_reached_angle", config.goal_reached_angle)
+        self.declare_parameter("goal_region_distance", config.goal_region_distance)
         self.declare_parameter("device", config.device)
 
         self._config = NavigationConfig(
@@ -193,6 +220,9 @@ class NavigationNode(Node):
             imu_topic=str(self.get_parameter("imu_topic").value),
             temporal_lidar_topic=str(self.get_parameter("temporal_lidar_topic").value),
             cmd_topic=str(self.get_parameter("cmd_topic").value),
+            policy_vel_topic=str(self.get_parameter("policy_vel_topic").value),
+            goal_region_topic=str(self.get_parameter("goal_region_topic").value),
+            command_mode=str(self.get_parameter("command_mode").value),
             map_frame=str(self.get_parameter("map_frame").value),
             body_frame=str(self.get_parameter("body_frame").value),
             policy_hz=float(self.get_parameter("policy_hz").value),
@@ -207,14 +237,22 @@ class NavigationNode(Node):
             max_tf_age_sec=float(self.get_parameter("max_tf_age_sec").value),
             goal_reached_distance=float(self.get_parameter("goal_reached_distance").value),
             goal_reached_angle=float(self.get_parameter("goal_reached_angle").value),
+            goal_region_distance=float(self.get_parameter("goal_region_distance").value),
             device=str(self.get_parameter("device").value),
         )
+
+        if self._config.command_mode not in ("direct", "cbf"):
+            raise SystemExit("command_mode must be either 'direct' or 'cbf'")
+        if self._config.command_mode == "cbf" and self._config.body_frame != "base_link":
+            raise SystemExit("CBF mode requires body_frame='base_link' for the /policy_vel frame contract.")
 
         if not self._config.policy_path:
             raise SystemExit(
                 "Navigation node requires a policy path. "
                 "Pass --policy-path or set the 'policy_path' ROS2 parameter."
             )
+        if self._config.command_mode not in ("direct", "cbf"):
+            raise SystemExit("command_mode must be 'direct' or 'cbf'")
 
         self._device = torch.device(self._config.device)
         self._policy = torch.jit.load(self._config.policy_path, map_location=self._device).eval()
@@ -237,8 +275,14 @@ class NavigationNode(Node):
             self._temporal_lidar_callback,
             TEMPORAL_LIDAR_QOS,
         )
-        self._cmd_publisher = self.create_publisher(
-            TwistStamped, self._config.cmd_topic, 10
+        self._policy_vel_publisher = self.create_publisher(TwistStamped, self._config.policy_vel_topic, 10)
+        self._goal_region_publisher = self.create_publisher(
+            Bool, self._config.goal_region_topic, 10
+        )
+        self._cmd_publisher = (
+            self.create_publisher(TwistStamped, self._config.cmd_topic, 10)
+            if self._config.command_mode == "direct"
+            else None
         )
 
         self._goal_pos_world: np.ndarray | None = None
@@ -256,7 +300,8 @@ class NavigationNode(Node):
         self._policy_timer = self.create_timer(1.0 / self._config.policy_hz, self._policy_step)
 
         self.get_logger().info(
-            "Navigation node: policy='%s', goal='%s', vel='%s', imu='%s', temporal lidar='%s', cmd='%s'. "
+            "Navigation node: policy='%s', goal='%s', vel='%s', imu='%s', temporal lidar='%s', "
+            "policy_vel='%s', goal_region='%s', command_mode=%s, cmd='%s'. "
             "Map frame: '%s', body frame: '%s'. %.1f Hz, lidar_max=%.1f, temporal shape=(2,%d,%d), "
             "cmd_scale=(%.2f, %.2f, %.2f), goal_z=%.3f, device=%s."
             % (
@@ -265,6 +310,9 @@ class NavigationNode(Node):
                 self._config.velocity_topic,
                 self._config.imu_topic,
                 self._config.temporal_lidar_topic,
+                self._config.policy_vel_topic,
+                self._config.goal_region_topic,
+                self._config.command_mode,
                 self._config.cmd_topic,
                 self._config.map_frame,
                 self._config.body_frame,
@@ -389,11 +437,22 @@ class NavigationNode(Node):
         heading_err = (self._goal_yaw_world - robot_yaw + math.pi) % (2.0 * math.pi) - math.pi
         return np.array([pos_body_x, pos_body_y, dz, heading_err], dtype=np.float32)
 
-    def _publish_zero_cmd(self) -> None:
+    def _publish_velocity_target(self, vx: float, vy: float, wz: float) -> None:
         cmd = TwistStamped()
         cmd.header.stamp = self.get_clock().now().to_msg()
         cmd.header.frame_id = self._config.body_frame
-        self._cmd_publisher.publish(cmd)
+        cmd.twist.linear.x = vx
+        cmd.twist.linear.y = vy
+        cmd.twist.angular.z = wz
+        self._policy_vel_publisher.publish(cmd)
+        if self._cmd_publisher is not None:
+            self._cmd_publisher.publish(cmd)
+
+    def _publish_goal_region(self, active: bool) -> None:
+        self._goal_region_publisher.publish(Bool(data=active))
+
+    def _publish_zero_cmd(self) -> None:
+        self._publish_velocity_target(0.0, 0.0, 0.0)
 
     def _policy_step(self) -> None:
         if self._goal_reached:
@@ -404,9 +463,13 @@ class NavigationNode(Node):
             v is None
             for v in [self._goal_pos_world, self._goal_yaw_world, self._lin_vel, self._ang_vel, self._temporal_lidar]
         ):
+            if self._config.command_mode == "cbf":
+                self._publish_zero_cmd()
             return
 
         if self._latest_lidar_scan_stamp_ns is None:
+            if self._config.command_mode == "cbf":
+                self._publish_zero_cmd()
             return
         lidar_age_s = (self.get_clock().now().nanoseconds - self._latest_lidar_scan_stamp_ns) / 1e9
         if lidar_age_s > self._config.temporal_lidar_timeout_sec:
@@ -415,6 +478,8 @@ class NavigationNode(Node):
 
         pose_result = self._lookup_robot_pose()
         if pose_result is None:
+            if self._config.command_mode == "cbf":
+                self._publish_zero_cmd()
             return
         robot_pos, robot_yaw = pose_result
 
@@ -425,11 +490,14 @@ class NavigationNode(Node):
         if xy_dist <= self._config.goal_reached_distance and heading_err <= self._config.goal_reached_angle:
             self._goal_reached = True
             self._last_action = torch.zeros(3, dtype=torch.float32)
+            self._publish_goal_region(True)
             self._publish_zero_cmd()
             self.get_logger().info(
                 "Goal reached (dist=%.3f m, heading_err=%.3f rad). Awaiting new goal." % (xy_dist, heading_err)
             )
             return
+
+        self._publish_goal_region(xy_dist <= self._config.goal_region_distance)
 
         obs = np.concatenate([
             pose_cmd,                    # (4,)  pose_2d_command
@@ -444,17 +512,14 @@ class NavigationNode(Node):
             action = self._policy(obs_t).squeeze(0).cpu()  # (3,) → [vx, vy, wz]
 
         self._last_action = action
-
-        cmd = TwistStamped()
-
-        cmd.header.stamp = self.get_clock().now().to_msg()
-        cmd.header.frame_id = self._config.body_frame
-
-        cmd.twist.linear.x = float(action[0]) * self._config.cmd_scale_vx
-        cmd.twist.linear.y = float(action[1]) * self._config.cmd_scale_vy
-        cmd.twist.angular.z = float(action[2]) * self._config.cmd_scale_wz
-
-        self._cmd_publisher.publish(cmd)
+        # Scaling is deliberately completed before publication. The CBF works
+        # only in physical command units and must never receive a post-solve
+        # scale factor.
+        self._publish_velocity_target(
+            float(action[0]) * self._config.cmd_scale_vx,
+            float(action[1]) * self._config.cmd_scale_vy,
+            float(action[2]) * self._config.cmd_scale_wz,
+        )
 
 
 def main() -> None:
