@@ -282,11 +282,25 @@ class GO2HardwareEnvironment(Go2Environment):
         
         # Check and release any active modes
         status, result = self.msc.CheckMode()
+        if status != 0 or result is None:
+            raise RuntimeError(
+                f"MotionSwitcherClient.CheckMode() failed (status={status!r}, result={result!r}). "
+                "The RPC request likely timed out waiting for a response from the robot. Common "
+                "causes: the robot hasn't finished booting yet (wait ~30-60s after power-on and "
+                "retry), the DDS domain id doesn't match what the robot's services publish on "
+                "(HARDWARE_DOMAIN_ID here is 0, the Unitree default), or a local firewall is "
+                "blocking DDS UDP traffic on this interface."
+            )
 
         while result['name']:
             print(f"Releasing active mode: {result['name']}")
             self.msc.ReleaseMode()
             status, result = self.msc.CheckMode()
+            if status != 0 or result is None:
+                raise RuntimeError(
+                    f"MotionSwitcherClient.CheckMode() failed after ReleaseMode() "
+                    f"(status={status!r}, result={result!r})."
+                )
             sleep(1)
         
         print("Robot services initialized and ready for low-level control")

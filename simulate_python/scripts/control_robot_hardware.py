@@ -10,7 +10,7 @@ DEVICE = "cuda"
 SIMULATION_DOMAIN_ID = 1
 HARDWARE_DOMAIN_ID = 0
 SIMULATION_INTERFACE = "wlp128s20f3"
-HARDWARE_INTERFACE = "enp108s0"
+HARDWARE_INTERFACE = "enp130s0"
 DEFAULT_MODEL_PATH = (
     Path(__file__).resolve().parents[3]
     / "logs"

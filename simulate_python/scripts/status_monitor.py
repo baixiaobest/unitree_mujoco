@@ -31,7 +31,7 @@ from utils.status_monitor_commands import (
 SIMULATION_DOMAIN_ID = 1
 HARDWARE_DOMAIN_ID = 0
 SIMULATION_INTERFACE = "wlp128s20f3"
-HARDWARE_INTERFACE = "enp108s0"
+HARDWARE_INTERFACE = "enp130s0"
 
 
 def parse_args():

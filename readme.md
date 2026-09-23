@@ -315,3 +315,118 @@ source ~/unitree_ros2/setup.sh # Use the network card connected to the robot
 export ROS_DOMAIN_ID=0 # Use the default domain id
 ./install/stand_go2/bin/stand_go2 # Run
 ```
+
+# Connecting to the Real Go2 (this fork's `simulate_python/scripts/` harness)
+
+This section documents `simulate_python/scripts/control_robot_hardware.py` specifically -- the
+harness this fork actually uses to run a locomotion policy (`--policy-mode velocity_control` or
+`position_control`) against either the MuJoCo bridge (`--run-mode simulation`) or a real Go2
+(`--run-mode hardware`), including keyboard teleop. What follows is what it actually took to get a
+real Go2 connection working, since the defaults baked into the scripts are specific to whatever
+machine they were originally written on.
+
+## 1. Install dependencies
+```bash
+pip install mujoco pygame cyclonedds PyQt5 pyqtgraph opencv-python
+```
+`cyclonedds` (the Python package) needs a matching **native** CycloneDDS C library --
+`unitree_sdk2py` pins an old `cyclonedds==0.10.2`, which has no prebuilt wheel, so `pip install -e .`
+in `unitree_sdk2_python` will fail with `Could not locate cyclonedds` unless you build it first:
+```bash
+git clone https://github.com/eclipse-cyclonedds/cyclonedds -b releases/0.10.x ~/cyclonedds
+cd ~/cyclonedds && mkdir build install && cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=../install
+cmake --build . --target install
+
+cd ~/unitree_sdk2_python  # git clone https://github.com/unitreerobotics/unitree_sdk2_python.git first
+export CYCLONEDDS_HOME=~/cyclonedds/install
+pip install -e .
+```
+The status monitor GUI (PyQt5) additionally needs several `xcb` platform-plugin libraries that
+aren't always preinstalled -- if it fails with `Could not load the Qt platform plugin "xcb"`, run
+`QT_DEBUG_PLUGINS=1 python3 scripts/status_monitor.py --run-mode simulation` to see exactly which
+`.so` is missing, then install it (on Ubuntu, commonly `libxcb-cursor0`, `libxcb-icccm4` --
+**not** `libxcb-icccm0`, that package doesn't exist on newer Ubuntu -- `libxcb-keysyms1`,
+`libxcb-image0`, `libxcb-render-util0`, `libxcb-xinerama0`).
+
+## 2. Machine-specific values you must update first
+The scripts hardcode a network interface name and domain id at the top of several files --
+these are specific to whatever machine they were last edited on, **not** portable:
+- `simulate_python/config.py` (`SIMULATION_CONFIG["INTERFACE"]`)
+- `simulate_python/scripts/control_robot_hardware.py` (`SIMULATION_INTERFACE`, `HARDWARE_INTERFACE`)
+- `simulate_python/scripts/status_monitor.py` (`SIMULATION_INTERFACE`, `HARDWARE_INTERFACE`)
+- `simulate_python/scripts/unitree_mujoco.py`, `scripts/control_robot_mujoco.py` (the
+  `ChannelFactoryInitialize(...)` call)
+
+Find your machine's actual interface names with `ip -o link show`, and update the constants to
+match -- `SIMULATION_INTERFACE` should be a real interface with `UP`/`MULTICAST` (your normal WiFi
+or Ethernet is fine for simulation, since nothing leaves the machine), `HARDWARE_INTERFACE` is
+whichever port the robot's Ethernet cable is actually plugged into.
+
+## 3. Connecting to the real robot over Ethernet
+A Go2's wired Ethernet port does **not** run a DHCP server -- your computer will self-assign a
+`169.254.x.x` link-local address (Linux's DHCP-failure fallback) and nothing will respond, even
+though `ip link show <iface>` reports `UP,LOWER_UP` (cable detected) the whole time. This looks
+exactly like a bad cable but usually isn't. The fix is a **manual static IP** on the classic Unitree
+subnet, matching the robot's own well-known address `192.168.123.161`:
+```bash
+nmcli connection modify <your-connection-name> ipv4.addresses 192.168.123.222/24 ipv4.method manual
+nmcli connection up <your-connection-name>
+```
+(`nmcli device status` shows the connection name for your interface; this works without `sudo` for
+your own NetworkManager profiles.) Then verify with a real ping, not a ping to your own address:
+```bash
+ping 192.168.123.161
+```
+If that doesn't respond at all (no ARP replies to anything on the link either -- check with
+`ip neigh show dev <iface>` after pinging a few addresses), it's a genuine physical-layer problem:
+confirm the robot's onboard computer is actually finished booting (check that the Unitree phone app
+can see the robot over its own WiFi AP -- if it can, the robot is definitely up and networking, and
+the problem is specific to the Ethernet cable/port), and check `ethtool <iface> | grep -i "link
+detected"` for a lower-level link check than `ip link`'s `LOWER_UP` flag.
+
+Note the robot's WiFi AP (what the phone app connects to) is a **separate interface with a separate
+IP**, typically `192.168.12.1` -- unrelated to the wired `192.168.123.161` address above. Don't mix
+the two up when troubleshooting.
+
+If the connection succeeds but `control_robot_hardware.py` then fails with
+`RuntimeError: MotionSwitcherClient.CheckMode() failed (status=3102, ...)` (or an unhandled
+`TypeError` on older versions of this file that didn't check the RPC status), that's
+`RPC_ERR_CLIENT_SEND` -- the DDS request never got a matched peer to send to. In every case we hit,
+this traced back to exactly the link-local-address symptom above; fixing the static IP fixed the RPC
+error too. It is not a robot-boot-timing issue (that would show up as `RPC_ERR_CLIENT_API_TIMEOUT`,
+status `3104`, instead).
+
+## 4. Running it
+```bash
+cd simulate_python
+# Simulation (no real robot needed):
+python3 scripts/control_robot_hardware.py --run-mode simulation \
+  --policy-mode velocity_control --input-device keyboard \
+  --model-path <path-to-a-locomotion policy_jit.pt>
+
+# Real robot, once ping to 192.168.123.161 succeeds:
+python3 scripts/control_robot_hardware.py --run-mode hardware \
+  --policy-mode velocity_control --input-device keyboard \
+  --model-path <path-to-a-locomotion policy_jit.pt>
+```
+`--input-device keyboard` opens a small window -- click it for keyboard focus, then W/S (forward/
+back), A/D (turn), Q/E (strafe); releasing a key decelerates smoothly rather than stopping instantly.
+Omit the flag (or pass `--input-device xbox`, the default) to use a joystick instead. Either way, a
+status monitor window also opens (unless you pass `--no-status-monitor`) -- **the robot will not move
+until you press stand-up there**, regardless of which input device you're using.
+
+**Safety**: clear the area around the robot before standing it up, and be ready to cut power. The
+script itself prints `WARNING: Please ensure there are no obstacles around the robot` for a reason.
+
+## 5. If the loaded policy checkpoint isn't from this fork's `EncoderActorCriticGO2` pipeline
+`GO2HardwareEnvironment` was originally written for policies exported with a `.horizon` attribute
+(declaring how many past observation frames they expect stacked). A plain IsaacLab
+`export_policy_as_jit` checkpoint has no such attribute; this fork's `go2_hardware_environment.py`
+falls back to `policy_history_length = 1` (no history stacking) in that case, and takes the flat
+(non-history-stacked) observation path accordingly. If you load such a checkpoint, also double-check
+`VELOCITY_CONTROL_POLICY_LAYOUT` / `POSITION_CONTROL_POLICY_LAYOUT` in `_init_observation_manager()`
+actually match your policy's real training-time observation order -- both the *set* of terms and
+their *order* matter for a traced MLP, which has no notion of feature names, only column position. A
+dimension mismatch fails loudly (`RuntimeError: mat1 and mat2 shapes cannot be multiplied ...`); a
+same-width-wrong-order mismatch does not fail at all, it just silently feeds the policy garbage.
