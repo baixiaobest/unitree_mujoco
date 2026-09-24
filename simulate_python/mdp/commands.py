@@ -11,6 +11,7 @@ from utils.locomotion_mode import (
     LocomotionMode,
 )
 from utils.mujoco_visualizer import MujocoVisualizer
+from utils.velocity_commands import apply_velocity_deadzone
 import pygame
 
 
@@ -407,6 +408,8 @@ class GameControllerVelocityCommandConfig(CommandConfig):
     max_linear_velocity: float = 0.7
     max_angular_velocity: float = 1.0
     smoothing_time_constant: float = 0.5
+    planar_deadzone_mps: float = 0.1
+    yaw_deadzone_radps: float = 0.1
     controller_index: int = 0
     joystick_deadzone: float = 0.1
     left_x_axis: int = 0
@@ -436,6 +439,14 @@ class GameControllerVelocityCommand(Command):
     @property
     def command(self):
         return self._command
+
+    def _apply_output_deadzone(self) -> None:
+        """Snap sub-threshold physical velocity commands to a stationary command."""
+        self._command = apply_velocity_deadzone(
+            self._command,
+            planar_deadzone_mps=self.cfg.planar_deadzone_mps,
+            yaw_deadzone_radps=self.cfg.yaw_deadzone_radps,
+        )
 
     def _disconnect_controller(self, reason: str | None = None) -> None:
         """Release a removed controller and retry discovery after a short delay."""
@@ -527,11 +538,13 @@ class GameControllerVelocityCommand(Command):
         )
         if self.cfg.smoothing_time_constant <= 0.0:
             self._command = self._target_command.clone()
+            self._apply_output_deadzone()
 
     def update(self):
         """Low-pass filter the target command in the robot base frame."""
         if self.cfg.smoothing_time_constant <= 0.0:
             self._command = self._target_command.clone()
+            self._apply_output_deadzone()
             return
 
         current_time = float(self.env.time_elapsed)
@@ -543,6 +556,7 @@ class GameControllerVelocityCommand(Command):
 
         alpha = min(1.0, dt / (self.cfg.smoothing_time_constant + dt))
         self._command = torch.lerp(self._command, self._target_command, alpha)
+        self._apply_output_deadzone()
 
     def visualize(self, visualizer: MujocoVisualizer):
         """Draw the commanded planar velocity as an arrow above the robot base."""
@@ -901,5 +915,6 @@ class GameControllerPolicyHybridVelocityCommand(GameControllerVelocityCommand):
                 self._command = torch.zeros_like(self._command)
             else:
                 self._command = policy_cmd.clone()
+                self._apply_output_deadzone()
         else:
             super().update()
