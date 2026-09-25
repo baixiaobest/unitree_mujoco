@@ -440,10 +440,10 @@ class GameControllerVelocityCommand(Command):
     def command(self):
         return self._command
 
-    def _apply_output_deadzone(self) -> None:
-        """Snap sub-threshold physical velocity commands to a stationary command."""
-        self._command = apply_velocity_deadzone(
-            self._command,
+    def _apply_target_deadzone(self) -> None:
+        """Snap small sampled targets to a stationary target before smoothing."""
+        self._target_command = apply_velocity_deadzone(
+            self._target_command,
             planar_deadzone_mps=self.cfg.planar_deadzone_mps,
             yaw_deadzone_radps=self.cfg.yaw_deadzone_radps,
         )
@@ -536,15 +536,14 @@ class GameControllerVelocityCommand(Command):
             device=self.device,
             dtype=torch.float32,
         )
+        self._apply_target_deadzone()
         if self.cfg.smoothing_time_constant <= 0.0:
             self._command = self._target_command.clone()
-            self._apply_output_deadzone()
 
     def update(self):
         """Low-pass filter the target command in the robot base frame."""
         if self.cfg.smoothing_time_constant <= 0.0:
             self._command = self._target_command.clone()
-            self._apply_output_deadzone()
             return
 
         current_time = float(self.env.time_elapsed)
@@ -556,7 +555,6 @@ class GameControllerVelocityCommand(Command):
 
         alpha = min(1.0, dt / (self.cfg.smoothing_time_constant + dt))
         self._command = torch.lerp(self._command, self._target_command, alpha)
-        self._apply_output_deadzone()
 
     def visualize(self, visualizer: MujocoVisualizer):
         """Draw the commanded planar velocity as an arrow above the robot base."""
@@ -914,7 +912,8 @@ class GameControllerPolicyHybridVelocityCommand(GameControllerVelocityCommand):
             if policy_cmd is None:
                 self._command = torch.zeros_like(self._command)
             else:
-                self._command = policy_cmd.clone()
-                self._apply_output_deadzone()
+                self._target_command = policy_cmd.clone()
+                self._apply_target_deadzone()
+                self._command = self._target_command.clone()
         else:
             super().update()

@@ -5,6 +5,9 @@ from enum import IntEnum
 
 TOPIC_POLICY_VEL_CMD = "rt/cmd_vel"
 TOPIC_LOCOMOTION_MODE = "rt/locomotion_mode"
+# Read-only diagnostic topic published by the hardware control process after
+# it updates the active velocity-command term and before policy inference.
+TOPIC_CONTROLLER_COMMAND_DEBUG = "rt/controller_command_debug"
 
 
 class LocomotionMode(IntEnum):

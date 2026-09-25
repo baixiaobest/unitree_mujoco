@@ -17,9 +17,14 @@ import torch
 from utils.odometry_publisher import EstimatedOdometryPublisher
 from utils.robot_posture import RobotPostureState, TOPIC_ROBOT_POSTURE
 from utils.robot_logger import RobotLogger  # Import the logger
+from utils.locomotion_mode import TOPIC_CONTROLLER_COMMAND_DEBUG
 from utils.status_monitor_commands import TOPIC_STATUS_MONITOR_COMMAND, decode_status_monitor_command
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber
-from unitree_sdk2py.idl.default import unitree_go_msg_dds__UwbSwitch_ as UwbSwitch_default
+from unitree_sdk2py.idl.default import (
+    geometry_msgs_msg_dds__TwistStamped_ as TwistStamped_default,
+    unitree_go_msg_dds__UwbSwitch_ as UwbSwitch_default,
+)
+from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import TwistStamped_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import UwbSwitch_, WirelessController_
 
 class GO2HardwareEnvironment(Go2Environment):
@@ -92,6 +97,10 @@ class GO2HardwareEnvironment(Go2Environment):
             TOPIC_STATUS_MONITOR_COMMAND, WirelessController_
         )
         self.status_monitor_command_subscriber.Init(self._status_monitor_command_handler, 10)
+        self.controller_command_debug_publisher: ChannelPublisher = ChannelPublisher(
+            TOPIC_CONTROLLER_COMMAND_DEBUG, TwistStamped_
+        )
+        self.controller_command_debug_publisher.Init()
 
         # Initialize logger if enabled
         self.enable_logging = enable_logging
@@ -205,6 +214,22 @@ class GO2HardwareEnvironment(Go2Environment):
 
         self._pending_remote_command = None
         self.execute_posture_command(command_name, require_stationary=True)
+
+    def _publish_controller_command_debug(self) -> None:
+        """Publish the velocity command that will enter the policy observation.
+
+        This diagnostic DDS topic is read-only: it mirrors the command term
+        after controller/policy selection and smoothing, and has no effect on
+        robot control.
+        """
+        if self.policy_mode != "velocity_control" or self.command_manager is None:
+            return
+        command = self.command_manager.get_command("game_controller_velocity_command")
+        msg = TwistStamped_default()
+        msg.twist.linear.x = float(command[0].item())
+        msg.twist.linear.y = float(command[1].item())
+        msg.twist.angular.z = float(command[2].item())
+        self.controller_command_debug_publisher.Write(msg)
 
     def _is_stationary_for_remote_command(self) -> bool:
         """Return whether the robot is stationary enough to safely accept remote posture commands."""
@@ -373,8 +398,8 @@ class GO2HardwareEnvironment(Go2Environment):
                 GameControllerPolicyHybridVelocityCommand,
                 GameControllerPolicyHybridVelocityCommandConfig(
                     resample_interval=0.05,
-                    max_linear_velocity=1.0,
-                    max_angular_velocity=1.0,
+                    max_linear_velocity=1.5,
+                    max_angular_velocity=1.5,
                     controller_index=0,
                     joystick_deadzone=0.1,
                     left_x_axis=0,
@@ -542,6 +567,7 @@ class GO2HardwareEnvironment(Go2Environment):
 
         # Update commands
         self._command_manager.update()
+        self._publish_controller_command_debug()
         
         # Get observation and run policy
         policy_obs = self._get_policy_observation()
@@ -651,4 +677,3 @@ class GO2HardwareEnvironment(Go2Environment):
         if self.enable_logging and self.logger:
             self.logger.close()
         print("Resources cleaned up")
-
