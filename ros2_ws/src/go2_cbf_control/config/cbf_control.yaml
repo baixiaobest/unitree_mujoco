@@ -23,21 +23,30 @@ cbf_control:
     d_cbf_active_m: 5.0
     gamma1: 2.0
     gamma2: 2.0
-    kp_x: 5.0
-    kp_y: 5.0
+    kp_x: 3.0
+    kp_y: 3.0
     # Absolute linear Kp used for both X and Y while navigation reports that
     # the robot is within its configured goal region; it is not a multiplier.
-    goal_region_kp: 2.0
+    goal_region_kp: 1.0
     accel_limit_x: 1.5
     accel_limit_y: 1.5
     velocity_limit_x: 1.2
     velocity_limit_y: 1.2
+    # Deployment-only navigation-reference shaping (not a standard CBF term).
+    # At 50 Hz, 2.0 m/s^2 permits a 0.04 m/s planar-vector change per tick.
+    # It acts before the CBF QP; obstacle constraints may still change /cmd_vel
+    # faster, and smoothing can delay navigation-led avoidance of moving agents.
+    enable_navigation_slew: false
+    a_nav: 2.0  # m/s^2, maximum change rate of the planar policy reference
     # Independent angular command governor. The static planar CBF does not
     # constrain yaw, so every healthy policy yaw target is bounded here before
     # it can reach /cmd_vel. Begin conservatively and increase only after a
     # stand-alone turning test confirms the deployed gait is stable.
     max_yaw_rate_radps: 2.0
     max_yaw_accel_radps2: 3.0
+    # Match the robust locomotion command deadzone at the final CBF output.
+    planar_deadzone_mps: 0.1
+    yaw_deadzone_radps: 0.1
     tracking_tau_s: 0.30
     max_lidar_points: 64
     slack_penalty: 1000.0

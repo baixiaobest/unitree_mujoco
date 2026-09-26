@@ -913,7 +913,8 @@ class GameControllerPolicyHybridVelocityCommand(GameControllerVelocityCommand):
                 self._command = torch.zeros_like(self._command)
             else:
                 self._target_command = policy_cmd.clone()
-                self._apply_target_deadzone()
+                # ROS CBF applies the training deadzone before publishing /cmd_vel.
+                # Do not deadzone the same policy command again here.
                 self._command = self._target_command.clone()
         else:
             super().update()

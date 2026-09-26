@@ -23,8 +23,8 @@ navigation:
     cmd_scale_wz: 1.0
     goal_z: 0.35
     max_tf_age_sec: 1.0
-    goal_reached_distance: 0.15
-    goal_reached_angle: 0.523
+    goal_reached_distance: 0.30
+    goal_reached_angle: 1.0
     # Navigation owns the geometric goal-region condition. CBF owns the
     # associated tracking-Kp multiplier in cbf_control.yaml.
     goal_region_distance: 0.60

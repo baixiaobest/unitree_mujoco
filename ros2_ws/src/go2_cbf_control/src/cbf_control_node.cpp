@@ -78,6 +78,10 @@ struct Config {
   double velocity_limit_y{};
   double max_yaw_rate_radps{};
   double max_yaw_accel_radps2{};
+  bool enable_navigation_slew{};
+  double a_nav_mps2{};
+  double planar_deadzone_mps{};
+  double yaw_deadzone_radps{};
   double tracking_tau_s{};
   int max_lidar_points{};
   double slack_penalty{};
@@ -357,6 +361,10 @@ class CbfControlNode final : public rclcpp::Node {
     config.velocity_limit_y = declare_parameter<double>("velocity_limit_y", 1.5);
     config.max_yaw_rate_radps = declare_parameter<double>("max_yaw_rate_radps", 0.6);
     config.max_yaw_accel_radps2 = declare_parameter<double>("max_yaw_accel_radps2", 1.0);
+    config.enable_navigation_slew = declare_parameter<bool>("enable_navigation_slew", true);
+    config.a_nav_mps2 = declare_parameter<double>("a_nav", 2.0);
+    config.planar_deadzone_mps = declare_parameter<double>("planar_deadzone_mps", 0.1);
+    config.yaw_deadzone_radps = declare_parameter<double>("yaw_deadzone_radps", 0.1);
     config.tracking_tau_s = declare_parameter<double>("tracking_tau_s", 0.30);
     config.max_lidar_points = declare_parameter<int>("max_lidar_points", 64);
     config.slack_penalty = declare_parameter<double>("slack_penalty", 1000.0);
@@ -371,6 +379,8 @@ class CbfControlNode final : public rclcpp::Node {
         config.accel_limit_x <= 0.0 || config.accel_limit_y <= 0.0 || config.velocity_limit_x <= 0.0 ||
         config.velocity_limit_y <= 0.0 || config.max_yaw_rate_radps <= 0.0 ||
         config.max_yaw_accel_radps2 <= 0.0 || config.slack_penalty <= 0.0 ||
+        config.a_nav_mps2 <= 0.0 ||
+        config.planar_deadzone_mps < 0.0 || config.yaw_deadzone_radps < 0.0 ||
         config.max_cbf_slack < 0.0 || config.bad_solve_grace_s <= 0.0 ||
         config.goal_region_topic.empty()) {
       throw std::runtime_error("Invalid static CBF timing or physical parameters.");
@@ -494,6 +504,7 @@ class CbfControlNode final : public rclcpp::Node {
     int static_candidate_count = 0;
     SolverResult result;
     double nominal_x = 0.0, nominal_y = 0.0, margin = config_.d_margin_m;
+    double policy_target_x = filtered_policy_x_, policy_target_y = filtered_policy_y_;
     double measured_x = 0.0, measured_y = 0.0, command_x = 0.0, command_y = 0.0, command_wz = 0.0;
     if (healthy) {
       measured_x = velocity->twist.linear.x;
@@ -514,8 +525,17 @@ class CbfControlNode final : public rclcpp::Node {
       const double zoh = go2_cbf_control::zoh_gain(step_s, config_.tracking_tau_s);
       const double kp_x = in_goal_region ? config_.goal_region_kp : config_.kp_x;
       const double kp_y = in_goal_region ? config_.goal_region_kp : config_.kp_y;
-      nominal_x = std::clamp(kp_x * (policy->twist.linear.x - measured_x), -config_.accel_limit_x, config_.accel_limit_x);
-      nominal_y = std::clamp(kp_y * (policy->twist.linear.y - measured_y), -config_.accel_limit_y, config_.accel_limit_y);
+      // Non-standard deployment heuristic: slew only the planar navigation
+      // reference, before the CBF QP. This does not change CBF constraints or
+      // guarantee a slew bound on /cmd_vel. The filter advances only for an
+      // accepted control tick, and does not alter yaw or raw policy diagnostics.
+      const auto target = go2_cbf_control::planar_policy_reference(
+        config_.enable_navigation_slew, policy->twist.linear.x, policy->twist.linear.y,
+        filtered_policy_x_, filtered_policy_y_, config_.a_nav_mps2, step_s);
+      policy_target_x = target[0];
+      policy_target_y = target[1];
+      nominal_x = std::clamp(kp_x * (policy_target_x - measured_x), -config_.accel_limit_x, config_.accel_limit_x);
+      nominal_y = std::clamp(kp_y * (policy_target_y - measured_y), -config_.accel_limit_y, config_.accel_limit_y);
       const double lower_x = std::max(-config_.accel_limit_x, (-config_.velocity_limit_x - measured_x) / zoh);
       const double lower_y = std::max(-config_.accel_limit_y, (-config_.velocity_limit_y - measured_y) / zoh);
       const double upper_x = std::min(config_.accel_limit_x, (config_.velocity_limit_x - measured_x) / zoh);
@@ -550,7 +570,7 @@ class CbfControlNode final : public rclcpp::Node {
       // control rate so a new policy target cannot cause either an excessive
       // yaw rate or an abrupt angular-command step at /cmd_vel.
       command_wz = go2_cbf_control::limited_yaw_command(
-        policy->twist.angular.z, last_command_wz_, config_.max_yaw_rate_radps,
+        policy->twist.angular.z, yaw_governor_state_wz_, config_.max_yaw_rate_radps,
         config_.max_yaw_accel_radps2, step_s);
     }
     const double elapsed_s = std::chrono::duration<double>(Clock::now() - start).count();
@@ -568,6 +588,8 @@ class CbfControlNode final : public rclcpp::Node {
       bad_solve_started_at_.reset();
       if (fallback_active_) ++fallback_transitions_;
       fallback_active_ = false;
+      filtered_policy_x_ = policy_target_x;
+      filtered_policy_y_ = policy_target_y;
     } else {
       if (!bad_solve_started_at_) bad_solve_started_at_ = start;
       bad_solve_duration_s = std::max(
@@ -584,11 +606,22 @@ class CbfControlNode final : public rclcpp::Node {
       } else {
         if (!fallback_active_) ++fallback_transitions_;
         fallback_active_ = true;
+        // Restart the reference from rest after a sustained input/solve fault.
+        filtered_policy_x_ = 0.0;
+        filtered_policy_y_ = 0.0;
         command_x = go2_cbf_control::approach_zero(last_command_x_, config_.fallback_linear_decel_mps2 * step_s);
         command_y = go2_cbf_control::approach_zero(last_command_y_, config_.fallback_linear_decel_mps2 * step_s);
         command_wz = go2_cbf_control::approach_zero(last_command_wz_, config_.fallback_yaw_decel_radps2 * step_s);
       }
     }
+    // Keep the pre-deadzone yaw state so sub-threshold ramp steps accumulate.
+    // A short fault hold retains that state; a controlled stop resets it to
+    // the fallback command, avoiding a stale yaw jump when solves resume.
+    if (!holding_last_valid_command) yaw_governor_state_wz_ = command_wz;
+    // Apply once to the completed CBF/fallback command. The published command,
+    // remembered command, and diagnostics must all agree.
+    go2_cbf_control::apply_velocity_deadzone(
+      command_x, command_y, command_wz, config_.planar_deadzone_mps, config_.yaw_deadzone_radps);
     const auto publish_start = Clock::now();
     publish_command(command_x, command_y, command_wz);
     const double release_to_publish_s = std::chrono::duration<double>(Clock::now() - publish_start).count();
@@ -597,6 +630,7 @@ class CbfControlNode final : public rclcpp::Node {
     last_command_wz_ = command_wz;
     update_debug(policy_age, velocity_age, scan_age, margin, in_goal_region, policy ? policy->twist.linear.x : 0.0,
       policy ? policy->twist.linear.y : 0.0, policy ? policy->twist.angular.z : 0.0,
+      filtered_policy_x_, filtered_policy_y_,
       nominal_x, nominal_y, measured_x, measured_y,
       command_x, command_y, command_wz, elapsed_s, timer_lateness_s, release_to_publish_s, result,
       candidates, candidate_count, front_candidate_count, static_candidate_count, selected, selected_count,
@@ -616,7 +650,7 @@ class CbfControlNode final : public rclcpp::Node {
 
   void update_debug(
     double policy_age, double velocity_age, double scan_age, double margin, bool in_goal_region,
-    double policy_x, double policy_y, double policy_wz,
+    double policy_x, double policy_y, double policy_wz, double filtered_policy_x, double filtered_policy_y,
     double nominal_x, double nominal_y,
     double measured_x, double measured_y, double command_x, double command_y, double command_wz, double elapsed_s,
     double timer_lateness_s, double release_to_publish_s, const SolverResult & result,
@@ -631,6 +665,7 @@ class CbfControlNode final : public rclcpp::Node {
     debug_.policy_age = policy_age; debug_.velocity_age = velocity_age; debug_.scan_age = scan_age; debug_.margin = margin;
     debug_.in_goal_region = in_goal_region;
     debug_.policy_x = policy_x; debug_.policy_y = policy_y; debug_.policy_wz = policy_wz;
+    debug_.filtered_policy_x = filtered_policy_x; debug_.filtered_policy_y = filtered_policy_y;
     debug_.nominal_x = nominal_x; debug_.nominal_y = nominal_y; debug_.measured_x = measured_x; debug_.measured_y = measured_y;
     debug_.command_x = command_x; debug_.command_y = command_y; debug_.command_wz = command_wz; debug_.elapsed_s = elapsed_s;
     debug_.timer_lateness_s = timer_lateness_s; debug_.release_to_publish_s = release_to_publish_s;
@@ -687,6 +722,8 @@ class CbfControlNode final : public rclcpp::Node {
     visualization_msgs::msg::MarkerArray markers;
     markers.markers.push_back(velocity_marker(0, "measured", copy.measured_x, copy.measured_y, 1.0F, 1.0F, 1.0F));
     markers.markers.push_back(velocity_marker(1, "policy", copy.policy_x, copy.policy_y, 0.2F, 0.5F, 1.0F));
+    markers.markers.push_back(velocity_marker(4, "slewed_policy", copy.filtered_policy_x, copy.filtered_policy_y,
+      0.7F, 0.3F, 1.0F));
     markers.markers.push_back(velocity_marker(2, "nominal",
       copy.measured_x + copy.nominal_x / (copy.in_goal_region ? config_.goal_region_kp : config_.kp_x),
       copy.measured_y + copy.nominal_y / (copy.in_goal_region ? config_.goal_region_kp : config_.kp_y),
@@ -718,6 +755,10 @@ class CbfControlNode final : public rclcpp::Node {
     add("effective_kp_x", copy.in_goal_region ? config_.goal_region_kp : config_.kp_x);
     add("effective_kp_y", copy.in_goal_region ? config_.goal_region_kp : config_.kp_y);
     add("policy_wz_radps", copy.policy_wz); add("command_wz_radps", copy.command_wz);
+    add("navigation_slew_enabled", config_.enable_navigation_slew ? 1.0 : 0.0);
+    add("a_nav_mps2", config_.a_nav_mps2);
+    add("filtered_policy_x_mps", copy.filtered_policy_x);
+    add("filtered_policy_y_mps", copy.filtered_policy_y);
     add("max_yaw_rate_radps", config_.max_yaw_rate_radps);
     add("max_yaw_accel_radps2", config_.max_yaw_accel_radps2);
     add("solve_time_s", copy.result.solve_time_s); add("control_elapsed_s", copy.elapsed_s);
@@ -740,7 +781,7 @@ class CbfControlNode final : public rclcpp::Node {
 
   struct DebugState {
     double policy_age{std::numeric_limits<double>::infinity()}, velocity_age{std::numeric_limits<double>::infinity()};
-    double scan_age{std::numeric_limits<double>::infinity()}, margin{}, policy_x{}, policy_y{}, policy_wz{}, nominal_x{}, nominal_y{}, measured_x{}, measured_y{};
+    double scan_age{std::numeric_limits<double>::infinity()}, margin{}, policy_x{}, policy_y{}, policy_wz{}, filtered_policy_x{}, filtered_policy_y{}, nominal_x{}, nominal_y{}, measured_x{}, measured_y{};
     bool in_goal_region{};
     double command_x{}, command_y{}, command_wz{}, elapsed_s{}, timer_lateness_s{}, release_to_publish_s{};
     uint64_t timeout_count{}, fallback_transitions{};
@@ -768,6 +809,8 @@ class CbfControlNode final : public rclcpp::Node {
   std::optional<bool> in_goal_region_;
   Clock::time_point last_control_{};
   double last_command_x_{}, last_command_y_{}, last_command_wz_{};
+  double filtered_policy_x_{}, filtered_policy_y_{};
+  double yaw_governor_state_wz_{};
   bool fallback_active_{};
   std::optional<Clock::time_point> bad_solve_started_at_;
   uint64_t timeout_count_{}, fallback_transitions_{};
