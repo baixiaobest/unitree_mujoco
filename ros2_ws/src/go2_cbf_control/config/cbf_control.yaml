@@ -1,58 +1,59 @@
 cbf_control:
   ros__parameters:
-    # A short invalid-input / rejected-solve interval holds the last accepted
-    # command exactly. Only a continuous interval beyond this grace period
-    # starts a controlled-stop slew. One accepted solve cancels that slew.
-    bad_solve_grace_s: 0.25
-    # Used only after bad_solve_grace_s has elapsed. Tune these values from a
-    # braking test for the deployed gait and speed.
+    # I/O topics.
     policy_topic: /policy_vel
     goal_region_topic: /navigation/in_goal_region
     velocity_topic: /estimated_velocity
     scan_topic: /cbf/scan
     cmd_topic: /cmd_vel
+
+    # Control rate, solver deadline, and maximum accepted input ages.
+    # A scan combines two 65-ms rolling clouds; scan_timeout_s measures from
+    # the oldest point in the completed scan.
     control_hz: 50.0
     solver_time_limit_s: 0.005
     publish_deadline_s: 0.010
     policy_timeout_s: 0.25
     velocity_timeout_s: 0.10
-    # A scan combines two 65-ms rolling clouds.  Check its complete age from
-    # the oldest point, but do not alter the Isaac-Lab CBF clearance from it.
     scan_timeout_s: 0.50
-    d_margin_m: 0.4
-    d_cbf_active_m: 5.0
+
+    # Obstacle geometry. d_margin_m is the center-to-obstacle clearance to
+    # tune first; d_cbf_active_m is the range at which obstacles enter the CBF.
+    # The fixed-size solver requires max_lidar_points to remain 64.
+    d_margin_m: 0.7
+    d_cbf_active_m: 8.0
+    max_lidar_points: 64
+
+    # CBF dynamics and QP slack. max_cbf_slack is a barrier residual bound,
+    # not a distance in metres.
     gamma1: 2.0
     gamma2: 2.0
+    tracking_tau_s: 0.30
+    slack_penalty: 1000.0
+    max_cbf_slack: 0.5
+
+    # Nominal planar tracking and command/acceleration limits.
     kp_x: 3.0
     kp_y: 3.0
-    # Absolute linear Kp used for both X and Y while navigation reports that
-    # the robot is within its configured goal region; it is not a multiplier.
-    goal_region_kp: 1.0
+    goal_region_kp: 1.0  # absolute X/Y Kp in the goal region, not a multiplier
     accel_limit_x: 1.5
     accel_limit_y: 1.5
     velocity_limit_x: 1.2
     velocity_limit_y: 1.2
-    # Deployment-only navigation-reference shaping (not a standard CBF term).
-    # At 50 Hz, 2.0 m/s^2 permits a 0.04 m/s planar-vector change per tick.
-    # It acts before the CBF QP; obstacle constraints may still change /cmd_vel
-    # faster, and smoothing can delay navigation-led avoidance of moving agents.
+
+    # Optional deployment-only slew of the planar navigation reference.
+    # This acts before the QP and does not limit the final /cmd_vel slew.
     enable_navigation_slew: false
-    a_nav: 2.0  # m/s^2, maximum change rate of the planar policy reference
-    # Independent angular command governor. The static planar CBF does not
-    # constrain yaw, so every healthy policy yaw target is bounded here before
-    # it can reach /cmd_vel. Begin conservatively and increase only after a
-    # stand-alone turning test confirms the deployed gait is stable.
+    a_nav: 2.0  # m/s^2
+
+    # Yaw is independent of the planar CBF. Dead zones apply at CBF output.
     max_yaw_rate_radps: 2.0
     max_yaw_accel_radps2: 3.0
-    # Match the robust locomotion command deadzone at the final CBF output.
     planar_deadzone_mps: 0.1
     yaw_deadzone_radps: 0.1
-    tracking_tau_s: 0.30
-    max_lidar_points: 64
-    slack_penalty: 1000.0
-    # Hard upper bound for every active per-point CBF slack.  This is in the
-    # CBF barrier residual's native units, not metres.  It is enforced in the
-    # QP and independently checked before any command is published.
-    max_cbf_slack: 0.5
+
+    # On invalid input or rejected solves, briefly hold the last accepted
+    # command, then slew toward a controlled stop.
+    bad_solve_grace_s: 0.25
     fallback_linear_decel_mps2: 0.5
     fallback_yaw_decel_radps2: 1.0
