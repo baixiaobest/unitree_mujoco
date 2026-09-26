@@ -26,9 +26,10 @@ class CompletedScan:
     """One fixed front-fan scan stored in corrected world coordinates.
 
     ``endpoints_xyz_m`` and ``ray_states`` have one entry per capture ray.
-    State 2 marks a surface hit and state 1 marks an observed free-space ray;
-    state 0 is reserved for unavailable/reset data.  Free endpoints exist only
-    inside the captured front fan--a completed scan never fabricates rear rays.
+    State 2 marks a surface hit, state 1 a direction inferred to be sampled
+    from a distant return, and state 0 an unavailable direction. State 1 uses
+    max range for policy compatibility; its return does not prove free space
+    all the way to max range.
     """
 
     stamp_ns: int
@@ -87,19 +88,21 @@ def reduce_front_capture_rays(
     max_distance_m: float = MAX_DISTANCE_M,
     min_points_per_ray: int = 1,
     range_percentile: float = 0.1,
+    coverage_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Reduce a deskewed reference-base cloud to a fixed front lidar fan.
 
     A real point cloud has many returns per angular ray, unlike the simulator's
     one raycast result.  This function chooses a stable low-percentile range in
-    each capture ray and puts that hit at the exact ray centre. Every other
-    front capture ray becomes a valid max-range free-space measurement. No rear
-    ray is generated.
+    each capture ray and puts that hit at the exact ray centre. Front capture
+    rays without a qualifying reflection remain unavailable unless the optional
+    all-height return mask confirms their direction was sampled. No rear ray is
+    generated.
 
     Returns:
         A fixed ``(capture_rays, 3)`` endpoint array and a fixed
-        ``(capture_rays,)`` uint8 state array. State 1 is free and state 2 is a
-        hit, matching the simulator's held-scan collector.
+        ``(capture_rays,)`` uint8 state array. State 0 is unavailable, state 1
+        is observed free space, and state 2 is a measured obstacle hit.
     """
     if capture_rays <= 0 or fov_degrees <= 0.0 or fov_degrees > 360.0:
         raise ValueError("capture_rays must be positive and fov_degrees must be in (0, 360]")
@@ -116,7 +119,12 @@ def reduce_front_capture_rays(
             np.zeros(capture_rays, dtype=np.float64),
         )
     )
-    ray_states = np.ones(capture_rays, dtype=np.uint8)
+    ray_states = np.zeros(capture_rays, dtype=np.uint8)
+    if coverage_mask is not None:
+        coverage = np.asarray(coverage_mask, dtype=bool)
+        if coverage.shape != (capture_rays,):
+            raise ValueError("coverage_mask must have one entry per capture ray")
+        ray_states[coverage] = 1
 
     points = np.asarray(points_xyz_m, dtype=np.float64)
     if points.size == 0:
@@ -154,6 +162,49 @@ def reduce_front_capture_rays(
     return endpoints, ray_states
 
 
+def front_capture_coverage_mask(
+    points_xyz_m: np.ndarray,
+    *,
+    capture_rays: int = CAPTURE_RAYS,
+    fov_degrees: float = CAPTURE_FOV_DEG,
+    min_range_m: float = 2.0,
+    max_distance_m: float = MAX_DISTANCE_M,
+    min_points_per_ray: int = 1,
+) -> np.ndarray:
+    """Estimate sampled front directions from returns at any height.
+
+    This mask supplies free-ray validity only. Obstacle distance still comes
+    from the separately height-filtered capture rays.
+    """
+    if capture_rays <= 0 or not 0.0 < fov_degrees <= 360.0:
+        raise ValueError("capture_rays must be positive and fov_degrees must be in (0, 360]")
+    if not 0.0 <= min_range_m <= max_distance_m or min_points_per_ray <= 0:
+        raise ValueError("Invalid coverage range or point threshold")
+
+    points = np.asarray(points_xyz_m, dtype=np.float64)
+    coverage = np.zeros(capture_rays, dtype=bool)
+    if points.size == 0:
+        return coverage
+    if points.ndim != 2 or points.shape[1] < 3:
+        raise ValueError("points_xyz_m must have shape (N, >=3)")
+
+    ranges = np.linalg.norm(points[:, :2], axis=1)
+    angles = np.arctan2(points[:, 1], points[:, 0])
+    half_fov = math.radians(fov_degrees) * 0.5
+    valid = (
+        np.isfinite(points[:, :3]).all(axis=1)
+        & (ranges >= min_range_m)
+        & (ranges <= max_distance_m)
+        & (angles >= -half_fov)
+        & (angles <= half_fov)
+    )
+    if np.any(valid):
+        positions = (angles[valid] + half_fov) / (2.0 * half_fov)
+        indices = np.minimum((positions * capture_rays).astype(np.int64), capture_rays - 1)
+        coverage = np.bincount(indices, minlength=capture_rays) >= min_points_per_ray
+    return coverage
+
+
 def cbf_bins_from_capture(
     endpoints_xyz_m: np.ndarray,
     ray_states: np.ndarray,
@@ -162,9 +213,8 @@ def cbf_bins_from_capture(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return nearest real hits in fixed front CBF bins.
 
-    The policy observation deliberately represents observed free space and
-    upsamples bins. CBF must instead retain only actual returns and must not
-    duplicate one reflection into multiple constraints.
+    The policy observation may upsample bins. CBF must retain only actual
+    returns and must not duplicate one reflection into multiple constraints.
     """
     endpoints = np.asarray(endpoints_xyz_m, dtype=np.float64)
     states = np.asarray(ray_states, dtype=np.uint8)

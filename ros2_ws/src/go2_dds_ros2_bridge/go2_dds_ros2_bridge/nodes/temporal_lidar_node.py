@@ -35,6 +35,7 @@ from go2_dds_ros2_bridge.temporal_lidar_processing import (
     cbf_bins_from_capture,
     cbf_static_bins_from_points,
     deskew_points_to_reference_base,
+    front_capture_coverage_mask,
     front_arc_bin_indices,
     is_adjacent_cloud_pair,
     normalized_scan_age,
@@ -81,9 +82,12 @@ DEFAULT_CAPTURE_RAYS = CAPTURE_RAYS
 DEFAULT_CAPTURE_FOV_DEG = CAPTURE_FOV_DEG
 DEFAULT_MIN_POINTS_PER_CAPTURE_RAY = 1
 DEFAULT_CAPTURE_RETURN_PERCENTILE = 0.1
+DEFAULT_COVERAGE_MIN_RANGE_M = 2.0
+DEFAULT_MIN_POINTS_PER_COVERAGE_RAY = 1
 DEFAULT_WORLD_BINS = WORLD_BINS
 
 FRAME_COLORS_RGB = (0xFF3333, 0x33CCFF, 0x66FF66, 0xCC66FF)
+INVALID_BIN_COLOR_RGB = 0x808080
 
 CLOUD_QOS = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
@@ -125,6 +129,8 @@ class TemporalLidarConfig:
     capture_fov_deg: float
     min_points_per_capture_ray: int
     capture_return_percentile: float
+    coverage_min_range_m: float
+    min_points_per_coverage_ray: int
     world_bins: int
 
 
@@ -165,6 +171,8 @@ def parse_args() -> TemporalLidarConfig:
     parser.add_argument("--capture-fov-deg", type=float, default=DEFAULT_CAPTURE_FOV_DEG)
     parser.add_argument("--min-points-per-capture-ray", type=int, default=DEFAULT_MIN_POINTS_PER_CAPTURE_RAY)
     parser.add_argument("--capture-return-percentile", type=float, default=DEFAULT_CAPTURE_RETURN_PERCENTILE)
+    parser.add_argument("--coverage-min-range-m", type=float, default=DEFAULT_COVERAGE_MIN_RANGE_M)
+    parser.add_argument("--min-points-per-coverage-ray", type=int, default=DEFAULT_MIN_POINTS_PER_COVERAGE_RAY)
     parser.add_argument("--world-bins", type=int, default=DEFAULT_WORLD_BINS)
     parser.add_argument(
         "--freeze-observation",
@@ -194,6 +202,8 @@ def parse_args() -> TemporalLidarConfig:
         )
     if args.min_points_per_capture_ray <= 0 or not 0.0 <= args.capture_return_percentile <= 1.0:
         raise SystemExit("Invalid capture-ray return-reduction parameters")
+    if not 0.0 <= args.coverage_min_range_m <= args.max_range_m or args.min_points_per_coverage_ray <= 0:
+        raise SystemExit("coverage-min-range-m must be within lidar range; min-points-per-coverage-ray must be positive")
     if args.world_bins <= 0 or args.world_bins > WORLD_BINS or WORLD_BINS % args.world_bins != 0:
         raise SystemExit("world-bins must be a positive divisor of %d" % WORLD_BINS)
     if not args.debug_topic_prefix:
@@ -223,6 +233,11 @@ class TemporalLidarNode(Node):
         for field, value in vars(config).items():
             self.declare_parameter(field, value)
         self._config = TemporalLidarConfig(**{field: self.get_parameter(field).value for field in vars(config)})
+        if (
+            not 0.0 <= self._config.coverage_min_range_m <= self._config.max_range_m
+            or self._config.min_points_per_coverage_ray <= 0
+        ):
+            raise ValueError("Invalid coverage range or point threshold in ROS parameters")
         self._tf_buffer = Buffer(cache_time=Duration(seconds=10.0))
         self._tf_listener = TransformListener(self._tf_buffer, self)
         self._history = CompletedScanHistory(HISTORY_FRAMES)
@@ -237,6 +252,7 @@ class TemporalLidarNode(Node):
         self._cbf_scan_publisher = self.create_publisher(CbfScan, self._config.cbf_scan_topic, OBSERVATION_QOS)
         self._cbf_scan_sequence = 0
         self._debug_frame_publishers = []
+        self._debug_frame_0_with_invalid_publisher = None
         self._debug_all_publisher = None
         self._debug_full_360_publisher = None
         if self._config.debug_enabled:
@@ -245,6 +261,9 @@ class TemporalLidarNode(Node):
                 self.create_publisher(PointCloud2, f"{prefix}/frame_{index}_bins", OBSERVATION_QOS)
                 for index in range(HISTORY_FRAMES)
             ]
+            self._debug_frame_0_with_invalid_publisher = self.create_publisher(
+                PointCloud2, f"{prefix}/frame_0_bins_with_invalid", OBSERVATION_QOS
+            )
             self._debug_all_publisher = self.create_publisher(PointCloud2, f"{prefix}/all_bins", OBSERVATION_QOS)
             self._debug_full_360_publisher = self.create_publisher(
                 PointCloud2, f"{prefix}/full_360_bins", OBSERVATION_QOS
@@ -253,7 +272,7 @@ class TemporalLidarNode(Node):
         self._observation_timer = self.create_timer(1.0 / self._config.policy_hz, self._publish_observation)
         self.get_logger().info(
             "Temporal lidar: '%s' -> '%s'; two rolling corrected raw clouds (expected %.3fs apart) are deskewed "
-            "to cloud-two end time, reduced to %d fixed hit/free rays across the front %.0f degrees, then retained "
+            "to cloud-two end time, reduced to %d fixed front rays across %.0f degrees, then retained "
             "as %d world-frame "
             "histories at %.1f Hz policy output. Deferred TF processing at %.1f Hz. "
             "RViz bin debug: %s. Frozen-observation experiment: %s."
@@ -437,6 +456,14 @@ class TemporalLidarNode(Node):
                 )
             )
         points_reference = np.concatenate(deskewed_clouds, axis=0)
+        coverage = front_capture_coverage_mask(
+            points_reference,
+            capture_rays=self._config.capture_rays,
+            fov_degrees=self._config.capture_fov_deg,
+            min_range_m=self._config.coverage_min_range_m,
+            max_distance_m=self._config.max_range_m,
+            min_points_per_ray=self._config.min_points_per_coverage_ray,
+        )
         horizontal_range = np.linalg.norm(points_reference[:, :2], axis=1)
         front_height_and_range = (
             (points_reference[:, 2] >= self._config.min_z_m)
@@ -455,6 +482,7 @@ class TemporalLidarNode(Node):
             max_distance_m=self._config.max_range_m,
             min_points_per_ray=self._config.min_points_per_capture_ray,
             range_percentile=self._config.capture_return_percentile,
+            coverage_mask=coverage,
         )
         capture_endpoints_world = np.ascontiguousarray(
             capture_endpoints_reference @ reference_rotation.T + reference_translation,
@@ -524,9 +552,14 @@ class TemporalLidarNode(Node):
             Time.from_msg(transform.header.stamp),
         )
 
-    def _build_debug_cloud(self, *, stamp: Time, points_xyz_m: np.ndarray, frame_indices: np.ndarray) -> PointCloud2:
-        """Build a colorized base-frame cloud; every point is one valid polar bin."""
+    def _build_debug_cloud(
+        self, *, stamp: Time, points_xyz_m: np.ndarray, frame_indices: np.ndarray,
+        point_colors_rgb: np.ndarray | None = None,
+    ) -> PointCloud2:
+        """Build a colorized base-frame cloud from polar-bin points."""
         count = int(points_xyz_m.shape[0])
+        if point_colors_rgb is not None and np.asarray(point_colors_rgb).shape != (count,):
+            raise ValueError("point_colors_rgb must contain one color per point")
         cloud = PointCloud2()
         cloud.header.stamp = stamp.to_msg()
         cloud.header.frame_id = self._config.base_frame
@@ -556,7 +589,10 @@ class TemporalLidarNode(Node):
             packed["x"] = points_xyz_m[:, 0]
             packed["y"] = points_xyz_m[:, 1]
             packed["z"] = points_xyz_m[:, 2]
-            packed["rgb"] = np.asarray([FRAME_COLORS_RGB[int(i)] for i in frame_indices], dtype=np.uint32)
+            packed["rgb"] = (
+                np.asarray(point_colors_rgb, dtype=np.uint32) if point_colors_rgb is not None
+                else np.asarray([FRAME_COLORS_RGB[int(i)] for i in frame_indices], dtype=np.uint32)
+            )
             packed["frame_index"] = frame_indices
         cloud.data = packed.tobytes()
         return cloud
@@ -584,6 +620,21 @@ class TemporalLidarNode(Node):
             )
             frame_id = np.full(front_points.shape[0], frame_index, dtype=np.uint8)
             publisher.publish(self._build_debug_cloud(stamp=stamp, points_xyz_m=front_points, frame_indices=frame_id))
+            if frame_index == 0 and self._debug_frame_0_with_invalid_publisher is not None:
+                frame_distances = world_distances[0, front_indices]
+                frame_validity = world_validity[0, front_indices]
+                all_bin_points = polar_bins_to_base_points(
+                    frame_distances, np.ones_like(frame_validity),
+                    current_yaw_rad=current_yaw, max_distance_m=self._config.max_range_m,
+                    bin_indices=front_indices, world_bins=WORLD_BINS,
+                )
+                colors = np.where(frame_validity > 0, FRAME_COLORS_RGB[0], INVALID_BIN_COLOR_RGB)
+                self._debug_frame_0_with_invalid_publisher.publish(
+                    self._build_debug_cloud(
+                        stamp=stamp, points_xyz_m=all_bin_points,
+                        frame_indices=np.zeros(FOV_BINS, dtype=np.uint8), point_colors_rgb=colors,
+                    )
+                )
             frame_points.append(front_points)
             frame_ids.append(frame_id)
 
@@ -636,9 +687,12 @@ class TemporalLidarNode(Node):
             max_distance_m=self._config.max_range_m,
             world_bins=self._config.world_bins,
         )
-        world_distances, world_validity = upsample_polar_bins(
-            coarse_world_distances, coarse_world_validity, target_bins=WORLD_BINS
-        )
+        if self._config.world_bins == WORLD_BINS:
+            world_distances, world_validity = coarse_world_distances, coarse_world_validity
+        else:
+            world_distances, world_validity = upsample_polar_bins(
+                coarse_world_distances, coarse_world_validity, target_bins=WORLD_BINS
+            )
         front_indices = front_arc_bin_indices(current_yaw, world_bins=WORLD_BINS, fov_bins=FOV_BINS)
         distances = world_distances[:, front_indices]
         validity = world_validity[:, front_indices]
