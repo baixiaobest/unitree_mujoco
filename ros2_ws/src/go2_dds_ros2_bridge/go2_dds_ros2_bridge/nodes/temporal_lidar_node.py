@@ -19,7 +19,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointField
 from tf2_ros import Buffer, TransformException, TransformListener
 
-from go2_dds_ros2_bridge_msgs.msg import CbfScan, TemporalLidarObservation
+from go2_dds_ros2_bridge_msgs.msg import CbfScan, CbfScan3D, TemporalLidarObservation
 from go2_dds_ros2_bridge.occupancy_map import extract_xyz_time_points
 from go2_dds_ros2_bridge.temporal_lidar_processing import (
     CAPTURE_FOV_DEG,
@@ -33,6 +33,7 @@ from go2_dds_ros2_bridge.temporal_lidar_processing import (
     MAX_DISTANCE_M,
     WORLD_BINS,
     cbf_bins_from_capture,
+    cbf_xyz_bins,
     cbf_static_bins_from_points,
     deskew_points_to_reference_base,
     front_capture_coverage_mask,
@@ -250,6 +251,7 @@ class TemporalLidarNode(Node):
         self._subscription = self.create_subscription(PointCloud2, self._config.input_topic, self._cloud_callback, CLOUD_QOS)
         self._publisher = self.create_publisher(TemporalLidarObservation, self._config.output_topic, OBSERVATION_QOS)
         self._cbf_scan_publisher = self.create_publisher(CbfScan, self._config.cbf_scan_topic, OBSERVATION_QOS)
+        self._cbf_xyz_publisher = self.create_publisher(CbfScan3D, "/cbf/scan_xyz", OBSERVATION_QOS)
         self._cbf_scan_sequence = 0
         self._debug_frame_publishers = []
         self._debug_frame_0_with_invalid_publisher = None
@@ -524,6 +526,18 @@ class TemporalLidarNode(Node):
         message.static_points_xy_m = static_points_xy_m.reshape(-1).tolist()
         message.static_hits = static_hits.tolist()
         self._cbf_scan_publisher.publish(message)
+        front, hits, rear, rear_hits = cbf_xyz_bins(
+            completed.endpoints_base_m, completed.ray_states, completed.static_points_base_m,
+            percentile=self._config.capture_return_percentile)
+        raw = CbfScan3D()
+        raw.header = message.header
+        raw.scan_start = message.scan_start
+        raw.sequence = message.sequence
+        raw.points_xyz_m = front.ravel().tolist()
+        raw.hits = hits.tolist()
+        raw.static_points_xyz_m = rear.ravel().tolist()
+        raw.static_hits = rear_hits.tolist()
+        self._cbf_xyz_publisher.publish(raw)
 
     def _current_pose(self) -> tuple[np.ndarray, float, Time] | None:
         """Return the latest base pose together with the TF sample time used.

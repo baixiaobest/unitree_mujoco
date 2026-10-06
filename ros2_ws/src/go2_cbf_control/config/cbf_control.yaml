@@ -3,8 +3,7 @@ cbf_control:
     # I/O topics.
     policy_topic: /policy_vel
     goal_region_topic: /navigation/in_goal_region
-    velocity_topic: /estimated_velocity
-    scan_topic: /cbf/scan
+    scan_topic: /cbf/snapshot
     cmd_topic: /cmd_vel
 
     # Control rate, solver deadline, and maximum accepted input ages.
@@ -14,13 +13,14 @@ cbf_control:
     solver_time_limit_s: 0.005
     publish_deadline_s: 0.010
     policy_timeout_s: 0.25
-    velocity_timeout_s: 0.10
+    state_timeout_s: 0.10
+    max_interpolation_gap_s: 0.10
     scan_timeout_s: 0.50
 
     # Obstacle geometry. d_margin_m is the center-to-obstacle clearance to
     # tune first; d_cbf_active_m is the range at which obstacles enter the CBF.
     # The fixed-size solver requires max_lidar_points to remain 64.
-    d_margin_m: 0.7
+    d_margin_m: 0.1
     d_cbf_active_m: 8.0
     max_lidar_points: 64
 
@@ -57,3 +57,10 @@ cbf_control:
     bad_solve_grace_s: 0.25
     fallback_linear_decel_mps2: 0.5
     fallback_yaw_decel_radps2: 1.0
+
+# This node aligns measured state before the independent CBF control timer.
+cbf_world_state:
+  ros__parameters:
+    max_state_age_s: 0.10
+    max_interpolation_gap_s: 0.10
+    scan_timeout_s: 0.50

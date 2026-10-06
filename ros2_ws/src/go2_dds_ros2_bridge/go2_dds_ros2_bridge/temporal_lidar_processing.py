@@ -559,3 +559,31 @@ def polar_bins_to_base_points(
     base_angles = world_angles - current_yaw_rad
     ranges = distances[present].astype(np.float64) * max_distance_m
     return np.column_stack((ranges * np.cos(base_angles), ranges * np.sin(base_angles), np.zeros(ranges.size))).astype(np.float32)
+
+
+def cbf_xyz_bins(endpoints, states, rear_points, *, percentile=0.1):
+    """Preserve actual XYZ returns and the legacy front/rear bin identities."""
+    endpoints = np.asarray(endpoints, dtype=np.float64)
+    states = np.asarray(states)
+    front = np.zeros((CBF_BINS, 3))
+    front_hits = np.zeros(CBF_BINS, dtype=np.uint8)
+    for i, ids in enumerate(np.array_split(np.arange(len(endpoints)), CBF_BINS)):
+        ids = ids[(states[ids] == 2) & np.isfinite(endpoints[ids, :3]).all(axis=1)]
+        if len(ids):
+            winner = ids[np.argmin(np.linalg.norm(endpoints[ids, :2], axis=1))]
+            front[i] = endpoints[winner, :3]
+            front_hits[i] = 1
+    rear = np.zeros((CBF_STATIC_BINS, 3))
+    rear_hits = np.zeros(CBF_STATIC_BINS, dtype=np.uint8)
+    points = np.asarray(rear_points, dtype=np.float64).reshape(-1, 3)
+    arc = np.mod(np.arctan2(points[:, 1], points[:, 0]) - np.pi / 2, 2 * np.pi)
+    ranges = np.linalg.norm(points[:, :2], axis=1)
+    valid = np.isfinite(points).all(axis=1) & (ranges > 0) & (arc > 0) & (arc < np.pi)
+    for i in range(CBF_STATIC_BINS):
+        ids = np.flatnonzero(valid & (arc >= i * np.pi / CBF_STATIC_BINS)
+                             & (arc < (i + 1) * np.pi / CBF_STATIC_BINS))
+        if len(ids):
+            target = np.quantile(ranges[ids], percentile)
+            rear[i] = points[ids[np.argmin(np.abs(ranges[ids] - target))]]
+            rear_hits[i] = 1
+    return front, front_hits, rear, rear_hits

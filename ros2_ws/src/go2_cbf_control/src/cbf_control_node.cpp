@@ -24,263 +24,16 @@
 #include <std_msgs/msg/bool.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-#include <go2_dds_ros2_bridge_msgs/msg/cbf_scan.hpp>
+#include <go2_dds_ros2_bridge_msgs/msg/cbf_control_snapshot.hpp>
+#include <go2_dds_ros2_bridge_msgs/msg/cbf_world_scan.hpp>
 #include <osqp.h>
 
 #include "go2_cbf_control/cbf_math.hpp"
 
+#include "go2_cbf_control/cbf_qp.hpp"
+
 namespace {
-
-constexpr int kFrontScanBins = 128;
-constexpr int kStaticScanBins = 64;
-constexpr int kCandidateBins = kFrontScanBins + kStaticScanBins;
-constexpr int kMaxPoints = 64;
-constexpr int kVariables = 2 + kMaxPoints;
-constexpr int kRows = 2 * kMaxPoints + 2;
-constexpr int kBarrierRows = kMaxPoints;
-constexpr int kSlackRowStart = kMaxPoints;
-constexpr int kAccelRowStart = 2 * kMaxPoints;
-// The QP structure never changes, but it is intentionally sparse.  In
-// particular, an acceleration only participates in the 64 barrier rows plus
-// its own bound, and each slack participates in one barrier and one
-// non-negative row.  Do not replace this with a dense 130 x 66 matrix: that
-// creates 8,580 stored entries rather than the 258 meaningful entries and
-// makes a 5-ms control budget unnecessarily hard to meet.
-constexpr int kAccelerationColumnEntries = kMaxPoints + 1;
-constexpr int kSlackColumnStart = 2 * kAccelerationColumnEntries;
-constexpr int kMatrixNonZeros = kSlackColumnStart + 2 * kMaxPoints;
-constexpr double kTolerance = 1.0e-4;
-
-using Clock = std::chrono::steady_clock;
-
-struct Config {
-  std::string policy_topic;
-  std::string goal_region_topic;
-  std::string velocity_topic;
-  std::string scan_topic;
-  std::string cmd_topic;
-  double control_hz{};
-  double solver_time_limit_s{};
-  double publish_deadline_s{};
-  double policy_timeout_s{};
-  double velocity_timeout_s{};
-  double scan_timeout_s{};
-  double d_margin_m{};
-  double d_cbf_active_m{};
-  double gamma1{};
-  double gamma2{};
-  double kp_x{};
-  double kp_y{};
-  double goal_region_kp{};
-  double accel_limit_x{};
-  double accel_limit_y{};
-  double velocity_limit_x{};
-  double velocity_limit_y{};
-  double max_yaw_rate_radps{};
-  double max_yaw_accel_radps2{};
-  bool enable_navigation_slew{};
-  double a_nav_mps2{};
-  double planar_deadzone_mps{};
-  double yaw_deadzone_radps{};
-  double tracking_tau_s{};
-  int max_lidar_points{};
-  double slack_penalty{};
-  double max_cbf_slack{};
-  double bad_solve_grace_s{};
-  double fallback_linear_decel_mps2{};
-  double fallback_yaw_decel_radps2{};
-};
-
-struct Point {
-  double x{};
-  double y{};
-  double range{};
-  bool is_static{};
-};
-
-struct SolverResult {
-  bool has_candidate{};
-  bool solved{};
-  bool timed_out_or_iter_limit{};
-  bool update_ok{};
-  int status{};
-  int iterations{};
-  double solve_time_s{};
-  double u_x{};
-  double u_y{};
-  double max_slack{};
-  double primal_residual{};
-  double dual_residual{};
-  std::array<double, kMaxPoints> slack{};
-  double update_time_s{};
-  std::string status_text{"not_run"};
-};
-
-class StaticCbfQp {
- public:
-  explicit StaticCbfQp(const Config & config) : config_(config) {
-    if (config_.max_lidar_points != kMaxPoints) {
-      throw std::runtime_error("This fixed-sparsity CBF build requires max_lidar_points=64.");
-    }
-    p_p_.fill(2);
-    p_p_[0] = 0;
-    p_p_[1] = 1;
-    p_p_[2] = 2;
-    p_i_[0] = 0;
-    p_i_[1] = 1;
-    p_x_[0] = 2.0;
-    p_x_[1] = 2.0;
-    // CSC pattern: accel-x, accel-y, then one two-entry column per slack.
-    // Keeping this exact pattern fixed lets OSQP reuse its factorization while
-    // every tick updates only numerical values.
-    a_p_[0] = 0;
-    a_p_[1] = kAccelerationColumnEntries;
-    a_p_[2] = kSlackColumnStart;
-    for (int row = 0; row < kMaxPoints; ++row) {
-      a_i_[row] = row;
-      a_i_[kAccelerationColumnEntries + row] = row;
-    }
-    a_i_[kMaxPoints] = kAccelRowStart;
-    a_i_[2 * kMaxPoints + 1] = kAccelRowStart + 1;
-    for (int index = 0; index < kMaxPoints; ++index) {
-      const int offset = kSlackColumnStart + 2 * index;
-      a_p_[2 + index] = offset;
-      a_i_[offset] = index;
-      a_i_[offset + 1] = kSlackRowStart + index;
-    }
-    a_p_[kVariables] = kMatrixNonZeros;
-    setup();
-  }
-
-  ~StaticCbfQp() {
-    if (work_ != nullptr) {
-      osqp_cleanup(work_);
-    }
-  }
-
-  SolverResult solve(
-    const double nominal_x, const double nominal_y,
-    const std::array<Point, kMaxPoints> & points, const int point_count,
-    const double measured_x, const double measured_y, const double effective_margin,
-    const double acceleration_lower_x, const double acceleration_lower_y,
-    const double acceleration_upper_x, const double acceleration_upper_y)
-  {
-    SolverResult result;
-    q_.fill(0.0);
-    lower_.fill(-OSQP_INFTY);
-    upper_.fill(OSQP_INFTY);
-    a_x_.fill(0.0);
-    q_[0] = -2.0 * nominal_x;
-    q_[1] = -2.0 * nominal_y;
-
-    for (int index = 0; index < point_count; ++index) {
-      const auto & point = points[index];
-      const double rx = -point.x;
-      const double ry = -point.y;
-      const double offset = go2_cbf_control::static_barrier_offset(
-        rx, ry, measured_x, measured_y, config_.gamma1, config_.gamma2, effective_margin);
-      set_a(index, 0, 2.0 * rx);
-      set_a(index, 1, 2.0 * ry);
-      set_a(index, 2 + index, 1.0);
-      lower_[index] = -offset;
-      set_a(kSlackRowStart + index, 2 + index, 1.0);
-      lower_[kSlackRowStart + index] = 0.0;
-      upper_[kSlackRowStart + index] = config_.max_cbf_slack;
-      q_[2 + index] = config_.slack_penalty / static_cast<double>(point_count);
-    }
-    set_a(kAccelRowStart, 0, 1.0);
-    set_a(kAccelRowStart + 1, 1, 1.0);
-    lower_[kAccelRowStart] = acceleration_lower_x;
-    lower_[kAccelRowStart + 1] = acceleration_lower_y;
-    upper_[kAccelRowStart] = acceleration_upper_x;
-    upper_[kAccelRowStart + 1] = acceleration_upper_y;
-
-    const auto update_start = Clock::now();
-    result.update_ok = osqp_update_lin_cost(work_, q_.data()) == 0 &&
-      osqp_update_bounds(work_, lower_.data(), upper_.data()) == 0 &&
-      osqp_update_A(work_, a_x_.data(), nullptr, static_cast<c_int>(a_x_.size())) == 0;
-    result.update_time_s = std::chrono::duration<double>(Clock::now() - update_start).count();
-    if (!result.update_ok) {
-      result.status_text = "osqp_update_failed";
-      return result;
-    }
-    osqp_solve(work_);
-    result.status = work_->info->status_val;
-    result.iterations = static_cast<int>(work_->info->iter);
-    result.solve_time_s = static_cast<double>(work_->info->solve_time);
-    result.primal_residual = static_cast<double>(work_->info->pri_res);
-    result.dual_residual = static_cast<double>(work_->info->dua_res);
-    result.solved = result.status == OSQP_SOLVED || result.status == OSQP_SOLVED_INACCURATE;
-    result.timed_out_or_iter_limit = result.status == OSQP_TIME_LIMIT_REACHED ||
-      result.status == OSQP_MAX_ITER_REACHED;
-    result.status_text = work_->info->status == nullptr ? "unknown" : work_->info->status;
-    if (work_->solution == nullptr || work_->solution->x == nullptr) {
-      return result;
-    }
-    result.u_x = static_cast<double>(work_->solution->x[0]);
-    result.u_y = static_cast<double>(work_->solution->x[1]);
-    result.has_candidate = std::isfinite(result.u_x) && std::isfinite(result.u_y);
-    for (int index = 0; index < point_count; ++index) {
-      result.slack[index] = static_cast<double>(work_->solution->x[2 + index]);
-      result.max_slack = std::max(result.max_slack, std::max(0.0, result.slack[index]));
-    }
-    return result;
-  }
-
- private:
-  void setup() {
-    OSQPData * data = static_cast<OSQPData *>(c_malloc(sizeof(OSQPData)));
-    if (data == nullptr) throw std::bad_alloc();
-    data->n = kVariables;
-    data->m = kRows;
-    data->P = csc_matrix(kVariables, kVariables, 2, p_x_.data(), p_i_.data(), p_p_.data());
-    data->q = q_.data();
-    data->A = csc_matrix(kRows, kVariables, static_cast<c_int>(a_x_.size()), a_x_.data(), a_i_.data(), a_p_.data());
-    data->l = lower_.data();
-    data->u = upper_.data();
-    osqp_set_default_settings(&settings_);
-    settings_.verbose = false;
-    settings_.warm_start = true;
-    // Match Isaac Lab's OSQP setup: warm start plus the solver defaults for
-    // adaptive rho and polishing.
-    settings_.polish = true;
-    settings_.adaptive_rho = true;
-    settings_.check_termination = 1;
-    settings_.max_iter = 500;
-    settings_.eps_abs = 1.0e-3;
-    settings_.eps_rel = 1.0e-3;
-    settings_.time_limit = config_.solver_time_limit_s;
-    if (osqp_setup(&work_, data, &settings_) != 0) {
-      throw std::runtime_error("Could not initialize fixed-sparsity OSQP CBF workspace.");
-    }
-  }
-
-  void set_a(const int row, const int column, const double value) {
-    if (column == 0) {
-      a_x_[row == kAccelRowStart ? kMaxPoints : row] = value;
-      return;
-    }
-    if (column == 1) {
-      a_x_[kAccelerationColumnEntries + (row == kAccelRowStart + 1 ? kMaxPoints : row)] = value;
-      return;
-    }
-    const int slack_index = column - 2;
-    a_x_[kSlackColumnStart + 2 * slack_index + (row == slack_index ? 0 : 1)] = value;
-  }
-
-  const Config & config_;
-  OSQPWorkspace * work_{};
-  OSQPSettings settings_{};
-  std::array<c_float, 2> p_x_{};
-  std::array<c_int, 2> p_i_{};
-  std::array<c_int, kVariables + 1> p_p_{};
-  std::array<c_float, kVariables> q_{};
-  std::array<c_float, kRows> lower_{};
-  std::array<c_float, kRows> upper_{};
-  std::array<c_float, kMatrixNonZeros> a_x_{};
-  std::array<c_int, kMatrixNonZeros> a_i_{};
-  std::array<c_int, kVariables + 1> a_p_{};
-};
+using namespace go2_cbf_control;
 
 class CbfControlNode final : public rclcpp::Node {
  public:
@@ -305,12 +58,8 @@ class CbfControlNode final : public rclcpp::Node {
         std::lock_guard<std::mutex> lock(goal_region_mutex_);
         in_goal_region_ = message->data;
       }, input_options);
-    velocity_sub_ = create_subscription<geometry_msgs::msg::TwistStamped>(
-      config_.velocity_topic, qos, [this](geometry_msgs::msg::TwistStamped::SharedPtr message) {
-        std::lock_guard<std::mutex> lock(velocity_mutex_); velocity_ = std::move(message);
-      }, input_options);
-    scan_sub_ = create_subscription<go2_dds_ros2_bridge_msgs::msg::CbfScan>(
-      config_.scan_topic, qos, [this](go2_dds_ros2_bridge_msgs::msg::CbfScan::SharedPtr message) {
+    scan_sub_ = create_subscription<go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot>(
+      config_.scan_topic, qos, [this](go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot::SharedPtr message) {
         std::lock_guard<std::mutex> lock(scan_mutex_); scan_ = std::move(message);
       }, input_options);
     command_pub_ = create_publisher<geometry_msgs::msg::TwistStamped>(config_.cmd_topic, rclcpp::QoS(1));
@@ -339,14 +88,14 @@ class CbfControlNode final : public rclcpp::Node {
     config.policy_topic = declare_parameter<std::string>("policy_topic", "/policy_vel");
     config.goal_region_topic = declare_parameter<std::string>(
       "goal_region_topic", "/navigation/in_goal_region");
-    config.velocity_topic = declare_parameter<std::string>("velocity_topic", "/estimated_velocity");
-    config.scan_topic = declare_parameter<std::string>("scan_topic", "/cbf/scan");
+    config.scan_topic = declare_parameter<std::string>("scan_topic", "/cbf/snapshot");
     config.cmd_topic = declare_parameter<std::string>("cmd_topic", "/cmd_vel");
     config.control_hz = declare_parameter<double>("control_hz", 50.0);
     config.solver_time_limit_s = declare_parameter<double>("solver_time_limit_s", 0.005);
     config.publish_deadline_s = declare_parameter<double>("publish_deadline_s", 0.010);
     config.policy_timeout_s = declare_parameter<double>("policy_timeout_s", 0.25);
-    config.velocity_timeout_s = declare_parameter<double>("velocity_timeout_s", 0.10);
+    config.velocity_timeout_s = declare_parameter<double>("state_timeout_s", 0.10);
+    config.max_interpolation_gap_s = declare_parameter<double>("max_interpolation_gap_s", 0.10);
     config.scan_timeout_s = declare_parameter<double>("scan_timeout_s", 0.25);
     config.d_margin_m = declare_parameter<double>("d_margin_m", 0.70);
     config.d_cbf_active_m = declare_parameter<double>("d_cbf_active_m", 5.0);
@@ -372,7 +121,7 @@ class CbfControlNode final : public rclcpp::Node {
     config.bad_solve_grace_s = declare_parameter<double>("bad_solve_grace_s", 0.25);
     config.fallback_linear_decel_mps2 = declare_parameter<double>("fallback_linear_decel_mps2", 0.5);
     config.fallback_yaw_decel_radps2 = declare_parameter<double>("fallback_yaw_decel_radps2", 1.0);
-    if (config.control_hz <= 0.0 || config.solver_time_limit_s <= 0.0 || config.publish_deadline_s <= config.solver_time_limit_s ||
+    if (config.velocity_timeout_s <= 0.0 || config.max_interpolation_gap_s <= 0.0 || config.scan_timeout_s <= 0.0 || config.control_hz <= 0.0 || config.solver_time_limit_s <= 0.0 || config.publish_deadline_s <= config.solver_time_limit_s ||
         config.tracking_tau_s <= 0.0 || config.d_margin_m <= 0.0 || config.d_cbf_active_m < config.d_margin_m ||
         config.gamma1 <= 0.0 || config.gamma2 <= 0.0 || config.kp_x <= 0.0 || config.kp_y <= 0.0 ||
         config.goal_region_kp <= 0.0 ||
@@ -395,14 +144,7 @@ class CbfControlNode final : public rclcpp::Node {
     return true;
   }
 
-  bool try_copy_velocity(std::shared_ptr<geometry_msgs::msg::TwistStamped> & destination) {
-    std::unique_lock<std::mutex> lock(velocity_mutex_, std::try_to_lock);
-    if (!lock.owns_lock() || !velocity_) return false;
-    destination = velocity_;
-    return true;
-  }
-
-  bool try_copy_scan(std::shared_ptr<go2_dds_ros2_bridge_msgs::msg::CbfScan> & destination) {
+  bool try_copy_scan(std::shared_ptr<go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot> & destination) {
     std::unique_lock<std::mutex> lock(scan_mutex_, std::try_to_lock);
     if (!lock.owns_lock() || !scan_) return false;
     destination = scan_;
@@ -422,17 +164,18 @@ class CbfControlNode final : public rclcpp::Node {
   }
 
   bool select_points(
-    const go2_dds_ros2_bridge_msgs::msg::CbfScan & scan,
+    const go2_dds_ros2_bridge_msgs::msg::CbfWorldScan & scan,
+    const double robot_x, const double robot_y,
     std::array<Point, kMaxPoints> & selected, int & selected_count,
     std::array<Point, kCandidateBins> & candidates, int & candidate_count,
     int & front_candidate_count, int & static_candidate_count) const
   {
     candidate_count = front_candidate_count = static_candidate_count = 0;
-    const auto append_hit = [&](const float x_value, const float y_value, const uint8_t hit, const bool is_static) {
+    const auto append_hit = [&](const double x_value, const double y_value, const uint8_t hit, const bool is_static) {
       if (hit > 1) return false;
       if (hit == 0) return true;
-      const double x = x_value;
-      const double y = y_value;
+      const double x = x_value - robot_x;
+      const double y = y_value - robot_y;
       const double range = std::hypot(x, y);
       if (!std::isfinite(x) || !std::isfinite(y) || range <= 1.0e-4 || range > config_.d_cbf_active_m) return true;
       candidates[candidate_count++] = {x, y, range, is_static};
@@ -455,19 +198,11 @@ class CbfControlNode final : public rclcpp::Node {
     return true;
   }
 
-  // Both solved and time-limited OSQP iterates use this deliberately small
-  // accept/reject gate: finite values and the configured slack cap.  The
-  // command envelope is clamped when the command is formed below.
+  // Solved and time-limited iterates must satisfy the actual unscaled QP rows.
+  // Output deadzones/fallback happen later and are not certified by this check.
   const char * normal_solution_validation_failure(const SolverResult & result, const int count) const
   {
-    if (!result.has_candidate) return "nonfinite_acceleration_candidate";
-    for (int index = 0; index < count; ++index) {
-      const double slack = result.slack[index];
-      if (!std::isfinite(slack)) return "nonfinite_slack";
-      if (slack < -kTolerance) return "negative_slack";
-      if (slack > config_.max_cbf_slack + kTolerance) return "slack_limit_exceeded";
-    }
-    return nullptr;
+    return validate_candidate(result, count, config_.max_cbf_slack);
   }
 
   void control_step() {
@@ -477,16 +212,27 @@ class CbfControlNode final : public rclcpp::Node {
     const double timer_lateness_s = std::max(0.0, step_s - expected_step_s);
     last_control_ = start;
     std::shared_ptr<geometry_msgs::msg::TwistStamped> policy;
-    std::shared_ptr<geometry_msgs::msg::TwistStamped> velocity;
-    std::shared_ptr<go2_dds_ros2_bridge_msgs::msg::CbfScan> scan;
+    std::shared_ptr<go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot> scan;
     const bool in_goal_region = try_copy_goal_region().value_or(false);
-    const bool inputs_available = try_copy_policy(policy) && try_copy_velocity(velocity) && try_copy_scan(scan);
+    const bool inputs_available = try_copy_policy(policy) && try_copy_scan(scan);
     const double policy_age = policy ? ros_age_s(policy->header.stamp) : std::numeric_limits<double>::infinity();
-    const double velocity_age = velocity ? ros_age_s(velocity->header.stamp) : std::numeric_limits<double>::infinity();
-    const double scan_age = scan ? ros_age_s(scan->scan_start) : std::numeric_limits<double>::infinity();
-    const bool valid_headers = policy && velocity && scan && policy->header.frame_id == "base_link" &&
-      velocity->header.frame_id == "base_link" && scan->header.frame_id == "base_link" &&
-      rclcpp::Time(scan->header.stamp).nanoseconds() >= rclcpp::Time(scan->scan_start).nanoseconds();
+    const double velocity_age = scan ? ros_age_s(scan->header.stamp) : std::numeric_limits<double>::infinity();
+    const double scan_age = scan ? ros_age_s(scan->scan.scan_start) : std::numeric_limits<double>::infinity();
+    const bool valid_headers = policy && scan && scan->valid && policy->header.frame_id == "base_link" &&
+      scan->header.frame_id == "cbf_world" && scan->scan.header.frame_id == "cbf_world" &&
+      !scan->session_id.empty() && scan->session_id == scan->scan.session_id &&
+      rclcpp::Time(scan->header.stamp).nanoseconds() <= now().nanoseconds() &&
+      rclcpp::Time(scan->header.stamp).nanoseconds() >= rclcpp::Time(scan->scan.header.stamp).nanoseconds() &&
+      rclcpp::Time(scan->scan.header.stamp).nanoseconds() >= rclcpp::Time(scan->scan.scan_start).nanoseconds() &&
+      std::isfinite(scan->robot_yaw) && std::isfinite(scan->robot_xy_m[0]) && std::isfinite(scan->robot_xy_m[1]) &&
+      std::isfinite(scan->interpolation_gap_s) && scan->interpolation_gap_s >= 0.0 && scan->interpolation_gap_s <= config_.max_interpolation_gap_s;
+    if (scan && scan->session_id != active_session_) {
+      active_session_ = scan->session_id;
+      last_command_x_ = last_command_y_ = last_command_wz_ = 0.0;
+      filtered_policy_x_ = filtered_policy_y_ = yaw_governor_state_wz_ = 0.0;
+    }
+    const double yaw = scan ? scan->robot_yaw : 0.0;
+    const double cy = std::cos(yaw), sy = std::sin(yaw);
     bool healthy = inputs_available && valid_headers && policy_age <= config_.policy_timeout_s &&
       velocity_age <= config_.velocity_timeout_s && scan_age <= config_.scan_timeout_s && timer_lateness_s <= config_.publish_deadline_s;
     const char * fallback_reason = "healthy";
@@ -507,8 +253,8 @@ class CbfControlNode final : public rclcpp::Node {
     double policy_target_x = filtered_policy_x_, policy_target_y = filtered_policy_y_;
     double measured_x = 0.0, measured_y = 0.0, command_x = 0.0, command_y = 0.0, command_wz = 0.0;
     if (healthy) {
-      measured_x = velocity->twist.linear.x;
-      measured_y = velocity->twist.linear.y;
+      measured_x = cy * scan->velocity_xy_mps[0] + sy * scan->velocity_xy_mps[1];
+      measured_y = -sy * scan->velocity_xy_mps[0] + cy * scan->velocity_xy_mps[1];
       if (!std::isfinite(measured_x) || !std::isfinite(measured_y) ||
           !std::isfinite(policy->twist.linear.x) || !std::isfinite(policy->twist.linear.y) ||
           !std::isfinite(policy->twist.angular.z)) {
@@ -518,7 +264,7 @@ class CbfControlNode final : public rclcpp::Node {
     }
     if (healthy) {
       healthy = select_points(
-        *scan, selected, selected_count, candidates, candidate_count, front_candidate_count, static_candidate_count);
+        scan->scan, scan->robot_xy_m[0], scan->robot_xy_m[1], selected, selected_count, candidates, candidate_count, front_candidate_count, static_candidate_count);
       if (!healthy) fallback_reason = "malformed_scan";
     }
     if (healthy) {
@@ -550,8 +296,9 @@ class CbfControlNode final : public rclcpp::Node {
         result.update_ok = true;
         result.status_text = "no_active_obstacles";
       } else {
-        result = qp_.solve(nominal_x, nominal_y, selected, selected_count, measured_x, measured_y, margin,
-          lower_x, lower_y, upper_x, upper_y);
+        result = qp_.solve(cy * nominal_x - sy * nominal_y, sy * nominal_x + cy * nominal_y,
+          selected, selected_count, scan->velocity_xy_mps[0], scan->velocity_xy_mps[1], margin,
+          lower_x, lower_y, upper_x, upper_y, yaw);
         const char * validation_failure = normal_solution_validation_failure(result, selected_count);
         bool candidate_valid = validation_failure == nullptr;
         healthy = result.update_ok && candidate_valid && (result.solved || result.timed_out_or_iter_limit);
@@ -562,8 +309,8 @@ class CbfControlNode final : public rclcpp::Node {
           else fallback_reason = validation_failure == nullptr ? "osqp_solution_invalid" : validation_failure;
         }
         if (healthy) {
-          command_x = std::clamp(measured_x + zoh * result.u_x, -config_.velocity_limit_x, config_.velocity_limit_x);
-          command_y = std::clamp(measured_y + zoh * result.u_y, -config_.velocity_limit_y, config_.velocity_limit_y);
+          command_x = std::clamp(measured_x + zoh * (cy * result.u_x + sy * result.u_y), -config_.velocity_limit_x, config_.velocity_limit_x);
+          command_y = std::clamp(measured_y + zoh * (-sy * result.u_x + cy * result.u_y), -config_.velocity_limit_y, config_.velocity_limit_y);
         }
       }
       // The planar CBF-QP does not constrain yaw.  Shape yaw here at the
@@ -628,6 +375,11 @@ class CbfControlNode final : public rclcpp::Node {
     last_command_x_ = command_x;
     last_command_y_ = command_y;
     last_command_wz_ = command_wz;
+    if (scan) {
+      for (int i = 0; i < candidate_count; ++i) { candidates[i].x += scan->robot_xy_m[0]; candidates[i].y += scan->robot_xy_m[1]; }
+      for (int i = 0; i < selected_count; ++i) { selected[i].x += scan->robot_xy_m[0]; selected[i].y += scan->robot_xy_m[1]; }
+
+    }
     update_debug(policy_age, velocity_age, scan_age, margin, in_goal_region, policy ? policy->twist.linear.x : 0.0,
       policy ? policy->twist.linear.y : 0.0, policy ? policy->twist.angular.z : 0.0,
       filtered_policy_x_, filtered_policy_y_,
@@ -635,7 +387,7 @@ class CbfControlNode final : public rclcpp::Node {
       command_x, command_y, command_wz, elapsed_s, timer_lateness_s, release_to_publish_s, result,
       candidates, candidate_count, front_candidate_count, static_candidate_count, selected, selected_count,
       timeout_count_, fallback_transitions_,
-      bad_solve_duration_s, holding_last_valid_command, fallback_reason);
+      bad_solve_duration_s, holding_last_valid_command, fallback_reason, scan.get());
   }
 
   void publish_command(const double x, const double y, const double wz) {
@@ -658,10 +410,18 @@ class CbfControlNode final : public rclcpp::Node {
     int front_candidate_count, int static_candidate_count,
     const std::array<Point, kMaxPoints> & selected, int selected_count,
     uint64_t timeout_count, uint64_t fallback_transitions, double bad_solve_duration_s,
-    bool holding_last_valid_command, const char * fallback_reason)
+    bool holding_last_valid_command, const char * fallback_reason,
+    const go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot * snapshot)
   {
     std::unique_lock<std::mutex> lock(debug_mutex_, std::try_to_lock);
     if (!lock.owns_lock()) return;
+    if (snapshot) {
+      debug_.evaluation_stamp = snapshot->header.stamp;
+      debug_.session = snapshot->session_id;
+      debug_.alignment_reason = snapshot->reason;
+      debug_.interpolation_gap = snapshot->interpolation_gap_s;
+      debug_.robot_x = snapshot->robot_xy_m[0]; debug_.robot_y = snapshot->robot_xy_m[1]; debug_.yaw = snapshot->robot_yaw;
+    }
     debug_.policy_age = policy_age; debug_.velocity_age = velocity_age; debug_.scan_age = scan_age; debug_.margin = margin;
     debug_.in_goal_region = in_goal_region;
     debug_.policy_x = policy_x; debug_.policy_y = policy_y; debug_.policy_wz = policy_wz;
@@ -680,9 +440,9 @@ class CbfControlNode final : public rclcpp::Node {
     debug_.selected = selected; debug_.selected_count = selected_count;
   }
 
-  sensor_msgs::msg::PointCloud2 make_cloud(const Point * points, const std::size_t point_count, const uint32_t rgba) const {
+  sensor_msgs::msg::PointCloud2 make_cloud(const Point * points, const std::size_t point_count, const uint32_t rgba, const builtin_interfaces::msg::Time & stamp) const {
     sensor_msgs::msg::PointCloud2 cloud;
-    cloud.header.stamp = now(); cloud.header.frame_id = "base_link";
+    cloud.header.stamp = stamp; cloud.header.frame_id = "cbf_world";
     cloud.height = 1; cloud.width = static_cast<uint32_t>(point_count); cloud.is_dense = true; cloud.is_bigendian = false;
     cloud.fields.resize(4);
     const std::array<std::string, 4> names{"x", "y", "z", "rgba"};
@@ -716,9 +476,9 @@ class CbfControlNode final : public rclcpp::Node {
   void publish_debug() {
     DebugState copy;
     { std::lock_guard<std::mutex> lock(debug_mutex_); copy = debug_; }
-    candidate_pub_->publish(make_cloud(copy.candidates.data(), copy.candidate_count, 0xFF33CCFF));
+    candidate_pub_->publish(make_cloud(copy.candidates.data(), copy.candidate_count, 0xFF33CCFF, copy.evaluation_stamp));
     selected_pub_->publish(make_cloud(copy.selected.data(), copy.selected_count,
-      copy.result.max_slack > 0.0 ? 0xFF2222FF : 0xFFFFA500));
+      copy.result.max_slack > 0.0 ? 0xFF2222FF : 0xFFFFA500, copy.evaluation_stamp));
     visualization_msgs::msg::MarkerArray markers;
     markers.markers.push_back(velocity_marker(0, "measured", copy.measured_x, copy.measured_y, 1.0F, 1.0F, 1.0F));
     markers.markers.push_back(velocity_marker(1, "policy", copy.policy_x, copy.policy_y, 0.2F, 0.5F, 1.0F));
@@ -733,6 +493,15 @@ class CbfControlNode final : public rclcpp::Node {
       (copy.holding_last_valid_command ? "holding_last_valid" : "safe");
     markers.markers.push_back(velocity_marker(3, command_label, copy.command_x, copy.command_y,
       degraded ? 1.0F : 0.0F, degraded ? 0.0F : 1.0F, 0.0F));
+    // Express command-axis arrows at the same evaluated pose/time as the points.
+    for (auto & marker : markers.markers) {
+      const double vx = marker.points[1].x, vy = marker.points[1].y;
+      marker.header.frame_id = "cbf_world";
+      marker.header.stamp = copy.evaluation_stamp;
+      marker.points[0].x = copy.robot_x; marker.points[0].y = copy.robot_y;
+      marker.points[1].x = copy.robot_x + std::cos(copy.yaw)*vx - std::sin(copy.yaw)*vy;
+      marker.points[1].y = copy.robot_y + std::sin(copy.yaw)*vx + std::cos(copy.yaw)*vy;
+    }
     marker_pub_->publish(markers);
     diagnostic_msgs::msg::DiagnosticStatus status;
     status.name = "go2_cbf_control";
@@ -765,6 +534,13 @@ class CbfControlNode final : public rclcpp::Node {
     add("qp_update_time_s", copy.result.update_time_s); add("timer_lateness_s", copy.timer_lateness_s);
     add("release_to_publish_s", copy.release_to_publish_s); add("iterations", copy.result.iterations);
     add("primal_residual", copy.result.primal_residual); add("dual_residual", copy.result.dual_residual);
+    add("max_constraint_violation", copy.result.max_constraint_violation);
+    add("state_age_s", copy.velocity_age);
+    add("interpolation_gap_s", copy.interpolation_gap);
+    add("evaluation_time_s", rclcpp::Time(copy.evaluation_stamp).seconds());
+    add_text("world_session", copy.session.c_str());
+    add_text("alignment_reason", copy.alignment_reason.c_str());
+    add_text("constraint_check_scope", "QP_candidate_before_deadzone_and_fallback");
     add("max_slack", copy.result.max_slack); add("candidate_count", static_cast<double>(copy.candidate_count));
     add("front_candidate_count", static_cast<double>(copy.front_candidate_count));
     add("static_candidate_count", static_cast<double>(copy.static_candidate_count));
@@ -780,6 +556,9 @@ class CbfControlNode final : public rclcpp::Node {
   }
 
   struct DebugState {
+    builtin_interfaces::msg::Time evaluation_stamp;
+    std::string session, alignment_reason;
+    double interpolation_gap{}, robot_x{}, robot_y{}, yaw{};
     double policy_age{std::numeric_limits<double>::infinity()}, velocity_age{std::numeric_limits<double>::infinity()};
     double scan_age{std::numeric_limits<double>::infinity()}, margin{}, policy_x{}, policy_y{}, policy_wz{}, filtered_policy_x{}, filtered_policy_y{}, nominal_x{}, nominal_y{}, measured_x{}, measured_y{};
     bool in_goal_region{};
@@ -792,20 +571,21 @@ class CbfControlNode final : public rclcpp::Node {
     std::array<Point, kMaxPoints> selected{}; int selected_count{};
   };
 
+  std::string active_session_;
   Config config_;
   StaticCbfQp qp_;
   rclcpp::CallbackGroup::SharedPtr io_group_, control_group_, debug_group_;
-  rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr policy_sub_, velocity_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr policy_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr goal_region_sub_;
-  rclcpp::Subscription<go2_dds_ros2_bridge_msgs::msg::CbfScan>::SharedPtr scan_sub_;
+  rclcpp::Subscription<go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot>::SharedPtr scan_sub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr command_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr status_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr candidate_pub_, selected_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   rclcpp::TimerBase::SharedPtr control_timer_, debug_timer_;
-  mutable std::mutex policy_mutex_, velocity_mutex_, scan_mutex_, goal_region_mutex_, debug_mutex_;
-  std::shared_ptr<geometry_msgs::msg::TwistStamped> policy_, velocity_;
-  std::shared_ptr<go2_dds_ros2_bridge_msgs::msg::CbfScan> scan_;
+  mutable std::mutex policy_mutex_, scan_mutex_, goal_region_mutex_, debug_mutex_;
+  std::shared_ptr<geometry_msgs::msg::TwistStamped> policy_;
+  std::shared_ptr<go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot> scan_;
   std::optional<bool> in_goal_region_;
   Clock::time_point last_control_{};
   double last_command_x_{}, last_command_y_{}, last_command_wz_{};
@@ -814,7 +594,7 @@ class CbfControlNode final : public rclcpp::Node {
   bool fallback_active_{};
   std::optional<Clock::time_point> bad_solve_started_at_;
   uint64_t timeout_count_{}, fallback_transitions_{};
-  DebugState debug_{};
+  DebugState debug_;
 };
 
 }  // namespace
