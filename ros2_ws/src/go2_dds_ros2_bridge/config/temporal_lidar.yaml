@@ -29,7 +29,7 @@ temporal_lidar:
     min_z_m: -0.1
     # Matches occupancy_2d. Applied only to the 64 static side/rear CBF bins;
     # it does not change the policy observation or front CBF bins.
-    static_min_z_m: -0.30
+    static_min_z_m: -0.20
     max_z_m: 1.4
     max_range_m: 20.0
     # Raw cloud experiment measured float ``time`` offsets from 0 to ~0.063 s;
