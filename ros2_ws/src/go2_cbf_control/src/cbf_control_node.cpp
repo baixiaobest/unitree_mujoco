@@ -25,6 +25,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include <go2_dds_ros2_bridge_msgs/msg/cbf_control_snapshot.hpp>
+#include <go2_dds_ros2_bridge_msgs/msg/cbf_dynamic_snapshot.hpp>
 #include <go2_dds_ros2_bridge_msgs/msg/cbf_world_scan.hpp>
 #include <osqp.h>
 
@@ -62,6 +63,12 @@ class CbfControlNode final : public rclcpp::Node {
       config_.scan_topic, qos, [this](go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot::SharedPtr message) {
         std::lock_guard<std::mutex> lock(scan_mutex_); scan_ = std::move(message);
       }, input_options);
+    if (config_.cbf_mode == "dynamic") {
+      dynamic_sub_ = create_subscription<go2_dds_ros2_bridge_msgs::msg::CbfDynamicSnapshot>(
+        "/cbf/dynamic_snapshot", qos, [this](go2_dds_ros2_bridge_msgs::msg::CbfDynamicSnapshot::SharedPtr message) {
+          std::lock_guard<std::mutex> lock(dynamic_mutex_); dynamic_ = std::move(message);
+        }, input_options);
+    }
     command_pub_ = create_publisher<geometry_msgs::msg::TwistStamped>(config_.cmd_topic, rclcpp::QoS(1));
     status_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>("/cbf/status", rclcpp::QoS(10));
     candidate_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cbf/candidate_points", qos);
@@ -77,8 +84,8 @@ class CbfControlNode final : public rclcpp::Node {
       get_node_base_interface().get(), get_node_timers_interface().get());
     last_control_ = Clock::now();
     RCLCPP_INFO(
-      get_logger(), "Static CBF active: %.1f Hz, OSQP limit=%.3f ms, publish deadline=%.3f ms.",
-      config_.control_hz, config_.solver_time_limit_s * 1e3,
+      get_logger(), "%s CBF active: %.1f Hz, OSQP limit=%.3f ms, publish deadline=%.3f ms.",
+      config_.cbf_mode.c_str(), config_.control_hz, config_.solver_time_limit_s * 1e3,
       config_.publish_deadline_s * 1e3);
   }
 
@@ -90,6 +97,10 @@ class CbfControlNode final : public rclcpp::Node {
       "goal_region_topic", "/navigation/in_goal_region");
     config.scan_topic = declare_parameter<std::string>("scan_topic", "/cbf/snapshot");
     config.cmd_topic = declare_parameter<std::string>("cmd_topic", "/cmd_vel");
+    config.cbf_mode = declare_parameter<std::string>("cbf_mode", "static");
+    if (config.cbf_mode != "static" && config.cbf_mode != "dynamic") {
+      throw std::runtime_error("cbf_mode must be static or dynamic.");
+    }
     config.control_hz = declare_parameter<double>("control_hz", 50.0);
     config.solver_time_limit_s = declare_parameter<double>("solver_time_limit_s", 0.005);
     config.publish_deadline_s = declare_parameter<double>("publish_deadline_s", 0.010);
@@ -151,6 +162,47 @@ class CbfControlNode final : public rclcpp::Node {
     return true;
   }
 
+  bool try_copy_dynamic(std::shared_ptr<go2_dds_ros2_bridge_msgs::msg::CbfDynamicSnapshot> & destination) {
+    std::unique_lock<std::mutex> lock(dynamic_mutex_, std::try_to_lock);
+    if (!lock.owns_lock() || !dynamic_) return false;
+    destination = dynamic_;
+    return true;
+  }
+
+  const char * dynamic_rejection_reason(
+    const go2_dds_ros2_bridge_msgs::msg::CbfDynamicSnapshot & dynamic,
+    const go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot & current) const {
+    const auto & base = dynamic.base;
+    if (!dynamic.valid) return "dynamic_preparation_failed";
+    if (!base.valid || base.session_id != current.session_id ||
+        base.scan.session_id != base.session_id || base.header.frame_id != "cbf_world" ||
+        base.scan.header.frame_id != "cbf_world" || base.scan.sequence != current.scan.sequence ||
+        rclcpp::Time(base.scan.header.stamp) != rclcpp::Time(current.scan.header.stamp)) {
+      return "dynamic_capture_or_session_mismatch";
+    }
+    if (rclcpp::Time(base.header.stamp) > now() ||
+        rclcpp::Time(base.header.stamp) < rclcpp::Time(base.scan.header.stamp) ||
+        ros_age_s(base.header.stamp) > config_.velocity_timeout_s ||
+        ros_age_s(base.scan.scan_start) > config_.scan_timeout_s ||
+        !std::isfinite(base.robot_yaw) || !std::isfinite(base.robot_xy_m[0]) ||
+        !std::isfinite(base.robot_xy_m[1]) || !std::isfinite(base.velocity_xy_mps[0]) ||
+        !std::isfinite(base.velocity_xy_mps[1]) || !std::isfinite(base.interpolation_gap_s) ||
+        base.interpolation_gap_s < 0.0 || base.interpolation_gap_s > config_.max_interpolation_gap_s) {
+      return "dynamic_state_stale_or_invalid";
+    }
+    for (int index = 0; index < kFrontScanBins; ++index) {
+      if (dynamic.reflection_hits[index] > 1) return "dynamic_reflection_mask_invalid";
+      if (dynamic.reflection_hits[index] &&
+          (!std::isfinite(dynamic.front_points_xy_m[2 * index]) ||
+           !std::isfinite(dynamic.front_points_xy_m[2 * index + 1]) ||
+           !std::isfinite(dynamic.front_velocity_xy_mps[2 * index]) ||
+           !std::isfinite(dynamic.front_velocity_xy_mps[2 * index + 1]))) {
+        return "dynamic_nonfinite_obstacle";
+      }
+    }
+    return nullptr;
+  }
+
   std::optional<bool> try_copy_goal_region() {
     std::unique_lock<std::mutex> lock(goal_region_mutex_, std::try_to_lock);
     if (!lock.owns_lock()) return std::nullopt;
@@ -166,25 +218,32 @@ class CbfControlNode final : public rclcpp::Node {
   bool select_points(
     const go2_dds_ros2_bridge_msgs::msg::CbfWorldScan & scan,
     const double robot_x, const double robot_y,
+    const go2_dds_ros2_bridge_msgs::msg::CbfDynamicSnapshot * dynamic,
     std::array<Point, kMaxPoints> & selected, int & selected_count,
     std::array<Point, kCandidateBins> & candidates, int & candidate_count,
     int & front_candidate_count, int & static_candidate_count) const
   {
     candidate_count = front_candidate_count = static_candidate_count = 0;
-    const auto append_hit = [&](const double x_value, const double y_value, const uint8_t hit, const bool is_static) {
+    const auto append_hit = [&](const double x_value, const double y_value, const uint8_t hit,
+                                const bool is_static, const double vx = 0.0, const double vy = 0.0) {
       if (hit > 1) return false;
       if (hit == 0) return true;
       const double x = x_value - robot_x;
       const double y = y_value - robot_y;
       const double range = std::hypot(x, y);
       if (!std::isfinite(x) || !std::isfinite(y) || range <= 1.0e-4 || range > config_.d_cbf_active_m) return true;
-      candidates[candidate_count++] = {x, y, range, is_static};
+      candidates[candidate_count++] = {x, y, range, is_static, vx, vy};
       if (is_static) ++static_candidate_count;
       else ++front_candidate_count;
       return true;
     };
     for (int index = 0; index < kFrontScanBins; ++index) {
-      if (!append_hit(scan.points_xy_m[2 * index], scan.points_xy_m[2 * index + 1], scan.hits[index], false)) return false;
+      if (dynamic) {
+        if (!append_hit(dynamic->front_points_xy_m[2 * index], dynamic->front_points_xy_m[2 * index + 1],
+            dynamic->reflection_hits[index], false, dynamic->front_velocity_xy_mps[2 * index],
+            dynamic->front_velocity_xy_mps[2 * index + 1])) return false;
+      } else if (!append_hit(scan.points_xy_m[2 * index], scan.points_xy_m[2 * index + 1],
+                            scan.hits[index], false)) return false;
     }
     for (int index = 0; index < kStaticScanBins; ++index) {
       if (!append_hit(
@@ -213,8 +272,22 @@ class CbfControlNode final : public rclcpp::Node {
     last_control_ = start;
     std::shared_ptr<geometry_msgs::msg::TwistStamped> policy;
     std::shared_ptr<go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot> scan;
+    std::shared_ptr<go2_dds_ros2_bridge_msgs::msg::CbfDynamicSnapshot> dynamic;
     const bool in_goal_region = try_copy_goal_region().value_or(false);
     const bool inputs_available = try_copy_policy(policy) && try_copy_scan(scan);
+    bool dynamic_active = false;
+    std::string dynamic_reason = config_.cbf_mode == "static" ? "static_selected" : "dynamic_unavailable";
+    if (config_.cbf_mode == "dynamic" && scan && try_copy_dynamic(dynamic)) {
+      const char * rejection = dynamic_rejection_reason(*dynamic, *scan);
+      if (rejection == nullptr) {
+        scan = std::make_shared<go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot>(dynamic->base);
+        dynamic_active = true;
+        dynamic_reason = "dynamic_active";
+      } else {
+        dynamic_reason = rejection;
+        if (!dynamic->valid && !dynamic->reason.empty()) dynamic_reason += ": " + dynamic->reason;
+      }
+    }
     const double policy_age = policy ? ros_age_s(policy->header.stamp) : std::numeric_limits<double>::infinity();
     const double velocity_age = scan ? ros_age_s(scan->header.stamp) : std::numeric_limits<double>::infinity();
     const double scan_age = scan ? ros_age_s(scan->scan.scan_start) : std::numeric_limits<double>::infinity();
@@ -264,7 +337,8 @@ class CbfControlNode final : public rclcpp::Node {
     }
     if (healthy) {
       healthy = select_points(
-        scan->scan, scan->robot_xy_m[0], scan->robot_xy_m[1], selected, selected_count, candidates, candidate_count, front_candidate_count, static_candidate_count);
+        scan->scan, scan->robot_xy_m[0], scan->robot_xy_m[1], dynamic_active ? dynamic.get() : nullptr,
+        selected, selected_count, candidates, candidate_count, front_candidate_count, static_candidate_count);
       if (!healthy) fallback_reason = "malformed_scan";
     }
     if (healthy) {
@@ -387,7 +461,7 @@ class CbfControlNode final : public rclcpp::Node {
       command_x, command_y, command_wz, elapsed_s, timer_lateness_s, release_to_publish_s, result,
       candidates, candidate_count, front_candidate_count, static_candidate_count, selected, selected_count,
       timeout_count_, fallback_transitions_,
-      bad_solve_duration_s, holding_last_valid_command, fallback_reason, scan.get());
+      bad_solve_duration_s, holding_last_valid_command, fallback_reason, scan.get(), dynamic_active, dynamic_reason);
   }
 
   void publish_command(const double x, const double y, const double wz) {
@@ -411,7 +485,8 @@ class CbfControlNode final : public rclcpp::Node {
     const std::array<Point, kMaxPoints> & selected, int selected_count,
     uint64_t timeout_count, uint64_t fallback_transitions, double bad_solve_duration_s,
     bool holding_last_valid_command, const char * fallback_reason,
-    const go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot * snapshot)
+    const go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot * snapshot,
+    bool dynamic_active, const std::string & dynamic_reason)
   {
     std::unique_lock<std::mutex> lock(debug_mutex_, std::try_to_lock);
     if (!lock.owns_lock()) return;
@@ -434,6 +509,7 @@ class CbfControlNode final : public rclcpp::Node {
     debug_.result = result; debug_.fallback = fallback_active_;
     debug_.holding_last_valid_command = holding_last_valid_command;
     debug_.fallback_reason = fallback_reason; debug_.candidates = candidates;
+    debug_.dynamic_active = dynamic_active; debug_.dynamic_reason = dynamic_reason;
     debug_.candidate_count = candidate_count;
     debug_.front_candidate_count = front_candidate_count;
     debug_.static_candidate_count = static_candidate_count;
@@ -502,14 +578,38 @@ class CbfControlNode final : public rclcpp::Node {
       marker.points[1].x = copy.robot_x + std::cos(copy.yaw)*vx - std::sin(copy.yaw)*vy;
       marker.points[1].y = copy.robot_y + std::sin(copy.yaw)*vx + std::cos(copy.yaw)*vy;
     }
+    if (copy.dynamic_active) {
+      for (int index = 0; index < copy.selected_count; ++index) {
+        const auto & point = copy.selected[index];
+        if (point.is_static || std::hypot(point.velocity_x, point.velocity_y) < 0.05) continue;
+        visualization_msgs::msg::Marker arrow;
+        arrow.header.frame_id = "cbf_world";
+        arrow.header.stamp = copy.evaluation_stamp;
+        arrow.ns = "cbf_obstacle_velocity";
+        arrow.id = index;
+        arrow.type = visualization_msgs::msg::Marker::ARROW;
+        arrow.action = visualization_msgs::msg::Marker::ADD;
+        arrow.scale.x = 0.025; arrow.scale.y = 0.06; arrow.scale.z = 0.08;
+        arrow.color.a = 1.0F; arrow.color.r = 1.0F; arrow.color.b = 1.0F;
+        arrow.lifetime = rclcpp::Duration::from_seconds(0.25);
+        geometry_msgs::msg::Point origin, tip;
+        origin.x = point.x; origin.y = point.y;
+        tip.x = point.x + 0.4 * point.velocity_x;
+        tip.y = point.y + 0.4 * point.velocity_y;
+        arrow.points = {origin, tip};
+        markers.markers.push_back(std::move(arrow));
+      }
+    }
     marker_pub_->publish(markers);
     diagnostic_msgs::msg::DiagnosticStatus status;
     status.name = "go2_cbf_control";
     status.hardware_id = "go2";
-    status.level = degraded ? diagnostic_msgs::msg::DiagnosticStatus::WARN : diagnostic_msgs::msg::DiagnosticStatus::OK;
+    status.level = degraded || (config_.cbf_mode == "dynamic" && !copy.dynamic_active) ?
+      diagnostic_msgs::msg::DiagnosticStatus::WARN : diagnostic_msgs::msg::DiagnosticStatus::OK;
     status.message = copy.fallback ? std::string("controlled_stop: ") + copy.fallback_reason :
       (copy.holding_last_valid_command ? std::string("holding_last_valid_command: ") + copy.fallback_reason :
-      copy.result.status_text);
+      (config_.cbf_mode == "dynamic" && !copy.dynamic_active ?
+       std::string("static_cbf_fallback: ") + copy.dynamic_reason : copy.result.status_text));
     auto add = [&status](const std::string & key, const double value) {
       diagnostic_msgs::msg::KeyValue item; item.key = key; item.value = std::to_string(value); status.values.push_back(item);
     };
@@ -517,6 +617,9 @@ class CbfControlNode final : public rclcpp::Node {
       diagnostic_msgs::msg::KeyValue item; item.key = key; item.value = value; status.values.push_back(item);
     };
     add_text("solver_status", copy.result.status_text.c_str()); add_text("fallback_reason", copy.fallback_reason);
+    add_text("cbf_mode", config_.cbf_mode.c_str());
+    add_text("dynamic_reason", copy.dynamic_reason.c_str());
+    add("dynamic_active", copy.dynamic_active ? 1.0 : 0.0);
     add("policy_age_s", copy.policy_age); add("velocity_age_s", copy.velocity_age); add("scan_age_s", copy.scan_age);
     add("cbf_margin_m", copy.margin);
     add("in_goal_region", copy.in_goal_region ? 1.0 : 0.0);
@@ -567,25 +670,29 @@ class CbfControlNode final : public rclcpp::Node {
     double bad_solve_duration_s{};
     SolverResult result{}; bool fallback{}; bool holding_last_valid_command{};
     const char * fallback_reason{"not_run"};
+    bool dynamic_active{};
+    std::string dynamic_reason{"not_run"};
     std::array<Point, kCandidateBins> candidates{}; int candidate_count{}, front_candidate_count{}, static_candidate_count{};
     std::array<Point, kMaxPoints> selected{}; int selected_count{};
   };
 
   std::string active_session_;
   Config config_;
-  StaticCbfQp qp_;
+  CbfQp qp_;
   rclcpp::CallbackGroup::SharedPtr io_group_, control_group_, debug_group_;
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr policy_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr goal_region_sub_;
   rclcpp::Subscription<go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot>::SharedPtr scan_sub_;
+  rclcpp::Subscription<go2_dds_ros2_bridge_msgs::msg::CbfDynamicSnapshot>::SharedPtr dynamic_sub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr command_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr status_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr candidate_pub_, selected_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   rclcpp::TimerBase::SharedPtr control_timer_, debug_timer_;
-  mutable std::mutex policy_mutex_, scan_mutex_, goal_region_mutex_, debug_mutex_;
+  mutable std::mutex policy_mutex_, scan_mutex_, dynamic_mutex_, goal_region_mutex_, debug_mutex_;
   std::shared_ptr<geometry_msgs::msg::TwistStamped> policy_;
   std::shared_ptr<go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot> scan_;
+  std::shared_ptr<go2_dds_ros2_bridge_msgs::msg::CbfDynamicSnapshot> dynamic_;
   std::optional<bool> in_goal_region_;
   Clock::time_point last_control_{};
   double last_command_x_{}, last_command_y_{}, last_command_wz_{};

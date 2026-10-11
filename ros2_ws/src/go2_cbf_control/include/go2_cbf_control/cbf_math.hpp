@@ -36,6 +36,14 @@ inline double static_barrier_offset(
          gamma1 * gamma2 * (distance_squared - margin_m * margin_m);
 }
 
+inline double dynamic_barrier_offset(
+  const double rx, const double ry, const double robot_vx, const double robot_vy,
+  const double obstacle_vx, const double obstacle_vy,
+  const double gamma1, const double gamma2, const double margin_m) {
+  return static_barrier_offset(rx, ry, robot_vx - obstacle_vx, robot_vy - obstacle_vy,
+                               gamma1, gamma2, margin_m);
+}
+
 inline double approach_zero(const double value, const double maximum_delta) {
   if (value > 0.0) return std::max(0.0, value - maximum_delta);
   return std::min(0.0, value + maximum_delta);

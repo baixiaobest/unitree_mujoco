@@ -36,6 +36,20 @@ TEST(WorldQp, EmptyPointsStillRespectRotatedAsymmetricEnvelope) {
   EXPECT_NEAR(r.u_x,.4,1e-3); EXPECT_NEAR(r.u_y,.3,1e-3);
   EXPECT_LE(r.max_constraint_violation,1e-3);
 }
+TEST(WorldQp, ApproachingObstacleChangesAccelerationWhileZeroVelocityRetainsStaticResult) {
+  auto config = configuration();
+  CbfQp qp(config, 1e-7, 10000);
+  std::array<Point, kMaxPoints> points{};
+  points[0] = {1.0, 0.0, 1.0, false};
+  const auto static_result = qp.solve(0.0, 0.0, points, 1, 0.0, 0.0, 0.7, -5, -5, 5, 5);
+  ASSERT_TRUE(static_result.solved);
+  EXPECT_NEAR(static_result.u_x, 0.0, 1e-4);
+  points[0].velocity_x = -0.5;
+  const auto dynamic_result = qp.solve(0.0, 0.0, points, 1, 0.0, 0.0, 0.7, -5, -5, 5, 5);
+  ASSERT_TRUE(dynamic_result.solved);
+  EXPECT_NEAR(dynamic_result.u_x, -0.73, 1e-3);
+  EXPECT_LE(dynamic_result.max_constraint_violation, 1e-3);
+}
 TEST(WorldQp, SlackAndInfeasibility) {
   auto config=configuration(); StaticCbfQp qp(config); std::array<Point,kMaxPoints> p{};
   p[0]={.69,0,.69,false};

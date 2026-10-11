@@ -1,3 +1,7 @@
+from pathlib import Path
+
+import yaml
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
@@ -67,6 +71,9 @@ def _make_runtime_nodes(context, *args, **kwargs):
     navigation_policy_path = LaunchConfiguration("navigation_policy_path").perform(context)
     cbf_enabled = LaunchConfiguration("cbf").perform(context).strip().lower() in ("true", "1", "yes")
     cbf_config = LaunchConfiguration("cbf_config").perform(context)
+    cbf_mode = yaml.safe_load(Path(cbf_config).read_text())["cbf_control"]["ros__parameters"].get("cbf_mode", "static")
+    if cbf_mode not in ("static", "dynamic"):
+        raise ValueError("cbf_mode must be static or dynamic")
     rviz_config = LaunchConfiguration("rviz_config")
 
     # FAST-LIO expects the pose of the frame that the incoming points are expressed in.
@@ -204,6 +211,9 @@ def _make_runtime_nodes(context, *args, **kwargs):
         ),
         Node(package="go2_dds_ros2_bridge", executable="cbf_world_state",
              name="cbf_world_state", output="screen", parameters=[cbf_config],
+             condition=IfCondition(LaunchConfiguration("cbf"))),
+        Node(package="go2_dds_ros2_bridge", executable="cbf_velocity_predictor",
+             name="cbf_velocity_predictor", output="screen", parameters=[cbf_config, {"cbf_mode": cbf_mode}],
              condition=IfCondition(LaunchConfiguration("cbf"))),
         Node(
             package="go2_cbf_control",

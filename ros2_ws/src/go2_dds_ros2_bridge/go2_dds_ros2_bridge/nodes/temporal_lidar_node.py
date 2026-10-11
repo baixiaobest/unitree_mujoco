@@ -537,6 +537,8 @@ class TemporalLidarNode(Node):
         raw.hits = hits.tolist()
         raw.static_points_xyz_m = rear.ravel().tolist()
         raw.static_hits = rear_hits.tolist()
+        raw.capture_points_xyz_m = completed.endpoints_base_m[:, :3].ravel().tolist()
+        raw.ray_states = completed.ray_states.tolist()
         self._cbf_xyz_publisher.publish(raw)
 
     def _current_pose(self) -> tuple[np.ndarray, float, Time] | None:

@@ -11,6 +11,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CbfScan3D.msg"
   "msg/CbfWorldScan.msg"
   "msg/CbfControlSnapshot.msg"
+  "msg/CbfDynamicSnapshot.msg"
   "msg/TemporalLidarObservation.msg"
   DEPENDENCIES std_msgs builtin_interfaces
 )

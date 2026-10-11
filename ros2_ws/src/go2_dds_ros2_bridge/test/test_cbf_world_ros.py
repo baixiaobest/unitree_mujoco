@@ -80,6 +80,7 @@ def test_live_world_pipeline_and_controller(tmp_path):
                 raw.sequence=sequence;sequence+=1
                 q=r.T@(fixed-p)-np.array([.03,0,-.04])
                 raw.points_xyz_m[:3]=q.tolist();raw.hits[0]=1
+                raw.capture_points_xyz_m[:3]=q.tolist();raw.ray_states[0]=2
                 scan_pub.publish(raw);last_scan=now
         policy=TwistStamped();policy.header.stamp=Time(nanoseconds=now).to_msg();policy.header.frame_id='base_link'
         policy.twist.linear.x=.4;policy_pub.publish(policy)
@@ -93,6 +94,8 @@ def test_live_world_pipeline_and_controller(tmp_path):
             p,r,_=pose_at(history,ns(snap.header.stamp))
             np.testing.assert_allclose(snap.robot_xy_m,(p+r@np.array([.03,0,-.04])+[.7,-.2,.1])[:2],atol=1e-5)
             np.testing.assert_allclose(snap.scan.points_xy_m[:2],[2.7,.8],atol=1e-5)
+            np.testing.assert_allclose(snap.scan.capture_points_xy_m[:2],[2.7,.8],atol=1e-5)
+            assert snap.scan.ray_states[0] == 2
             np.testing.assert_allclose(snap.velocity_xy_mps,[.2,.1],atol=1e-5)
         assert any(ns(s.header.stamp)-ns(s.scan.scan_start)>200_000_000 for s in valid)
         assert any(abs(c.twist.linear.x)>.1 for c in commands)

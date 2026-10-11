@@ -8,3 +8,6 @@ float64[256] points_xy_m
 uint8[128] hits
 float64[128] static_points_xy_m
 uint8[64] static_hits
+# The same unreduced capture, transformed to cbf_world at scan end.
+float64[512] capture_points_xy_m
+uint8[256] ray_states

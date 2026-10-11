@@ -7,6 +7,7 @@ find_package(go2_dds_ros2_bridge_msgs REQUIRED)
 
 ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS go2_dds_ros2_bridge/nodes/cbf_world_node.py DESTINATION lib/${PROJECT_NAME} RENAME cbf_world_state)
+install(PROGRAMS go2_dds_ros2_bridge/nodes/cbf_velocity_predictor_node.py DESTINATION lib/${PROJECT_NAME} RENAME cbf_velocity_predictor)
 
 install(
   PROGRAMS
@@ -105,6 +106,9 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_cbf_world_ros test/test_cbf_world_ros.py
     ENV ROS_DOMAIN_ID=187 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TIMEOUT 60)
   ament_add_pytest_test(test_temporal_lidar_processing test/test_temporal_lidar_processing.py)
+  ament_add_pytest_test(test_cbf_dynamic test/test_cbf_dynamic.py)
+  ament_add_pytest_test(test_cbf_dynamic_ros test/test_cbf_dynamic_ros.py
+    ENV ROS_DOMAIN_ID=188 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TIMEOUT 60)
 endif()
 
 ament_package()

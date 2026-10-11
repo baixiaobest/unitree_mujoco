@@ -38,6 +38,7 @@ struct Config {
   std::string goal_region_topic;
   std::string scan_topic;
   std::string cmd_topic;
+  std::string cbf_mode;
   double control_hz{};
   double solver_time_limit_s{};
   double publish_deadline_s{};
@@ -76,6 +77,8 @@ struct Point {
   double y{};
   double range{};
   bool is_static{};
+  double velocity_x{};
+  double velocity_y{};
 };
 
 struct SolverResult {
@@ -97,9 +100,9 @@ struct SolverResult {
   std::string status_text{"not_run"};
 };
 
-class StaticCbfQp {
+class CbfQp {
  public:
-  explicit StaticCbfQp(const Config & config, double eps = 1e-3, int max_iter = 500) : config_(config), eps_(eps), max_iter_(max_iter) {
+  explicit CbfQp(const Config & config, double eps = 1e-3, int max_iter = 500) : config_(config), eps_(eps), max_iter_(max_iter) {
     if (config_.max_lidar_points != kMaxPoints) {
       throw std::runtime_error("This fixed-sparsity CBF build requires max_lidar_points=64.");
     }
@@ -135,7 +138,7 @@ class StaticCbfQp {
     setup();
   }
 
-  ~StaticCbfQp() {
+  ~CbfQp() {
     if (work_ != nullptr) {
       osqp_cleanup(work_);
     }
@@ -160,8 +163,9 @@ class StaticCbfQp {
       const auto & point = points[index];
       const double rx = -point.x;
       const double ry = -point.y;
-      const double offset = go2_cbf_control::static_barrier_offset(
-        rx, ry, measured_x, measured_y, config_.gamma1, config_.gamma2, effective_margin);
+      const double offset = go2_cbf_control::dynamic_barrier_offset(
+        rx, ry, measured_x, measured_y, point.velocity_x, point.velocity_y,
+        config_.gamma1, config_.gamma2, effective_margin);
       set_a(index, 0, 2.0 * rx);
       set_a(index, 1, 2.0 * ry);
       set_a(index, 2 + index, 1.0);
@@ -288,6 +292,7 @@ class StaticCbfQp {
 }  // namespace go2_cbf_control
 
 namespace go2_cbf_control {
+using StaticCbfQp = CbfQp;
 inline const char * validate_candidate(const SolverResult & result, int count, double max_slack) {
   if (!result.has_candidate) return "nonfinite_acceleration_candidate";
   if (!std::isfinite(result.max_constraint_violation) || result.max_constraint_violation > 1e-3)

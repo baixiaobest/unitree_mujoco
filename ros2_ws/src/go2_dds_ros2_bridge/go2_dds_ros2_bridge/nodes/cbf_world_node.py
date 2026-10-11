@@ -150,6 +150,10 @@ class CbfWorldNode(Node):
                 world.points_xy_m = world_points(raw.points_xyz_m, p, r, rotation, translation, offset)[:, :2].ravel().tolist()
                 world.static_points_xy_m = world_points(raw.static_points_xyz_m, p, r, rotation, translation, offset)[:, :2].ravel().tolist()
                 world.hits, world.static_hits = raw.hits, raw.static_hits
+                world.capture_points_xy_m = world_points(
+                    raw.capture_points_xyz_m, p, r, rotation, translation, offset
+                )[:, :2].ravel().tolist()
+                world.ray_states = raw.ray_states
                 self.scans.append(world)
                 self.world_pub.publish(world)
             # Only samples whose own attitude is covered can supply world velocity.

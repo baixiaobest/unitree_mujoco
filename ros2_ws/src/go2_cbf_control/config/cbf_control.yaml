@@ -5,6 +5,8 @@ cbf_control:
     goal_region_topic: /navigation/in_goal_region
     scan_topic: /cbf/snapshot
     cmd_topic: /cmd_vel
+    # Switch with this single setting and restart the CBF launch.
+    cbf_mode: static  # static or dynamic
 
     # Control rate, solver deadline, and maximum accepted input ages.
     # A scan combines two 65-ms rolling clouds; scan_timeout_s measures from
@@ -57,6 +59,10 @@ cbf_control:
     bad_solve_grace_s: 0.25
     fallback_linear_decel_mps2: 0.5
     fallback_yaw_decel_radps2: 1.0
+
+cbf_velocity_predictor:
+  ros__parameters:
+    velocity_predictor_jit_path: ""  # four-frame temporal_lidar_v4 JIT; absent model uses static fallback
 
 # This node aligns measured state before the independent CBF control timer.
 cbf_world_state:

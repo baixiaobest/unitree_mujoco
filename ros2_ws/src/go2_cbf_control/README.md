@@ -90,13 +90,36 @@ session, alignment failure reason, solver residuals and maximum constraint
 violation. Candidate/selected clouds and velocity arrows use `cbf_world` at the
 snapshot's evaluation timestamp.
 
-## Future dynamic integration
+## Switchable dynamic CBF
 
-Obstacle velocity is currently zero. A future predictor must associate results
-with scan sequence and bin identity, rotate its **absolute** obstacle velocity
-from capture-yaw axes to this world frame, and align obstacle position and robot
-state to one evaluation timestamp. Predictor integration and obstacle propagation
-are not part of this migration.
+Set `cbf_mode: static` or `cbf_mode: dynamic` under `cbf_control` in
+`config/cbf_control.yaml`, then restart the launch. Static is the default.
+For dynamic mode, also set `cbf_velocity_predictor.velocity_predictor_jit_path`
+to a four-frame TorchScript model exported with `temporal_lidar_v4` metadata.
+The predictor node is idle in static mode. It never publishes `/cmd_vel`.
+
+The world scan carries the original 256 sparse front rays and states alongside
+the legacy 128 front and 64 side/rear CBF bins. The predictor node retains four
+newest-first captures, projects them at each snapshot's evaluation position and
+yaw, and publishes `/cbf/dynamic_snapshot`. Its 128 output velocities are
+**absolute obstacle velocities in evaluation-yaw axes**. Only newest-frame
+reflection winners become CBF points. Each winner's velocity is rotated into
+`cbf_world`; its measured world position is advanced by velocity times the
+capture-end-to-evaluation interval. Side/rear returns retain zero velocity.
+The ROS propagation differs from the current Isaac Lab PLAY dynamic CBF, which
+uses measured held-scan positions.
+
+The C++ QP uses robot minus obstacle velocity in the barrier terms. Invalid or
+stale dynamic data triggers the existing static CBF, with its reason shown in
+`/cbf/status`. If the static snapshot also fails, the existing hold-then-stop
+path applies. A session reset discards predictor history. Predictor inference
+runs in its own latest-snapshot worker, outside the 50 Hz control timer.
+Selected moving-point velocities appear as magenta arrows in
+`/cbf/debug_markers` in `cbf_world`.
+
+The repository's current `lidar_velocity_predictor_4_frames_jit.pt` declares
+`temporal_lidar_v3`; it will be rejected by this integration. Export a validated
+four-frame `temporal_lidar_v4` model before enabling dynamic mode.
 
 ## Reproduce validation
 

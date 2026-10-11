@@ -12,6 +12,16 @@ TEST(CbfMath, StaticBarrierMatchesReferenceExpression) {
     2.0 * 0.25 + 2.0 * 4.0 * -0.5 + 4.0 * (1.0 - 0.49));
 }
 
+TEST(CbfMath, ZeroObstacleVelocityMatchesStaticAndMovingVelocityUsesRelativeSpeed) {
+  const double static_offset = go2_cbf_control::static_barrier_offset(-1.0, 0.2, 0.5, -0.1, 2.0, 2.0, 0.7);
+  EXPECT_DOUBLE_EQ(
+    go2_cbf_control::dynamic_barrier_offset(-1.0, 0.2, 0.5, -0.1, 0.0, 0.0, 2.0, 2.0, 0.7),
+    static_offset);
+  EXPECT_DOUBLE_EQ(
+    go2_cbf_control::dynamic_barrier_offset(-1.0, 0.2, 0.5, -0.1, 0.3, 0.2, 2.0, 2.0, 0.7),
+    go2_cbf_control::static_barrier_offset(-1.0, 0.2, 0.2, -0.3, 2.0, 2.0, 0.7));
+}
+
 TEST(CbfMath, ControlledStopNeverChangesSign) {
   EXPECT_DOUBLE_EQ(go2_cbf_control::approach_zero(0.01, 0.02), 0.0);
   EXPECT_DOUBLE_EQ(go2_cbf_control::approach_zero(-0.4, 0.1), -0.3);
