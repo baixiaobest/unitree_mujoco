@@ -461,7 +461,8 @@ class CbfControlNode final : public rclcpp::Node {
       command_x, command_y, command_wz, elapsed_s, timer_lateness_s, release_to_publish_s, result,
       candidates, candidate_count, front_candidate_count, static_candidate_count, selected, selected_count,
       timeout_count_, fallback_transitions_,
-      bad_solve_duration_s, holding_last_valid_command, fallback_reason, scan.get(), dynamic_active, dynamic_reason);
+      bad_solve_duration_s, holding_last_valid_command, fallback_reason, scan.get(),
+      dynamic_active ? dynamic.get() : nullptr, dynamic_active, dynamic_reason);
   }
 
   void publish_command(const double x, const double y, const double wz) {
@@ -486,6 +487,7 @@ class CbfControlNode final : public rclcpp::Node {
     uint64_t timeout_count, uint64_t fallback_transitions, double bad_solve_duration_s,
     bool holding_last_valid_command, const char * fallback_reason,
     const go2_dds_ros2_bridge_msgs::msg::CbfControlSnapshot * snapshot,
+    const go2_dds_ros2_bridge_msgs::msg::CbfDynamicSnapshot * dynamic,
     bool dynamic_active, const std::string & dynamic_reason)
   {
     std::unique_lock<std::mutex> lock(debug_mutex_, std::try_to_lock);
@@ -510,6 +512,13 @@ class CbfControlNode final : public rclcpp::Node {
     debug_.holding_last_valid_command = holding_last_valid_command;
     debug_.fallback_reason = fallback_reason; debug_.candidates = candidates;
     debug_.dynamic_active = dynamic_active; debug_.dynamic_reason = dynamic_reason;
+    if (dynamic) {
+      debug_.front_points_xy_m = dynamic->front_points_xy_m;
+      debug_.front_velocity_xy_mps = dynamic->front_velocity_xy_mps;
+      debug_.front_reflection_hits = dynamic->reflection_hits;
+    } else {
+      debug_.front_reflection_hits.fill(0);
+    }
     debug_.candidate_count = candidate_count;
     debug_.front_candidate_count = front_candidate_count;
     debug_.static_candidate_count = static_candidate_count;
@@ -579,13 +588,32 @@ class CbfControlNode final : public rclcpp::Node {
       marker.points[1].y = copy.robot_y + std::sin(copy.yaw)*vx + std::cos(copy.yaw)*vy;
     }
     if (copy.dynamic_active) {
-      for (int index = 0; index < copy.selected_count; ++index) {
-        const auto & point = copy.selected[index];
-        if (point.is_static || std::hypot(point.velocity_x, point.velocity_y) < 0.05) continue;
+      for (int index = 0; index < kFrontScanBins; ++index) {
+        if (!copy.front_reflection_hits[index]) continue;
+        const double x = copy.front_points_xy_m[2 * index];
+        const double y = copy.front_points_xy_m[2 * index + 1];
+        const double vx = copy.front_velocity_xy_mps[2 * index];
+        const double vy = copy.front_velocity_xy_mps[2 * index + 1];
+        // The point and arrow share a bin ID. Show every reflection, including
+        // bins outside the QP's active radius and predictions close to zero.
+        visualization_msgs::msg::Marker point;
+        point.header.frame_id = "cbf_world";
+        point.header.stamp = copy.evaluation_stamp;
+        point.ns = "cbf_front_bin_position";
+        point.id = index;
+        point.type = visualization_msgs::msg::Marker::SPHERE;
+        point.action = visualization_msgs::msg::Marker::ADD;
+        point.pose.position.x = x; point.pose.position.y = y;
+        point.pose.orientation.w = 1.0;
+        point.scale.x = point.scale.y = point.scale.z = 0.07;
+        point.color.a = 1.0F; point.color.g = 0.9F; point.color.b = 1.0F;
+        point.lifetime = rclcpp::Duration::from_seconds(0.25);
+        markers.markers.push_back(std::move(point));
+        if (std::hypot(vx, vy) <= 1.0e-6) continue;
         visualization_msgs::msg::Marker arrow;
         arrow.header.frame_id = "cbf_world";
         arrow.header.stamp = copy.evaluation_stamp;
-        arrow.ns = "cbf_obstacle_velocity";
+        arrow.ns = "cbf_front_bin_velocity";
         arrow.id = index;
         arrow.type = visualization_msgs::msg::Marker::ARROW;
         arrow.action = visualization_msgs::msg::Marker::ADD;
@@ -593,9 +621,9 @@ class CbfControlNode final : public rclcpp::Node {
         arrow.color.a = 1.0F; arrow.color.r = 1.0F; arrow.color.b = 1.0F;
         arrow.lifetime = rclcpp::Duration::from_seconds(0.25);
         geometry_msgs::msg::Point origin, tip;
-        origin.x = point.x; origin.y = point.y;
-        tip.x = point.x + 0.4 * point.velocity_x;
-        tip.y = point.y + 0.4 * point.velocity_y;
+        origin.x = x; origin.y = y;
+        tip.x = x + 0.4 * vx;
+        tip.y = y + 0.4 * vy;
         arrow.points = {origin, tip};
         markers.markers.push_back(std::move(arrow));
       }
@@ -672,6 +700,8 @@ class CbfControlNode final : public rclcpp::Node {
     const char * fallback_reason{"not_run"};
     bool dynamic_active{};
     std::string dynamic_reason{"not_run"};
+    std::array<double, 2 * kFrontScanBins> front_points_xy_m{}, front_velocity_xy_mps{};
+    std::array<uint8_t, kFrontScanBins> front_reflection_hits{};
     std::array<Point, kCandidateBins> candidates{}; int candidate_count{}, front_candidate_count{}, static_candidate_count{};
     std::array<Point, kMaxPoints> selected{}; int selected_count{};
   };

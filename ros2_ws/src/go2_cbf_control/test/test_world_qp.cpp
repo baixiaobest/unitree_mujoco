@@ -29,6 +29,33 @@ TEST(WorldQp, RotatedBodyBoundsAndBarriersMatchIndependentBodyProblem) {
     EXPECT_LE(w.max_constraint_violation,1e-3);
   }
 }
+TEST(WorldQp, DynamicWorldCoordinatesMatchBodyCoordinatesAfterTranslationAndTurn) {
+  auto config = configuration();
+  CbfQp body(config, 1e-7, 10000), world(config, 1e-7, 10000);
+  const double yaw = 0.83, c = std::cos(yaw), s = std::sin(yaw);
+  const double robot_x = 7.2, robot_y = -3.4;
+  const double obstacle_world_x = robot_x + c * 1.1 - s * 0.3;
+  const double obstacle_world_y = robot_y + s * 1.1 + c * 0.3;
+  const double obstacle_body_vx = -0.35, obstacle_body_vy = 0.12;
+  std::array<Point, kMaxPoints> body_points{}, world_points{};
+  body_points[0] = {1.1, 0.3, std::hypot(1.1, 0.3), false, obstacle_body_vx, obstacle_body_vy};
+  world_points[0] = {
+    obstacle_world_x - robot_x, obstacle_world_y - robot_y, std::hypot(1.1, 0.3), false,
+    c * obstacle_body_vx - s * obstacle_body_vy,
+    s * obstacle_body_vx + c * obstacle_body_vy};
+  const double measured_body_x = 0.21, measured_body_y = -0.08;
+  const double nominal_body_x = 0.1, nominal_body_y = 0.05;
+  auto b = body.solve(nominal_body_x, nominal_body_y, body_points, 1,
+    measured_body_x, measured_body_y, 0.7, -2, -2, 2, 2);
+  auto w = world.solve(c * nominal_body_x - s * nominal_body_y,
+    s * nominal_body_x + c * nominal_body_y, world_points, 1,
+    c * measured_body_x - s * measured_body_y, s * measured_body_x + c * measured_body_y,
+    0.7, -2, -2, 2, 2, yaw);
+  ASSERT_TRUE(b.solved); ASSERT_TRUE(w.solved);
+  EXPECT_NEAR(b.u_x, c * w.u_x + s * w.u_y, 5e-3);
+  EXPECT_NEAR(b.u_y, -s * w.u_x + c * w.u_y, 5e-3);
+  EXPECT_LE(w.max_constraint_violation, 1e-3);
+}
 TEST(WorldQp, EmptyPointsStillRespectRotatedAsymmetricEnvelope) {
   auto config=configuration(); StaticCbfQp qp(config); std::array<Point,kMaxPoints> p{};
   auto r=qp.solve(5,5,p,0,0,0,.7,-.2,-.4,.3,.6,1.5707963267948966);

@@ -114,8 +114,15 @@ stale dynamic data triggers the existing static CBF, with its reason shown in
 `/cbf/status`. If the static snapshot also fails, the existing hold-then-stop
 path applies. A session reset discards predictor history. Predictor inference
 runs in its own latest-snapshot worker, outside the 50 Hz control timer.
-Selected moving-point velocities appear as magenta arrows in
-`/cbf/debug_markers` in `cbf_world`.
+In RViz, add `/cbf/debug_markers` as a MarkerArray and set the fixed frame to
+`cbf_world`. In dynamic mode, cyan spheres show every reflected front bin,
+including bins outside the active CBF radius. Magenta arrows start at the
+matching sphere and show its predicted world velocity at a scale of 0.4 m per
+1 m/s. The `cbf_front_bin_position` and `cbf_front_bin_velocity` marker IDs
+are the 0–127 bin indices. A sphere without an arrow has effectively zero
+predicted velocity. `/cbf/candidate_points` and `/cbf/selected_points` show
+the smaller sets admitted to the CBF radius and QP; all use `cbf_world`.
+The per-bin markers expire when dynamic mode falls back to static.
 
 The repository's current `lidar_velocity_predictor_4_frames_jit.pt` declares
 `temporal_lidar_v3`; it will be rejected by this integration. Export a validated
