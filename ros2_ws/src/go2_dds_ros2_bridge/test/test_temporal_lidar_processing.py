@@ -11,6 +11,7 @@ from go2_dds_ros2_bridge.temporal_lidar_processing import (
     FOV_BINS,
     MAX_DISTANCE_M,
     WORLD_BINS,
+    front_capture_coverage_mask,
     front_arc_bin_indices,
     is_adjacent_cloud_pair,
     normalized_scan_age,
@@ -68,7 +69,7 @@ def test_uncovered_bins_are_max_range_and_invalid():
     assert np.all(validity == 0)
 
 
-def test_front_capture_ray_reducer_builds_fixed_hit_free_fan_and_discards_rear():
+def test_front_capture_ray_reducer_marks_only_reflections_valid_and_discards_rear():
     # Four front rays are centred at -67.5, -22.5, 22.5 and 67.5 degrees.
     points = np.array(
         (
@@ -81,10 +82,64 @@ def test_front_capture_ray_reducer_builds_fixed_hit_free_fan_and_discards_rear()
         points, capture_rays=4, fov_degrees=180.0, range_percentile=0.0
     )
     assert endpoints.shape == (4, 3)
-    assert np.array_equal(states, np.array((1, 1, 2, 1), dtype=np.uint8))
+    assert np.array_equal(states, np.array((0, 0, 2, 0), dtype=np.uint8))
     assert np.isclose(np.linalg.norm(endpoints[2, :2]), 2.0)
     assert np.isclose(math.atan2(endpoints[2, 1], endpoints[2, 0]), math.radians(22.5))
-    assert np.allclose(np.linalg.norm(endpoints[states == 1, :2], axis=1), MAX_DISTANCE_M)
+    assert np.allclose(np.linalg.norm(endpoints[states == 0, :2], axis=1), MAX_DISTANCE_M)
+    distances, validity = project_history_to_front_arc(
+        (CompletedScan(stamp_ns=1, endpoints_xyz_m=endpoints, ray_states=states),),
+        current_xy_m=np.zeros(2), current_yaw_rad=0.0,
+    )
+    assert np.count_nonzero(validity[0]) == 1
+    assert np.isclose(distances[0, validity[0].astype(bool)][0], 2.0 / MAX_DISTANCE_M)
+    assert np.all(distances[0, validity[0] == 0] == 1.0)
+
+
+def test_ground_coverage_adds_free_rays_without_changing_close_obstacle_hits():
+    directions = np.deg2rad((-67.5, -22.5, 22.5, 67.5))
+    def point(distance: float, angle: float, z: float) -> tuple[float, float, float]:
+        return (distance * math.cos(angle), distance * math.sin(angle), z)
+
+    cloud = np.array((
+        point(1.0, directions[0], 0.3),   # Close obstacle: still a hit.
+        point(3.0, directions[0], -0.5),  # Ground cannot override the hit.
+        point(1.5, directions[1], -0.5),  # Too close for coverage.
+        point(4.0, directions[2], -0.5),  # Ground-only observed free ray.
+        point(3.0, math.pi, -0.5),       # Rear return.
+        point(21.0, directions[3], -0.5),  # Beyond sensor range.
+    ))
+    coverage = front_capture_coverage_mask(cloud, capture_rays=4, fov_degrees=180.0)
+    assert np.array_equal(coverage, (True, False, True, False))
+
+    obstacle_band = cloud[(cloud[:, 2] >= -0.1) & (cloud[:, 2] <= 1.4)]
+    endpoints, states = reduce_front_capture_rays(
+        obstacle_band, capture_rays=4, fov_degrees=180.0, coverage_mask=coverage,
+    )
+    assert np.array_equal(states, (2, 0, 1, 0))
+    assert np.isclose(np.linalg.norm(endpoints[0, :2]), 1.0)
+    assert np.isclose(np.linalg.norm(endpoints[2, :2]), MAX_DISTANCE_M)
+    _, cbf_hits = cbf_bins_from_capture(endpoints, states, cbf_bins=2)
+    assert np.array_equal(cbf_hits, (1, 0))
+
+    distances, validity = project_history_to_front_arc(
+        (CompletedScan(stamp_ns=1, endpoints_xyz_m=endpoints, ray_states=states),),
+        current_xy_m=np.zeros(2), current_yaw_rad=0.0,
+    )
+    assert np.count_nonzero(validity[0]) == 2
+    assert np.isclose(np.min(distances[0]), 1.0 / MAX_DISTANCE_M)
+    assert np.count_nonzero((validity[0] == 1) & (distances[0] == 1.0)) == 1
+
+
+def test_coverage_count_threshold_and_two_meter_boundary():
+    points = np.array(((2.0, 0.0, -0.6), (3.0, 0.0, -0.6), (1.99, 0.0, -0.6)))
+    one = front_capture_coverage_mask(points[:1], capture_rays=4, min_points_per_ray=1)
+    two = front_capture_coverage_mask(points[:1], capture_rays=4, min_points_per_ray=2)
+    two_returns = front_capture_coverage_mask(points[:2], capture_rays=4, min_points_per_ray=2)
+    near_only = front_capture_coverage_mask(points[2:], capture_rays=4)
+    assert np.count_nonzero(one) == 1
+    assert not np.any(two)
+    assert np.array_equal(two_returns, one)
+    assert not np.any(near_only)
 
 
 def test_cbf_bins_keep_only_nearest_real_hit_without_free_space_constraints():
@@ -113,15 +168,14 @@ def test_static_cbf_bins_keep_only_real_side_and_rear_returns():
     assert np.allclose(static_points[3], (-1.0, -1.0))
 
 
-def test_empty_cloud_produces_valid_free_rays_only_in_front_fan():
+def test_empty_cloud_produces_invalid_max_range_bins():
     endpoints, states = reduce_front_capture_rays(np.empty((0, 3)))
     history = (CompletedScan(stamp_ns=1, endpoints_xyz_m=endpoints, ray_states=states),)
     distances, validity = project_history_to_polar_bins(history, current_xy_m=np.zeros(2))
     front = front_arc_bin_indices(0.0)
-    rear = np.setdiff1d(np.arange(WORLD_BINS), front)
+    assert np.all(states == 0)
     assert np.all(distances[0, front] == 1.0)
-    assert np.all(validity[0, front] == 1)
-    assert np.all(validity[0, rear] == 0)
+    assert np.all(validity == 0)
 
 
 def test_coarse_world_bins_repeat_into_the_policy_virtual_grid():
@@ -146,6 +200,22 @@ def test_free_ray_stays_at_max_range_after_reprojection():
     center = FOV_BINS // 2
     assert validity[0, center] == 1
     assert distances[0, center] == 1.0
+
+
+def test_reprojected_free_ray_moves_validity_to_its_new_world_bin():
+    angle = math.radians(22.5)
+    scan = CompletedScan(
+        stamp_ns=1,
+        endpoints_xyz_m=np.array(((MAX_DISTANCE_M * math.cos(angle), MAX_DISTANCE_M * math.sin(angle), 0.0),)),
+        ray_states=np.array((1,), dtype=np.uint8),
+    )
+    initial_distances, initial_validity = project_history_to_polar_bins((scan,), current_xy_m=np.zeros(2))
+    moved_distances, moved_validity = project_history_to_polar_bins((scan,), current_xy_m=np.array((0.0, 2.0)))
+    initial_bin = int(np.flatnonzero(initial_validity[0])[0])
+    moved_bin = int(np.flatnonzero(moved_validity[0])[0])
+    assert moved_bin != initial_bin
+    assert initial_distances[0, initial_bin] == moved_distances[0, moved_bin] == 1.0
+    assert moved_validity[0, initial_bin] == 0
 
 
 def test_deskew_interpolates_rolling_points_into_reference_base():
@@ -220,3 +290,9 @@ def test_debug_points_reconstruct_valid_front_bin_in_current_base_frame():
     )
     assert points.shape == (1, 3)
     assert np.isclose(np.linalg.norm(points[0, :2]), 0.2 * MAX_DISTANCE_M)
+    all_bin_points = polar_bins_to_base_points(
+        distances, np.ones_like(validity), current_yaw_rad=0.0, bin_indices=front,
+    )
+    assert all_bin_points.shape == (FOV_BINS, 3)
+    assert np.isclose(np.linalg.norm(all_bin_points[center, :2]), 0.2 * MAX_DISTANCE_M)
+    assert np.allclose(np.linalg.norm(all_bin_points[validity == 0, :2], axis=1), MAX_DISTANCE_M)

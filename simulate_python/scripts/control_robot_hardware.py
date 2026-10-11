@@ -12,13 +12,12 @@ HARDWARE_DOMAIN_ID = 0
 SIMULATION_INTERFACE = "wlp128s20f3"
 HARDWARE_INTERFACE = "enp130s0"
 DEFAULT_MODEL_PATH = (
-    Path(__file__).resolve().parents[3]
+    Path(__file__).resolve().parents[4]
     / "logs"
     / "rsl_rl"
-    / "EncoderActorCriticGO2"
+    / "ObstacleAvoidance"
     / "Locomotion"
-    / "exported"
-    / "policy_estimator.pt"
+    / "locomotion_velocity_estimator_jit.pt"
 )
 
 
@@ -28,7 +27,10 @@ def parse_args():
         "--model-path",
         type=str,
         default=str(DEFAULT_MODEL_PATH),
-        help="Path to the TorchScript model to run.",
+        help=(
+            "Path to the combined velocity-estimator/locomotion TorchScript model. "
+            "The default expects a (batch, horizon, 48) observation history."
+        ),
     )
     parser.add_argument(
         "--policy-mode",

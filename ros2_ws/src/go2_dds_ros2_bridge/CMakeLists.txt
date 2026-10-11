@@ -6,6 +6,7 @@ find_package(ament_cmake_python REQUIRED)
 find_package(go2_dds_ros2_bridge_msgs REQUIRED)
 
 ament_python_install_package(${PROJECT_NAME})
+install(PROGRAMS go2_dds_ros2_bridge/nodes/cbf_world_node.py DESTINATION lib/${PROJECT_NAME} RENAME cbf_world_state)
 
 install(
   PROGRAMS
@@ -100,6 +101,9 @@ install(
 
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(test_cbf_world test/test_cbf_world.py)
+  ament_add_pytest_test(test_cbf_world_ros test/test_cbf_world_ros.py
+    ENV ROS_DOMAIN_ID=187 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TIMEOUT 60)
   ament_add_pytest_test(test_temporal_lidar_processing test/test_temporal_lidar_processing.py)
 endif()
 

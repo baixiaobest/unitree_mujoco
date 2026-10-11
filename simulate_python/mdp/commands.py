@@ -11,6 +11,7 @@ from utils.locomotion_mode import (
     LocomotionMode,
 )
 from utils.mujoco_visualizer import MujocoVisualizer
+from utils.velocity_commands import apply_velocity_deadzone
 import pygame
 
 
@@ -407,6 +408,8 @@ class GameControllerVelocityCommandConfig(CommandConfig):
     max_linear_velocity: float = 0.7
     max_angular_velocity: float = 1.0
     smoothing_time_constant: float = 0.5
+    planar_deadzone_mps: float = 0.1
+    yaw_deadzone_radps: float = 0.1
     controller_index: int = 0
     joystick_deadzone: float = 0.1
     left_x_axis: int = 0
@@ -436,6 +439,14 @@ class GameControllerVelocityCommand(Command):
     @property
     def command(self):
         return self._command
+
+    def _apply_target_deadzone(self) -> None:
+        """Snap small sampled targets to a stationary target before smoothing."""
+        self._target_command = apply_velocity_deadzone(
+            self._target_command,
+            planar_deadzone_mps=self.cfg.planar_deadzone_mps,
+            yaw_deadzone_radps=self.cfg.yaw_deadzone_radps,
+        )
 
     def _disconnect_controller(self, reason: str | None = None) -> None:
         """Release a removed controller and retry discovery after a short delay."""
@@ -525,6 +536,7 @@ class GameControllerVelocityCommand(Command):
             device=self.device,
             dtype=torch.float32,
         )
+        self._apply_target_deadzone()
         if self.cfg.smoothing_time_constant <= 0.0:
             self._command = self._target_command.clone()
 
@@ -1090,6 +1102,9 @@ class GameControllerPolicyHybridVelocityCommand(GameControllerVelocityCommand):
             if policy_cmd is None:
                 self._command = torch.zeros_like(self._command)
             else:
-                self._command = policy_cmd.clone()
+                self._target_command = policy_cmd.clone()
+                # ROS CBF applies the training deadzone before publishing /cmd_vel.
+                # Do not deadzone the same policy command again here.
+                self._command = self._target_command.clone()
         else:
             super().update()

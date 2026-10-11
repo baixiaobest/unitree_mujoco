@@ -8,6 +8,9 @@ find_package(builtin_interfaces REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CbfScan.msg"
+  "msg/CbfScan3D.msg"
+  "msg/CbfWorldScan.msg"
+  "msg/CbfControlSnapshot.msg"
   "msg/TemporalLidarObservation.msg"
   DEPENDENCIES std_msgs builtin_interfaces
 )

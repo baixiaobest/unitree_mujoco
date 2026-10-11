@@ -36,9 +36,14 @@ ament_target_dependencies(cbf_control
 
 install(TARGETS cbf_control DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+install(FILES README.md VALIDATION.md DESTINATION share/${PROJECT_NAME})
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_world_qp test/test_world_qp.cpp)
+  target_compile_features(test_world_qp PRIVATE cxx_std_17)
+  target_include_directories(test_world_qp PRIVATE include)
+  target_link_libraries(test_world_qp osqpstatic)
   ament_add_gtest(test_cbf_math test/test_cbf_math.cpp)
   if(TARGET test_cbf_math)
     target_compile_features(test_cbf_math PRIVATE cxx_std_17)

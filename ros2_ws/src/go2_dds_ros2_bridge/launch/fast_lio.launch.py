@@ -202,6 +202,9 @@ def _make_runtime_nodes(context, *args, **kwargs):
             ],
             condition=IfCondition(LaunchConfiguration("navigation")),
         ),
+        Node(package="go2_dds_ros2_bridge", executable="cbf_world_state",
+             name="cbf_world_state", output="screen", parameters=[cbf_config],
+             condition=IfCondition(LaunchConfiguration("cbf"))),
         Node(
             package="go2_cbf_control",
             executable="cbf_control",

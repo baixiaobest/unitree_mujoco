@@ -16,9 +16,15 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(SCRIPT_DIR.parent))
 from robot_comm.robot_communication import RobotCommunication
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
+from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import TwistStamped_
 from unitree_sdk2py.idl.nav_msgs.msg.dds_ import Odometry_
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import UwbSwitch_, WirelessController_
-from utils.locomotion_mode import TOPIC_LOCOMOTION_MODE, LocomotionMode, format_locomotion_mode
+from utils.locomotion_mode import (
+    TOPIC_CONTROLLER_COMMAND_DEBUG,
+    TOPIC_LOCOMOTION_MODE,
+    LocomotionMode,
+    format_locomotion_mode,
+)
 from utils.odometry_publisher import TOPIC_ESTIMATED_ODOMETRY
 from utils.robot_posture import RobotPostureState, TOPIC_ROBOT_POSTURE, format_robot_posture_state
 from utils.status_monitor_commands import (
@@ -77,8 +83,19 @@ class StatusMonitor(QMainWindow):
         self._latest_locomotion_mode: int = int(LocomotionMode.CONTROLLER)
         self.locomotion_mode_subscriber = ChannelSubscriber(TOPIC_LOCOMOTION_MODE, UwbSwitch_)
         self.locomotion_mode_subscriber.Init(self._locomotion_mode_handler, 10)
+        self._controller_command_lock = Lock()
+        self._latest_controller_command: np.ndarray | None = None
+        self.controller_command_subscriber = ChannelSubscriber(TOPIC_CONTROLLER_COMMAND_DEBUG, TwistStamped_)
+        self.controller_command_subscriber.Init(self._controller_command_handler, 10)
         self.monitor_command_publisher = ChannelPublisher(TOPIC_STATUS_MONITOR_COMMAND, WirelessController_)
         self.monitor_command_publisher.Init()
+        # The monitor opens the same local SDL gamepad as a read-only diagnostic
+        # source.  This is deliberately independent of the control process, so
+        # it can reveal USB/SDL/axis issues even when the policy is stationary.
+        self._controller_debug_pygame = None
+        self._controller_debug_device = None
+        self._controller_debug_status = "initializing"
+        self._init_controller_debug()
         self.init_ui()
         
         # Timer for updating the GUI
@@ -118,6 +135,102 @@ class StatusMonitor(QMainWindow):
     def _get_latest_locomotion_mode(self) -> int | None:
         with self._locomotion_mode_lock:
             return self._latest_locomotion_mode
+
+    def _controller_command_handler(self, msg: TwistStamped_) -> None:
+        command = np.array(
+            [msg.twist.linear.x, msg.twist.linear.y, msg.twist.angular.z], dtype=np.float32
+        )
+        with self._controller_command_lock:
+            self._latest_controller_command = command
+
+    def _get_latest_controller_command(self) -> np.ndarray | None:
+        with self._controller_command_lock:
+            if self._latest_controller_command is None:
+                return None
+            return self._latest_controller_command.copy()
+
+    def _init_controller_debug(self) -> None:
+        """Initialize pygame's local controller reader without affecting control."""
+        try:
+            import pygame
+
+            if not pygame.get_init():
+                pygame.init()
+            if not pygame.joystick.get_init():
+                pygame.joystick.init()
+            self._controller_debug_pygame = pygame
+            self._controller_debug_status = "waiting for controller"
+        except Exception as exc:  # noqa: BLE001 - monitoring must not prevent robot monitoring.
+            self._controller_debug_pygame = None
+            self._controller_debug_status = f"pygame unavailable: {exc}"
+
+    @staticmethod
+    def _controller_input_deadzone(value: float, deadzone: float = 0.10) -> float:
+        return 0.0 if abs(value) < deadzone else value
+
+    def _read_controller_debug_input(self) -> dict | None:
+        """Read the axes used by velocity control; never send a robot command."""
+        pygame = self._controller_debug_pygame
+        if pygame is None:
+            return None
+        try:
+            pygame.event.pump()
+            if pygame.joystick.get_count() == 0:
+                self._controller_debug_device = None
+                self._controller_debug_status = "no controller detected"
+                return None
+            if self._controller_debug_device is None or not self._controller_debug_device.get_init():
+                self._controller_debug_device = pygame.joystick.Joystick(0)
+                self._controller_debug_device.init()
+
+            controller = self._controller_debug_device
+            # Velocity control maps Xbox axes [0, 1, 3] to lateral, forward,
+            # and yaw respectively.  Keep these raw values visible so an axis
+            # layout mismatch is immediately apparent.
+            left_x = float(controller.get_axis(0))
+            left_y = float(controller.get_axis(1))
+            right_x = float(controller.get_axis(3))
+            self._controller_debug_status = "connected"
+            return {
+                "name": controller.get_name(),
+                "left_x": left_x,
+                "left_y": left_y,
+                "right_x": right_x,
+                "forward": self._controller_input_deadzone(-left_y),
+                "lateral": self._controller_input_deadzone(-left_x),
+                "yaw": self._controller_input_deadzone(-right_x),
+                "button_a": bool(controller.get_button(0)),
+            }
+        except Exception as exc:  # noqa: BLE001 - keep the status monitor usable after an unplug.
+            self._controller_debug_device = None
+            self._controller_debug_status = f"read error: {exc}"
+            return None
+
+    def _update_controller_debug_display(self) -> None:
+        controller_input = self._read_controller_debug_input()
+        self.controller_debug_status_value.setText(self._controller_debug_status)
+        controller_command = self._get_latest_controller_command()
+        if controller_command is None:
+            self.controller_debug_policy_value.setText("waiting for control-process telemetry")
+        else:
+            self.controller_debug_policy_value.setText(
+                "forward {:+.3f} m/s   lateral {:+.3f} m/s   yaw {:+.3f} rad/s".format(*controller_command)
+            )
+        if controller_input is None:
+            self.controller_debug_device_value.setText("—")
+            self.controller_debug_raw_value.setText("—")
+            self.controller_debug_mapped_value.setText("—")
+            return
+
+        self.controller_debug_device_value.setText(controller_input["name"])
+        self.controller_debug_raw_value.setText(
+            "LX[0] {left_x:+.3f}   LY[1] {left_y:+.3f}   RX[3] {right_x:+.3f}".format(**controller_input)
+        )
+        self.controller_debug_mapped_value.setText(
+            "forward {forward:+.3f}   lateral {lateral:+.3f}   yaw {yaw:+.3f}   A {button_a}".format(
+                **controller_input
+            )
+        )
 
     def _set_locomotion_mode_display(self, state: int | None) -> None:
         self.locomotion_mode_value.setText(format_locomotion_mode(state))
@@ -474,6 +587,28 @@ class StatusMonitor(QMainWindow):
         """Create the Commands tab"""
         tab = QWidget()
         layout = QVBoxLayout()
+
+        controller_debug_group = QGroupBox("Xbox Controller Input (read-only debug)")
+        controller_debug_layout = QGridLayout()
+        controller_debug_layout.addWidget(QLabel("Status:"), 0, 0)
+        self.controller_debug_status_value = QLabel("initializing")
+        controller_debug_layout.addWidget(self.controller_debug_status_value, 0, 1)
+        controller_debug_layout.addWidget(QLabel("Device:"), 1, 0)
+        self.controller_debug_device_value = QLabel("—")
+        controller_debug_layout.addWidget(self.controller_debug_device_value, 1, 1)
+        controller_debug_layout.addWidget(QLabel("Raw axes:"), 2, 0)
+        self.controller_debug_raw_value = QLabel("—")
+        controller_debug_layout.addWidget(self.controller_debug_raw_value, 2, 1)
+        controller_debug_layout.addWidget(QLabel("Mapped input:"), 3, 0)
+        self.controller_debug_mapped_value = QLabel("—")
+        controller_debug_layout.addWidget(self.controller_debug_mapped_value, 3, 1)
+        controller_debug_layout.addWidget(QLabel("Policy input command:"), 4, 0)
+        self.controller_debug_policy_value = QLabel("waiting for control-process telemetry")
+        controller_debug_layout.addWidget(self.controller_debug_policy_value, 4, 1)
+        controller_debug_layout.addWidget(
+            QLabel("Mapped input is after the 0.10 stick dead zone; this panel never publishes commands."), 5, 0, 1, 2
+        )
+        controller_debug_group.setLayout(controller_debug_layout)
         
         # Command history group
         cmd_group = QGroupBox("Previous Joint Position Commands")
@@ -507,6 +642,7 @@ class StatusMonitor(QMainWindow):
         cmd_plot_group.setLayout(cmd_plot_layout)
         
         # Add groups to tab
+        layout.addWidget(controller_debug_group)
         layout.addWidget(cmd_group)
         layout.addWidget(cmd_plot_group)
         
@@ -526,6 +662,7 @@ class StatusMonitor(QMainWindow):
 
         self._set_robot_posture_display(robot_posture_state)
         self._set_locomotion_mode_display(self._get_latest_locomotion_mode())
+        self._update_controller_debug_display()
         
         # Update joint status tab
         if joint_state["positions"].numel() > 0:

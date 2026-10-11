@@ -1,7 +1,7 @@
 # Newest completed, deskewed front scan for the real-time CBF controller.
 # The header is in base_link at the end of the completed scan. scan_start
-# retains the oldest point time so the controller can apply a conservative
-# latency margin.
+# retains the oldest point time for observation-age checks. Legacy interface;
+# the world-frame controller consumes CbfControlSnapshot instead.
 std_msgs/Header header
 builtin_interfaces/Time scan_start
 uint32 sequence
