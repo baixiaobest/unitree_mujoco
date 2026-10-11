@@ -93,9 +93,11 @@ snapshot's evaluation timestamp.
 ## Switchable dynamic CBF
 
 Set `cbf_mode: static` or `cbf_mode: dynamic` under `cbf_control` in
-`config/cbf_control.yaml`, then restart the launch. Static is the default.
+`config/cbf_control.yaml`, then restart the launch. The current YAML selects dynamic mode.
 For dynamic mode, also set `cbf_velocity_predictor.velocity_predictor_jit_path`
-to a four-frame TorchScript model exported with `temporal_lidar_v4` metadata.
+to a four-frame TorchScript model exported with `temporal_lidar_v3` or
+`temporal_lidar_v4` metadata. The four-frame projection math is identical
+between these versions; v4 adds variable temporal length.
 The predictor node is idle in static mode. It never publishes `/cmd_vel`.
 
 The world scan carries the original 256 sparse front rays and states alongside
@@ -117,16 +119,22 @@ runs in its own latest-snapshot worker, outside the 50 Hz control timer.
 In RViz, add `/cbf/debug_markers` as a MarkerArray and set the fixed frame to
 `cbf_world`. In dynamic mode, cyan spheres show every reflected front bin,
 including bins outside the active CBF radius. Magenta arrows start at the
-matching sphere and show its predicted world velocity at a scale of 0.4 m per
+matching sphere and show its predicted world velocity at a scale of 1 m per
 1 m/s. The `cbf_front_bin_position` and `cbf_front_bin_velocity` marker IDs
 are the 0–127 bin indices. A sphere without an arrow has effectively zero
 predicted velocity. `/cbf/candidate_points` and `/cbf/selected_points` show
 the smaller sets admitted to the CBF radius and QP; all use `cbf_world`.
 The per-bin markers expire when dynamic mode falls back to static.
+If RViz shows no markers, confirm that the `cbf_control` node is running and
+that `/cbf/debug_markers` has a subscriber. Set the RViz MarkerArray display's
+Reliability Policy to Best Effort. The markers use `cbf_world`; RViz can use
+`cbf_world` or a connected fixed frame. `/cbf/status` reports `dynamic_active` and
+`dynamic_reason`; static mode shows command arrows but no per-bin spheres or
+obstacle-velocity arrows.
 
-The repository's current `lidar_velocity_predictor_4_frames_jit.pt` declares
-`temporal_lidar_v3`; it will be rejected by this integration. Export a validated
-four-frame `temporal_lidar_v4` model before enabling dynamic mode.
+The configured `lidar_velocity_predictor_4_frames_jit.pt` declares
+`temporal_lidar_v3` and is accepted as a four-frame model. Validate its
+prediction quality on deployment scans before relying on dynamic constraints.
 
 ## Reproduce validation
 

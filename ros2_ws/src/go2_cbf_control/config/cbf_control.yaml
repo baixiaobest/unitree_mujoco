@@ -6,7 +6,7 @@ cbf_control:
     scan_topic: /cbf/snapshot
     cmd_topic: /cmd_vel
     # Switch with this single setting and restart the CBF launch.
-    cbf_mode: static  # static or dynamic
+    cbf_mode: dynamic  # static or dynamic
 
     # Control rate, solver deadline, and maximum accepted input ages.
     # A scan combines two 65-ms rolling clouds; scan_timeout_s measures from
@@ -15,7 +15,7 @@ cbf_control:
     solver_time_limit_s: 0.005
     publish_deadline_s: 0.010
     policy_timeout_s: 0.25
-    state_timeout_s: 0.10
+    state_timeout_s: 0.20
     max_interpolation_gap_s: 0.10
     scan_timeout_s: 0.50
 
@@ -62,11 +62,10 @@ cbf_control:
 
 cbf_velocity_predictor:
   ros__parameters:
-    velocity_predictor_jit_path: ""  # four-frame temporal_lidar_v4 JIT; absent model uses static fallback
-
+    velocity_predictor_jit_path: /home/baixiao/Desktop/IsaacLab/logs/rsl_rl/ObstacleAvoidance/Navigation/CBF/lidar_velocity_predictor_4_frames_jit.pt
 # This node aligns measured state before the independent CBF control timer.
 cbf_world_state:
   ros__parameters:
-    max_state_age_s: 0.10
+    max_state_age_s: 0.20
     max_interpolation_gap_s: 0.10
     scan_timeout_s: 0.50

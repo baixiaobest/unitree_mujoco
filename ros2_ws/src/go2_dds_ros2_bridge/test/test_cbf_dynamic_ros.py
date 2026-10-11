@@ -43,6 +43,8 @@ def _status_values(message):
 def test_model_metadata_is_checked(tmp_path):
     path = tmp_path / "model.pt"
     _model(path, contract=b"temporal_lidar_v3")
+    assert tuple(load_predictor(str(path))(torch.zeros(1, 2, 4, 128)).shape) == (1, 128, 2)
+    _model(path, contract=b"temporal_lidar_v2")
     with pytest.raises(ValueError, match="contract_or_frame_count"):
         load_predictor(str(path))
     _model(path, frames=b"8")

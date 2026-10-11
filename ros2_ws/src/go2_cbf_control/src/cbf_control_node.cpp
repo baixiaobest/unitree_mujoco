@@ -71,9 +71,11 @@ class CbfControlNode final : public rclcpp::Node {
     }
     command_pub_ = create_publisher<geometry_msgs::msg::TwistStamped>(config_.cmd_topic, rclcpp::QoS(1));
     status_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>("/cbf/status", rclcpp::QoS(10));
-    candidate_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cbf/candidate_points", qos);
-    selected_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cbf/selected_points", qos);
-    marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/cbf/debug_markers", qos);
+    // Debug data is short-lived; RViz can subscribe with best-effort QoS.
+    const auto debug_qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort();
+    candidate_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cbf/candidate_points", debug_qos);
+    selected_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>("/cbf/selected_points", debug_qos);
+    marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("/cbf/debug_markers", debug_qos);
     const auto period = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::duration<double>(1.0 / config_.control_hz));
     control_timer_ = rclcpp::create_wall_timer(
@@ -552,6 +554,7 @@ class CbfControlNode final : public rclcpp::Node {
     visualization_msgs::msg::Marker marker;
     marker.header.stamp = now(); marker.header.frame_id = "base_link"; marker.ns = "cbf_velocity"; marker.id = id;
     marker.type = visualization_msgs::msg::Marker::ARROW; marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.pose.orientation.w = 1.0;
     marker.scale.x = 0.04; marker.scale.y = 0.09; marker.scale.z = 0.12; marker.color.a = 1.0F;
     marker.color.r = red; marker.color.g = green; marker.color.b = blue;
     geometry_msgs::msg::Point start, end; end.x = x; end.y = y; marker.points = {start, end}; marker.text = label;
@@ -617,13 +620,14 @@ class CbfControlNode final : public rclcpp::Node {
         arrow.id = index;
         arrow.type = visualization_msgs::msg::Marker::ARROW;
         arrow.action = visualization_msgs::msg::Marker::ADD;
+        arrow.pose.orientation.w = 1.0;
         arrow.scale.x = 0.025; arrow.scale.y = 0.06; arrow.scale.z = 0.08;
         arrow.color.a = 1.0F; arrow.color.r = 1.0F; arrow.color.b = 1.0F;
         arrow.lifetime = rclcpp::Duration::from_seconds(0.25);
         geometry_msgs::msg::Point origin, tip;
         origin.x = x; origin.y = y;
-        tip.x = x + 0.4 * vx;
-        tip.y = y + 0.4 * vy;
+        tip.x = x + vx;
+        tip.y = y + vy;
         arrow.points = {origin, tip};
         markers.markers.push_back(std::move(arrow));
       }

@@ -19,12 +19,12 @@ def stamp_ns(stamp):
 
 
 def load_predictor(path):
-    """Reject a model whose projection or temporal shape is not this ROS path."""
+    """Accept the equivalent four-frame v3/v4 projection; reject other shapes."""
     import torch
 
     metadata = {"projection_contract.txt": b"", "num_frames.txt": b""}
     model = torch.jit.load(path, map_location="cpu", _extra_files=metadata).eval()
-    if metadata["projection_contract.txt"] != CONTRACT or metadata["num_frames.txt"] != b"4":
+    if metadata["projection_contract.txt"] not in (b"temporal_lidar_v3", CONTRACT) or metadata["num_frames.txt"] != b"4":
         raise ValueError("predictor_contract_or_frame_count_mismatch")
     with torch.inference_mode():
         result = model(torch.zeros(1, 2, FRAMES, 128, dtype=torch.float32))
