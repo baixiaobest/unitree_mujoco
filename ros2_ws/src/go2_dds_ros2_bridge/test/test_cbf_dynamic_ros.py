@@ -3,6 +3,7 @@
 import os
 import subprocess
 import time
+import math
 
 import pytest
 
@@ -30,7 +31,7 @@ class InvalidVelocity(torch.nn.Module):
 
 
 def _model(path, contract=b"temporal_lidar_v4", frames=b"4"):
-    traced = torch.jit.trace(ConstantVelocity(), torch.zeros(1, 2, 4, 128))
+    traced = torch.jit.trace(ConstantVelocity(), torch.zeros(1, 2, int(frames), 128))
     torch.jit.save(traced, str(path), _extra_files={
         "projection_contract.txt": contract, "num_frames.txt": frames,
     })
@@ -43,24 +44,50 @@ def _status_values(message):
 def test_model_metadata_is_checked(tmp_path):
     path = tmp_path / "model.pt"
     _model(path, contract=b"temporal_lidar_v3")
-    assert tuple(load_predictor(str(path))(torch.zeros(1, 2, 4, 128)).shape) == (1, 128, 2)
+    model, frames, contract = load_predictor(str(path))
+    assert (frames, contract) == (4, "temporal_lidar_v3")
+    assert tuple(model(torch.zeros(1, 2, 4, 128)).shape) == (1, 128, 2)
     _model(path, contract=b"temporal_lidar_v2")
     with pytest.raises(ValueError, match="contract_or_frame_count"):
         load_predictor(str(path))
-    _model(path, frames=b"8")
+    _model(path, contract=b"temporal_lidar_v3", frames=b"8")
     with pytest.raises(ValueError, match="contract_or_frame_count"):
         load_predictor(str(path))
-    _model(path)
-    assert tuple(load_predictor(str(path))(torch.zeros(1, 2, 4, 128)).shape) == (1, 128, 2)
+    _model(path, frames=b"8")
+    model, frames, contract = load_predictor(str(path))
+    assert (frames, contract) == (8, "temporal_lidar_v4")
+    assert tuple(model(torch.zeros(1, 2, 8, 128)).shape) == (1, 128, 2)
+    _model(path, frames=b"6")
+    with pytest.raises(ValueError, match="contract_or_frame_count"):
+        load_predictor(str(path))
+    _model(path, contract=b"")
+    with pytest.raises(ValueError, match="contract_or_frame_count"):
+        load_predictor(str(path))
+    traced = torch.jit.trace(ConstantVelocity(), torch.zeros(1, 2, 4, 128))
+    torch.jit.save(traced, str(path))
+    with pytest.raises(ValueError, match="contract_or_frame_count"):
+        load_predictor(str(path))
 
 
-def test_dynamic_selection_then_static_fallback(tmp_path):
+def test_model_nonfinite_probe_is_rejected(tmp_path):
+    path = tmp_path / "bad.pt"
+    traced = torch.jit.trace(InvalidVelocity(), torch.zeros(1, 2, 8, 128))
+    torch.jit.save(traced, str(path), _extra_files={
+        "projection_contract.txt": b"temporal_lidar_v4", "num_frames.txt": b"8",
+    })
+    with pytest.raises(ValueError, match="predictor_nonfinite_output"):
+        load_predictor(str(path))
+
+
+@pytest.mark.parametrize("frames", [4, 8])
+def test_dynamic_selection_then_static_fallback(tmp_path, frames):
     assert int(os.environ.get("ROS_DOMAIN_ID", "0")) != 0
     model_path = tmp_path / "model.pt"
-    _model(model_path)
+    _model(model_path, frames=str(frames).encode())
     rclpy.init(args=["--ros-args", "-p", "cbf_mode:=dynamic",
                      "-p", f"velocity_predictor_jit_path:={model_path}"])
     predictor = CbfVelocityPredictor()
+    assert predictor._frames == frames
     harness = Node("cbf_dynamic_test_harness")
     executor = SingleThreadedExecutor()
     executor.add_node(predictor)
@@ -119,7 +146,17 @@ def test_dynamic_selection_then_static_fallback(tmp_path):
         return snapshot
 
     try:
-        until = time.monotonic() + 2.0
+        if frames == 8:
+            warmup_until = time.monotonic() + 0.8
+            while time.monotonic() < warmup_until and not any(
+                "insufficient_predictor_history" in _status_values(d).get("dynamic_reason", "")
+                for d in diagnostics
+            ):
+                cycle()
+            assert any("insufficient_predictor_history" in _status_values(d).get("dynamic_reason", "")
+                       for d in diagnostics)
+            assert not any(_status_values(d).get("dynamic_active") == "1.000000" for d in diagnostics)
+        until = time.monotonic() + (3.0 if frames == 8 else 2.0)
         while time.monotonic() < until and not any(
             _status_values(d).get("dynamic_active") == "1.000000" for d in diagnostics
         ):
@@ -128,6 +165,26 @@ def test_dynamic_selection_then_static_fallback(tmp_path):
         assert any(_status_values(d).get("dynamic_active") == "1.000000" for d in diagnostics)
         assert any(c.twist.linear.x < -0.1 for c in commands)
         assert len(harness.get_publishers_info_by_topic("/cbf/test_command")) == 1
+
+        if frames == 8:
+            sequence += 1  # Skip one physical capture sequence.
+            scan_stamp = 0
+            prior = len(diagnostics)
+            until = time.monotonic() + 1.0
+            while time.monotonic() < until and not any(
+                "insufficient_predictor_history" in _status_values(d).get("dynamic_reason", "")
+                for d in diagnostics[prior:]
+            ):
+                cycle()
+            assert any("insufficient_predictor_history" in _status_values(d).get("dynamic_reason", "")
+                       for d in diagnostics[prior:])
+            prior = len(diagnostics)
+            until = time.monotonic() + 2.5
+            while time.monotonic() < until and not any(
+                _status_values(d).get("dynamic_active") == "1.000000" for d in diagnostics[prior:]
+            ):
+                cycle()
+            assert any(_status_values(d).get("dynamic_active") == "1.000000" for d in diagnostics[prior:])
 
         healthy_model = predictor._model
         predictor._model = InvalidVelocity()
@@ -140,7 +197,8 @@ def test_dynamic_selection_then_static_fallback(tmp_path):
         assert any("dynamic_preparation_failed" in _status_values(d).get("dynamic_reason", "")
                    for d in diagnostics[-5:])
         assert any("static_cbf_fallback" in d.status[0].message for d in diagnostics[-5:])
-        assert commands and abs(commands[-1].twist.linear.x) < 0.05
+        assert any(_status_values(d).get("dynamic_active") == "0.000000" for d in diagnostics[-5:])
+        assert commands and math.isfinite(commands[-1].twist.linear.x)
         predictor._model = healthy_model
         prior = len(diagnostics)
         until = time.monotonic() + 1.0
@@ -152,7 +210,7 @@ def test_dynamic_selection_then_static_fallback(tmp_path):
 
         session_id = "reset_session"
         prior = len(diagnostics)
-        until = time.monotonic() + 1.0
+        until = time.monotonic() + (2.5 if frames == 8 else 1.0)
         while time.monotonic() < until and not any(
             _status_values(d).get("world_session") == session_id and
             _status_values(d).get("dynamic_active") == "1.000000"

@@ -62,7 +62,8 @@ cbf_control:
 
 cbf_velocity_predictor:
   ros__parameters:
-    velocity_predictor_jit_path: /home/baixiao/Desktop/IsaacLab/logs/rsl_rl/ObstacleAvoidance/Navigation/CBF/lidar_velocity_predictor_4_frames_jit.pt
+    velocity_predictor_jit_path: /home/baixiao/Desktop/IsaacLab/logs/rsl_rl/ObstacleAvoidance/Navigation/CBF/lidar_velocity_predictor_8_frames_jit.pt
+    predictor_warning_threshold_ms: 80.0
 # This node aligns measured state before the independent CBF control timer.
 cbf_world_state:
   ros__parameters:

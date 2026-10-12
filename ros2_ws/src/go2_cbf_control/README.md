@@ -95,15 +95,23 @@ snapshot's evaluation timestamp.
 Set `cbf_mode: static` or `cbf_mode: dynamic` under `cbf_control` in
 `config/cbf_control.yaml`, then restart the launch. The current YAML selects dynamic mode.
 For dynamic mode, also set `cbf_velocity_predictor.velocity_predictor_jit_path`
-to a four-frame TorchScript model exported with `temporal_lidar_v3` or
-`temporal_lidar_v4` metadata. The four-frame projection math is identical
-between these versions; v4 adds variable temporal length.
+to a TorchScript model with `projection_contract.txt` and `num_frames.txt`
+metadata. Supported combinations are four frames with `temporal_lidar_v3` or
+`temporal_lidar_v4`, and eight frames with `temporal_lidar_v4`. The model is
+probed at startup; a missing contract, wrong output shape, or nonfinite output
+keeps dynamic prediction idle and the controller on static CBF.
 The predictor node is idle in static mode. It never publishes `/cmd_vel`.
 
 The world scan carries the original 256 sparse front rays and states alongside
-the legacy 128 front and 64 side/rear CBF bins. The predictor node retains four
-newest-first captures, projects them at each snapshot's evaluation position and
-yaw, and publishes `/cbf/dynamic_snapshot`. Its 128 output velocities are
+the legacy 128 front and 64 side/rear CBF bins. The predictor node retains the
+model's four or eight newest-first captures, projects them at each snapshot's
+evaluation position and yaw, and publishes `/cbf/dynamic_snapshot`. It selects
+consecutive capture sequences from the snapshot's embedded scan, independent of
+delivery order across ROS topics. Four-frame models keep the existing zero-validity
+padding for missing history. Eight-frame models use static CBF until eight
+consecutive captures are available after startup, a reset, or a scan gap. The
+warmup reason appears as `insufficient_predictor_history` in `/cbf/status`.
+Its 128 output velocities are
 **absolute obstacle velocities in evaluation-yaw axes**. Only newest-frame
 reflection winners become CBF points. Each winner's velocity is rotated into
 `cbf_world`; its measured world position is advanced by velocity times the
@@ -135,6 +143,18 @@ obstacle-velocity arrows.
 The configured `lidar_velocity_predictor_4_frames_jit.pt` declares
 `temporal_lidar_v3` and is accepted as a four-frame model. Validate its
 prediction quality on deployment scans before relying on dynamic constraints.
+To use the existing eight-frame artifact, change only
+`cbf_velocity_predictor.velocity_predictor_jit_path` to
+`lidar_velocity_predictor_8_frames_jit.pt` and restart the launch. Restore the
+four-frame path and restart to roll back. Both capture histories use the roughly
+130 ms completed-scan cadence; the policy observation remains four frames.
+Before selecting eight frames on the robot, replay recorded scans to compare ROS
+projection with the training projector and check finite predictions, dynamic
+activation after warmup, predictor latency, and CBF freshness fallbacks. The node
+logs its selected path, contract, frame count, startup probe time, and periodic
+inference mean/maximum latency. It warns when total prediction processing exceeds
+50 ms. A local shape check does not establish model
+accuracy or timing on the deployment computer.
 
 ## Reproduce validation
 
