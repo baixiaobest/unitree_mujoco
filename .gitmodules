@@ -4,3 +4,7 @@
 [submodule "ros2_ws/src/livox_ros_driver2"]
 	path = ros2_ws/src/livox_ros_driver2
 	url = https://github.com/baixiaobest/livox_ros_driver2.git
+[submodule "ros2_ws/src/point_lio_unilidar"]
+	path = ros2_ws/src/point_lio_unilidar
+	url = git@github.com:baixiaobest/point_lio_unilidar.git
+	branch = ros2-go2
