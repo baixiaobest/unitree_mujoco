@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Level the L2 display world and anchor it at the initial Go2 IMU pose."""
+"""Anchor the L2 display world at the initial virtual Go2 IMU pose."""
 
 from __future__ import annotations
 
 import math
-from collections import deque
 import numpy as np
 import rclpy
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from sensor_msgs.msg import Imu as ImuMessage
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 
 from go2_dds_ros2_bridge.tf_utils import (
@@ -38,37 +36,6 @@ def pose_matrix(translation, quaternion):
     return matrix
 
 
-def rotation_from_to(source, target):
-    """Shortest rotation mapping one unit direction to another."""
-    source = np.asarray(source, dtype=float)
-    target = np.asarray(target, dtype=float)
-    source /= np.linalg.norm(source)
-    target /= np.linalg.norm(target)
-    cross = np.cross(source, target)
-    dot = float(np.clip(source @ target, -1.0, 1.0))
-    if dot < -1.0 + 1e-8:
-        axis = np.cross(source, [1.0, 0.0, 0.0])
-        if np.linalg.norm(axis) < 1e-8:
-            axis = np.cross(source, [0.0, 1.0, 0.0])
-        axis /= np.linalg.norm(axis)
-        return 2.0 * np.outer(axis, axis) - np.eye(3)
-    skew = np.array([[0.0, -cross[2], cross[1]],
-                     [cross[2], 0.0, -cross[0]],
-                     [-cross[1], cross[0], 0.0]])
-    return np.eye(3) + skew + skew @ skew / (1.0 + dot)
-
-
-def level_world_rotation(odom_imu_rotation, imu_go2_rotation, mean_acceleration):
-    """Make gravity vertical and the initial Go2 IMU heading zero."""
-    up_in_odom = odom_imu_rotation @ mean_acceleration
-    level = rotation_from_to(up_in_odom, [0.0, 0.0, 1.0])
-    go2_in_level = level @ odom_imu_rotation @ imu_go2_rotation
-    heading = math.atan2(go2_in_level[1, 0], go2_in_level[0, 0])
-    c, s = math.cos(heading), math.sin(heading)
-    remove_heading = np.array([[c, s, 0.0], [-s, c, 0.0], [0.0, 0.0, 1.0]])
-    return remove_heading @ level
-
-
 class FastLioL2Frames(Node):
     def __init__(self):
         super().__init__("fastlio_l2_frames")
@@ -77,25 +44,24 @@ class FastLioL2Frames(Node):
         self._latest_extrinsic = None
         self._latest_odom = None
         self._anchored = False
-        self._stationary_imu = deque(maxlen=250)
         translation, rotation = lidar_pose_in_imu_frame()  # Go2 IMU <- LiDAR
         self._go2_lidar = np.eye(4)
         self._go2_lidar[:3, :3] = rotation
         self._go2_lidar[:3, 3] = translation
+        self._lidar_go2 = np.linalg.inv(self._go2_lidar)
+        mount = TransformStamped()
+        mount.header.stamp = self.get_clock().now().to_msg()
+        mount.header.frame_id = LIDAR
+        mount.child_frame_id = GO2_IMU
+        (mount.transform.translation.x, mount.transform.translation.y,
+         mount.transform.translation.z) = self._lidar_go2[:3, 3]
+        q_out = quaternion_from_rotation_matrix(self._lidar_go2[:3, :3])
+        (mount.transform.rotation.x, mount.transform.rotation.y,
+         mount.transform.rotation.z, mount.transform.rotation.w) = q_out
+        self._mount_tf = mount
+        self._static_tf.sendTransform(mount)
         self.create_subscription(TransformStamped, "/fastlio_l2/estimated_extrinsic", self._on_extrinsic, 20)
         self.create_subscription(Odometry, "/fastlio_l2/odom", self._on_odom, 20)
-        self.create_subscription(ImuMessage, "/fastlio_l2/input/imu", self._on_imu, 100)
-
-    def _on_imu(self, msg):
-        if self._anchored or msg.header.frame_id != IMU:
-            return
-        acc = np.array([msg.linear_acceleration.x, msg.linear_acceleration.y,
-                        msg.linear_acceleration.z], dtype=float)
-        gyro = np.array([msg.angular_velocity.x, msg.angular_velocity.y,
-                         msg.angular_velocity.z], dtype=float)
-        if np.isfinite(acc).all() and np.isfinite(gyro).all() and 7.0 < np.linalg.norm(acc) < 12.0:
-            self._stationary_imu.append((acc, gyro))
-            self._try_anchor()
 
     def _on_extrinsic(self, msg):
         if msg.header.frame_id != IMU or msg.child_frame_id != LIDAR:
@@ -106,16 +72,9 @@ class FastLioL2Frames(Node):
         if not all(math.isfinite(value) for value in values) or sum(value * value for value in values[3:]) < 1e-12:
             return
         imu_lidar = pose_matrix(values[:3], values[3:])
-        imu_go2 = imu_lidar @ np.linalg.inv(self._go2_lidar)
+        imu_go2 = imu_lidar @ self._lidar_go2
         self._latest_extrinsic = (stamp_ns(msg.header.stamp), imu_go2)
-        body = TransformStamped()
-        body.header.stamp = msg.header.stamp
-        body.header.frame_id = IMU
-        body.child_frame_id = GO2_IMU
-        body.transform.translation.x, body.transform.translation.y, body.transform.translation.z = imu_go2[:3, 3]
-        q_out = quaternion_from_rotation_matrix(imu_go2[:3, :3])
-        body.transform.rotation.x, body.transform.rotation.y, body.transform.rotation.z, body.transform.rotation.w = q_out
-        self._dynamic_tf.sendTransform([msg, body])
+        self._dynamic_tf.sendTransform(msg)
         self._try_anchor()
 
     def _on_odom(self, msg):
@@ -125,14 +84,7 @@ class FastLioL2Frames(Node):
         self._try_anchor()
 
     def _try_anchor(self):
-        if (self._anchored or self._latest_extrinsic is None or self._latest_odom is None
-                or len(self._stationary_imu) < 200):
-            return
-        samples = np.array(self._stationary_imu)
-        if np.max(np.linalg.norm(samples[:, 1, :], axis=1)) > 0.05:
-            return
-        mean_acceleration = samples[:, 0, :].mean(axis=0)
-        if np.max(np.std(samples[:, 0, :], axis=0)) > 0.35:
+        if self._anchored or self._latest_extrinsic is None or self._latest_odom is None:
             return
         msg = self._latest_odom
         extrinsic_stamp, imu_go2 = self._latest_extrinsic
@@ -144,9 +96,9 @@ class FastLioL2Frames(Node):
         if not all(math.isfinite(value) for value in values) or sum(value * value for value in values[3:]) < 1e-12:
             return
         odom_imu = pose_matrix(values[:3], values[3:])
-        initial_go2_position = (odom_imu @ imu_go2)[:3, 3]
-        world_odom_rotation = level_world_rotation(
-            odom_imu[:3, :3], imu_go2[:3, :3], mean_acceleration)
+        odom_go2 = odom_imu @ imu_go2
+        initial_go2_position = odom_go2[:3, 3]
+        world_odom_rotation = odom_go2[:3, :3].T
         world_odom_translation = -world_odom_rotation @ initial_go2_position
         anchor = TransformStamped()
         anchor.header.stamp = msg.header.stamp
@@ -157,11 +109,13 @@ class FastLioL2Frames(Node):
         q_out = quaternion_from_rotation_matrix(world_odom_rotation)
         (anchor.transform.rotation.x, anchor.transform.rotation.y,
          anchor.transform.rotation.z, anchor.transform.rotation.w) = q_out
-        self._static_tf.sendTransform(anchor)
+        # Humble's static broadcaster replaces its latched TFMessage on each
+        # call, so include both edges for subscribers that join after startup.
+        self._static_tf.sendTransform([self._mount_tf, anchor])
         self._anchored = True
         self.get_logger().info(
-            f"Anchored level {WORLD} at initial Go2 IMU position "
-            f"{initial_go2_position.tolist()}; heading zeroed")
+            f"Anchored {WORLD} at initial Go2 IMU pose "
+            f"{initial_go2_position.tolist()}; axes aligned")
 
 
 def main():
