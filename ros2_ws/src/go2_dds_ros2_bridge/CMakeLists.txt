@@ -65,6 +65,11 @@ install(
   RENAME time_sync_diagnostic
 )
 
+install(PROGRAMS go2_dds_ros2_bridge/nodes/fastlio_l2_input_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME fastlio_l2_input)
+install(PROGRAMS go2_dds_ros2_bridge/nodes/fastlio_l2_frames_node.py
+  DESTINATION lib/${PROJECT_NAME} RENAME fastlio_l2_frames)
+
 install(
   PROGRAMS
     go2_dds_ros2_bridge/nodes/occupancy_2d_node.py

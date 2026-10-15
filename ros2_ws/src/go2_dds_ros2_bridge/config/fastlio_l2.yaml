@@ -1,0 +1,50 @@
+/**:
+  ros__parameters:
+    feature_extract_enable: false
+    point_filter_num: 1
+    max_iteration: 3
+    filter_size_surf: 0.25
+    filter_size_map: 0.4
+    cube_side_length: 200.0
+    runtime_pos_log_enable: false
+    map_file_path: ""
+    frames:
+      world: fastlio_l2_odom
+      imu: fastlio_l2_imu
+    common:
+      lid_topic: /fastlio_l2/input/cloud
+      imu_topic: /fastlio_l2/input/imu
+      time_sync_en: false
+      time_offset_lidar_to_imu: 0.0
+    preprocess:
+      lidar_type: 2
+      scan_line: 32
+      scan_rate: 7
+      timestamp_unit: 0
+      blind: 1.0
+    mapping:
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.001
+      b_gyr_cov: 0.0001
+      fov_degree: 360.0
+      det_range: 30.0
+      extrinsic_est_en: true
+      # Initial guess: LiDAR pose in the L2 internal IMU frame (metres).
+      extrinsic_T: [0.007698, 0.014655, -0.00667]
+      # Provisional L2 DDS IMU<-cloud rotation. Seeded from the Go2 IMU<-LiDAR
+      # mount rotation in tf_utils, then tilted 17.3 degrees to align the
+      # recorded L2 gravity vector with the cloud's fitted floor normal.
+      # Yaw remains a mount-based guess; calibrate it with richer motion data.
+      extrinsic_R: [0.48679797, -0.87275291, -0.03647053,
+                    -0.87161853, -0.48806719, 0.04551428,
+                    -0.05752280, 0.00963214, -0.99829773]
+    publish:
+      path_en: true
+      scan_publish_en: true
+      dense_publish_en: true
+      scan_bodyframe_pub_en: true
+      extrinsic_topic: /fastlio_l2/estimated_extrinsic
+    pcd_save:
+      pcd_save_en: false
+      interval: -1
