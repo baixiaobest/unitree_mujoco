@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import math
 import os
 from pathlib import Path
@@ -44,6 +45,11 @@ class BridgeConfig:
     angular_velocity_variance: float
     linear_acceleration_variance: float
     variance_source: str
+    raw_ros_topic: str
+    accelerometer_bias: tuple[float, float, float] | None
+    accelerometer_scale: tuple[float, float, float] | None
+    gyroscope_bias: tuple[float, float, float] | None
+    gyroscope_scale: tuple[float, float, float] | None
 
 
 def _import_yaml_module():
@@ -114,6 +120,48 @@ def load_imu_variances(config_file: Path | None) -> tuple[dict[str, float], str]
     return variances, str(file_path)
 
 
+def load_imu_calibration(config_file: Path) -> tuple[tuple[float, float, float], ...] | None:
+    yaml = _import_yaml_module()
+    loaded = yaml.safe_load(Path(config_file).read_text())
+    if not isinstance(loaded, dict) or 'calibration' not in loaded:
+        return None
+    calibration = loaded['calibration']
+    if not isinstance(calibration, dict) or calibration.get('frame_id') != 'body':
+        raise SystemExit('IMU calibration must specify frame_id: body')
+
+    def vector(section: dict, key: str, *, positive: bool = False) -> tuple[float, float, float]:
+        values = section.get(key)
+        if not isinstance(values, list) or len(values) != 3 or any(
+            not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(value) or (positive and value <= 0)
+            for value in values
+        ):
+            raise SystemExit(f'IMU calibration {key} must contain three finite numbers'
+                             + (' greater than zero' if positive else ''))
+        return tuple(float(value) for value in values)
+
+    try:
+        accelerometer = calibration['accelerometer']
+        gyroscope = calibration['gyroscope']
+        if not isinstance(accelerometer, dict) or not isinstance(gyroscope, dict):
+            raise KeyError('accelerometer or gyroscope')
+    except KeyError as error:
+        raise SystemExit(f'Incomplete IMU calibration: {error}') from error
+    return (vector(accelerometer, 'bias_m_s2'), vector(accelerometer, 'scale', positive=True),
+            vector(gyroscope, 'bias_rad_s'), vector(gyroscope, 'scale', positive=True))
+
+
+def calibrate_vector(values, bias, scale) -> tuple[float, float, float]:
+    return tuple((value - offset) * gain for value, offset, gain in zip(values, bias, scale))
+
+
+def scale_covariance(covariance: list[float], scale) -> list[float]:
+    if covariance[0] < 0:
+        return list(covariance)
+    return [covariance[3 * row + col] * scale[row] * scale[col]
+            for row in range(3) for col in range(3)]
+
+
 def import_raw_dds_dependencies():
     try:
         from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelSubscriber
@@ -153,6 +201,8 @@ def parse_args() -> BridgeConfig:
         default=DEFAULT_ROS_IMU_TOPIC,
         help="ROS2 IMU topic to publish.",
     )
+    parser.add_argument('--raw-ros-topic', default='',
+                        help='Optional second ROS2 topic carrying the uncalibrated IMU sample.')
     parser.add_argument(
         "--frame-id",
         type=str,
@@ -169,6 +219,11 @@ def parse_args() -> BridgeConfig:
     args = parser.parse_args(non_ros_args)
     runtime_profile = resolve_runtime_arguments(args)
     configured_variances, variance_source = load_imu_variances(args.config_file)
+    calibration = load_imu_calibration(args.config_file)
+    if args.raw_ros_topic and args.raw_ros_topic == args.ros_topic:
+        raise SystemExit('Raw and calibrated IMU topics must be distinct')
+    if calibration is not None and args.frame_id != 'body':
+        raise SystemExit('Go2 body IMU calibration requires --frame-id body')
 
     orientation_variance = configured_variances["orientation"]
     angular_velocity_variance = configured_variances["angular_velocity"]
@@ -184,6 +239,11 @@ def parse_args() -> BridgeConfig:
         angular_velocity_variance=max(angular_velocity_variance, 0.0),
         linear_acceleration_variance=max(linear_acceleration_variance, 0.0),
         variance_source=variance_source,
+        raw_ros_topic=args.raw_ros_topic,
+        accelerometer_bias=calibration[0] if calibration else None,
+        accelerometer_scale=calibration[1] if calibration else None,
+        gyroscope_bias=calibration[2] if calibration else None,
+        gyroscope_scale=calibration[3] if calibration else None,
     )
 
 
@@ -213,6 +273,8 @@ class DdsImuBridge(Node):
         super().__init__("go2_imu_bridge")
         self._config = config
         self._publisher = self.create_publisher(Imu, self._config.ros_topic, 10)
+        self._raw_publisher = (self.create_publisher(Imu, self._config.raw_ros_topic, 10)
+                               if self._config.raw_ros_topic else None)
         self._orientation_covariance = diagonal_covariance(self._config.orientation_variance)
         self._angular_velocity_covariance = diagonal_covariance(self._config.angular_velocity_variance)
         self._linear_acceleration_covariance = diagonal_covariance(self._config.linear_acceleration_variance)
@@ -227,7 +289,7 @@ class DdsImuBridge(Node):
         ros_domain_id = os.environ.get("ROS_DOMAIN_ID", "<unset>")
         self.get_logger().info(
             "Bridging raw DDS lowstate '%s' (domain=%d, interface=%s) to ROS2 topic '%s' as frame '%s' (ROS_DOMAIN_ID=%s). "
-            "IMU timestamps use the LowState.tick millisecond clock and a rolling low-delay host-clock map. Variances source: %s."
+            "IMU timestamps use the LowState.tick millisecond clock and a rolling low-delay host-clock map. Variances source: %s. Calibration: %s. Raw topic: %s."
             % (
                 self._config.dds_topic,
                 self._config.dds_domain_id,
@@ -236,6 +298,8 @@ class DdsImuBridge(Node):
                 self._config.frame_id,
                 ros_domain_id,
                 self._config.variance_source,
+                'enabled' if self._config.accelerometer_bias is not None else 'disabled',
+                self._config.raw_ros_topic or '<disabled>',
             )
         )
 
@@ -274,6 +338,21 @@ class DdsImuBridge(Node):
         ros_msg.linear_acceleration.z = accelerometer[2]
         ros_msg.linear_acceleration_covariance = list(self._linear_acceleration_covariance)
 
+        if self._raw_publisher is not None:
+            self._raw_publisher.publish(ros_msg)
+        if self._config.accelerometer_bias is not None:
+            corrected = copy.deepcopy(ros_msg)
+            corrected_gyro = calibrate_vector(gyroscope, self._config.gyroscope_bias,
+                                              self._config.gyroscope_scale)
+            corrected_acc = calibrate_vector(accelerometer, self._config.accelerometer_bias,
+                                             self._config.accelerometer_scale)
+            corrected.angular_velocity.x, corrected.angular_velocity.y, corrected.angular_velocity.z = corrected_gyro
+            corrected.linear_acceleration.x, corrected.linear_acceleration.y, corrected.linear_acceleration.z = corrected_acc
+            corrected.angular_velocity_covariance = scale_covariance(
+                ros_msg.angular_velocity_covariance, self._config.gyroscope_scale)
+            corrected.linear_acceleration_covariance = scale_covariance(
+                ros_msg.linear_acceleration_covariance, self._config.accelerometer_scale)
+            ros_msg = corrected
         self._publisher.publish(ros_msg)
 
     @staticmethod

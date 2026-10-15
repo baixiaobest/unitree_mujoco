@@ -62,6 +62,9 @@ def _make_runtime_nodes(context, *args, **kwargs):
     fast_lio_config = LaunchConfiguration("fast_lio_config").perform(context)
     cloud_topic = LaunchConfiguration("cloud_topic").perform(context)
     imu_topic = LaunchConfiguration("imu_topic").perform(context)
+    imu_bridge_config = LaunchConfiguration("imu_bridge_config").perform(context)
+    if LaunchConfiguration("run_mode").perform(context) == "simulation":
+        imu_bridge_config = str(Path(imu_bridge_config).with_name("imu_bridge.yaml"))
     corrected_map_frame = LaunchConfiguration("corrected_map_frame").perform(context)
     occupancy_config = LaunchConfiguration("occupancy_config").perform(context)
     occupancy_scan_config = LaunchConfiguration("occupancy_scan_config").perform(context)
@@ -106,7 +109,9 @@ def _make_runtime_nodes(context, *args, **kwargs):
             executable="imu_bridge",
             name="imu_bridge",
             output="screen",
-            arguments=common_bridge_arguments + ["--ros-topic", imu_topic, "--frame-id", "body"],
+            arguments=common_bridge_arguments + ["--ros-topic", imu_topic,
+                                                  "--raw-ros-topic", f"{imu_topic}_raw",
+                                                  "--frame-id", "body", "--config-file", imu_bridge_config],
         ),
         Node(
             package="tf2_ros",
@@ -287,6 +292,13 @@ def generate_launch_description() -> LaunchDescription:
                 "imu_topic",
                 default_value="/imu/data_fastlio",
                 description="Cadence-corrected IMU topic forwarded into FAST-LIO.",
+            ),
+            DeclareLaunchArgument(
+                "imu_bridge_config",
+                default_value=PathJoinSubstitution(
+                    [FindPackageShare("go2_dds_ros2_bridge"), "config", "imu_bridge_fastlio.yaml"]
+                ),
+                description="Go2 body IMU bias, scale, and reported covariance configuration for hardware.",
             ),
             DeclareLaunchArgument(
                 "corrected_map_frame",

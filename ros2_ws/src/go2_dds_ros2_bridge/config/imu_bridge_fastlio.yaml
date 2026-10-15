@@ -1,0 +1,16 @@
+# Go2 body IMU intrinsics measured 2026-10-15.
+# Source: LiDAR_IMU_Init/result/go2_body_imu_accelerometer_20261015_193646.yaml
+#         LiDAR_IMU_Init/result/go2_body_imu_gyroscope_20261015_200317.yaml
+# a_corrected = scale * (a_raw - bias); omega_corrected = scale * (omega_raw - bias).
+variances:
+  orientation: 0.05
+  angular_velocity: 0.02
+  linear_acceleration: 0.1
+calibration:
+  frame_id: body
+  accelerometer:
+    bias_m_s2: [-0.07796593224394213, 0.08697329763321235, -0.19624653869696315]
+    scale: [1.0095694031177982, 1.0105213072542276, 1.007755982496512]
+  gyroscope:
+    bias_rad_s: [0.0016625212498232052, 0.007887682071313146, 0.0016096398773707448]
+    scale: [0.9975112253412756, 0.9836510828099626, 0.9795362131847475]
