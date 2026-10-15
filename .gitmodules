@@ -8,3 +8,7 @@
 	path = ros2_ws/src/point_lio_unilidar
 	url = git@github.com:baixiaobest/point_lio_unilidar.git
 	branch = ros2-go2
+[submodule "ros2_ws/src/LiDAR_IMU_Init"]
+	path = ros2_ws/src/LiDAR_IMU_Init
+	url = git@github.com:baixiaobest/LiDAR_IMU_Init.git
+	branch = ros2-go2

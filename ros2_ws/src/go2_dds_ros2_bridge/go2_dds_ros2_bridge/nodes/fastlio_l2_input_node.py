@@ -50,6 +50,7 @@ class Config:
     imu_ros: str
     imu_frame: str
     lidar_frame: str
+    preserve_sensor_stamps: bool
 
 
 class PairedL2Bridge(Node):
@@ -87,13 +88,16 @@ class PairedL2Bridge(Node):
             return
         receipt_ns = time_ns()
         with self._lock:
-            self._offset_samples.append((receipt_ns, receipt_ns - source_ns))
-            cutoff = receipt_ns - 5_000_000_000
-            while self._offset_samples and self._offset_samples[0][0] < cutoff:
-                self._offset_samples.popleft()
-            offsets = sorted(offset for _, offset in self._offset_samples)
-            self._offset_ns = offsets[int(0.05 * (len(offsets) - 1))]
-            corrected_ns = source_ns + self._offset_ns
+            if self._config.preserve_sensor_stamps:
+                corrected_ns = source_ns
+            else:
+                self._offset_samples.append((receipt_ns, receipt_ns - source_ns))
+                cutoff = receipt_ns - 5_000_000_000
+                while self._offset_samples and self._offset_samples[0][0] < cutoff:
+                    self._offset_samples.popleft()
+                offsets = sorted(offset for _, offset in self._offset_samples)
+                self._offset_ns = offsets[int(0.05 * (len(offsets) - 1))]
+                corrected_ns = source_ns + self._offset_ns
             if corrected_ns <= self._last_imu_ns:
                 return
             self._last_imu_ns = corrected_ns
@@ -119,9 +123,9 @@ class PairedL2Bridge(Node):
     def _process_cloud(self, raw):
         source_ns = stamp_ns(raw.header.stamp)
         with self._lock:
-            if source_ns <= 0 or self._offset_ns is None:
+            if source_ns <= 0 or (self._offset_ns is None and not self._config.preserve_sensor_stamps):
                 return
-            corrected_ns = source_ns + self._offset_ns
+            corrected_ns = source_ns if self._config.preserve_sensor_stamps else source_ns + self._offset_ns
             if corrected_ns <= self._last_cloud_ns:
                 return
             self._last_cloud_ns = corrected_ns
@@ -182,6 +186,8 @@ def main():
     parser.add_argument("--imu-ros", default="/fastlio_l2/input/imu")
     parser.add_argument("--imu-frame", default="fastlio_l2_imu")
     parser.add_argument("--lidar-frame", default="fastlio_l2_lidar")
+    parser.add_argument("--preserve-sensor-stamps", action="store_true",
+                        help="Publish raw shared L2 clock stamps for LiDAR-IMU calibration")
     import sys
     args = parser.parse_args(rclpy.utilities.remove_ros_args(args=sys.argv)[1:])
     runtime = resolve_runtime_arguments(args)
@@ -190,14 +196,17 @@ def main():
     rclpy.init()
     node = PairedL2Bridge(Config(runtime.domain_id, runtime.interface, args.cloud_dds,
                                  args.imu_dds, args.cloud_ros, args.imu_ros,
-                                 args.imu_frame, args.lidar_frame),
+                                 args.imu_frame, args.lidar_frame, args.preserve_sensor_stamps),
                           subscriber_class, cloud_class, imu_class)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
+        try:
+            node.destroy_node()
+        except KeyboardInterrupt:
+            pass
         if rclpy.ok():
             rclpy.shutdown()
 
