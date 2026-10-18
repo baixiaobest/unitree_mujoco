@@ -13,8 +13,8 @@ class DdsRuntimeProfile:
     interface: str
 
 
-DEFAULT_SIMULATION_DDS_RUNTIME = DdsRuntimeProfile(domain_id=1, interface="wlo1")
-DEFAULT_HARDWARE_DDS_RUNTIME = DdsRuntimeProfile(domain_id=0, interface="enp108s0")
+DEFAULT_SIMULATION_DDS_RUNTIME = DdsRuntimeProfile(domain_id=1, interface="wlp128s20f3")
+DEFAULT_HARDWARE_DDS_RUNTIME = DdsRuntimeProfile(domain_id=0, interface="enp130s0")
 
 
 def add_dds_runtime_arguments(parser: argparse.ArgumentParser, *, default_run_mode: str = "hardware") -> None:

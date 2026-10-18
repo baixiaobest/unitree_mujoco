@@ -13,6 +13,8 @@ from mdp.commands import (
     WasdKeyboardCommandConfig,
     WasdVelocityCommand,
     WasdVelocityCommandConfig,
+    WasdPolicyHybridVelocityCommand,
+    WasdPolicyHybridVelocityCommandConfig,
 )
 from time import sleep, time
 import torch
@@ -58,14 +60,6 @@ class GO2HardwareEnvironment(Go2Environment):
         self._rate_window_start_time = time()
         self._rate_window_step_count = 0
         self._validate_policy_mode()
-        self.policy_observation_layout = (
-            self.VELOCITY_CONTROL_POLICY_LAYOUT
-            if self.policy_mode == "velocity_control"
-            else self.POSITION_CONTROL_POLICY_LAYOUT
-        )
-        self.command_observation_name = (
-            "velocity_commands" if self.policy_mode == "velocity_control" else "pose_commands"
-        )
 
         self.policy = torch.jit.load(self.model_path, map_location=self.device)
         if hasattr(self.policy, "horizon"):
@@ -82,6 +76,14 @@ class GO2HardwareEnvironment(Go2Environment):
                 "export) -- defaulting policy_history_length=1 (no observation-history stacking). "
                 "Verify this matches how the checkpoint was actually trained."
             )
+        self.policy_observation_layout = (
+            self.VELOCITY_CONTROL_POLICY_LAYOUT
+            if self.policy_mode == "velocity_control"
+            else self.POSITION_CONTROL_POLICY_LAYOUT
+        )
+        self.command_observation_name = (
+            "velocity_commands" if self.policy_mode == "velocity_control" else "pose_commands"
+        )
 
         # Initialize high-level services only
         self._init_unitree_services()
@@ -398,14 +400,13 @@ class GO2HardwareEnvironment(Go2Environment):
                 # base_lin_vel, imu_ang_vel, imu_lin_acc, projected_gravity, velocity_commands,
                 # joint_pos, joint_vel, actions (3+3+3+3+3+12+12+12 = 51 dims).
                 self.VELOCITY_CONTROL_POLICY_LAYOUT: [
-                    "base_lin_vel",
+                    "actions",
                     "imu_ang_vel",
                     "imu_lin_acc",
-                    "projected_gravity",
-                    "velocity_commands",
                     "joint_pos",
                     "joint_vel",
-                    "actions",
+                    "projected_gravity",
+                    "velocity_commands",
                 ],
             },
             history_length=self.policy_history_length,
@@ -418,8 +419,8 @@ class GO2HardwareEnvironment(Go2Environment):
         if self.input_device == "keyboard":
             velocity_command_entry = (
                 "game_controller_velocity_command",
-                WasdVelocityCommand,
-                WasdVelocityCommandConfig(
+                WasdPolicyHybridVelocityCommand,
+                WasdPolicyHybridVelocityCommandConfig(
                     resample_interval=0.05,
                     max_linear_velocity=0.5,
                     max_angular_velocity=0.8,
@@ -440,8 +441,8 @@ class GO2HardwareEnvironment(Go2Environment):
                     joystick_deadzone=0.1,
                     left_x_axis=0,
                     left_y_axis=1,
-                    right_x_axis=3,
-                    right_y_axis=4,
+                    right_x_axis=2,
+                    right_y_axis=3,
                     visualize=self.policy_mode == "velocity_control",
                     visualize_height=0.35,
                     visualize_scale=0.5,

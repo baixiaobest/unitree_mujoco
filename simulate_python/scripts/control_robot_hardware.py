@@ -27,10 +27,7 @@ def parse_args():
         "--model-path",
         type=str,
         default=str(DEFAULT_MODEL_PATH),
-        help=(
-            "Path to the combined velocity-estimator/locomotion TorchScript model. "
-            "The default expects a (batch, horizon, 48) observation history."
-        ),
+        help="Path to the TorchScript model to run.",
     )
     parser.add_argument(
         "--policy-mode",

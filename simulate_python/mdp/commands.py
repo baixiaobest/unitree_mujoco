@@ -414,8 +414,8 @@ class GameControllerVelocityCommandConfig(CommandConfig):
     joystick_deadzone: float = 0.1
     left_x_axis: int = 0
     left_y_axis: int = 1
-    right_x_axis: int = 3
-    right_y_axis: int = 4
+    right_x_axis: int = 2
+    right_y_axis: int = 3
     visualize: bool = False
     visualize_height: float = 0.3
     visualize_scale: float = 0.5
@@ -845,7 +845,10 @@ class WasdVelocityCommand(Command):
             pygame.K_q: False,
             pygame.K_e: False,
         }
-        self._init_pygame()
+        # Defer window creation to the first call to _read_keys(): in the simulation
+        # harness that call always comes from the lock-step simulation thread, not
+        # this constructor's thread, and SDL/GL window state is thread-affine -
+        # creating the window here and reading it there causes a GL context error.
 
     @property
     def command(self):
@@ -995,6 +998,134 @@ class WasdVelocityCommand(Command):
             size=arrow_size,
             color=MujocoVisualizer.BLUE,
         )
+
+
+@dataclass
+class WasdPolicyHybridVelocityCommandConfig(WasdVelocityCommandConfig):
+    """Configuration for WasdPolicyHybridVelocityCommand."""
+    toggle_key: int = pygame.K_p
+    vel_cmd_dds_topic: str = TOPIC_POLICY_VEL_CMD
+    mode_dds_topic: str = TOPIC_LOCOMOTION_MODE
+    vel_cmd_timeout: float = 0.5  # seconds before falling back to CONTROLLER mode
+
+
+class WasdPolicyHybridVelocityCommand(WasdVelocityCommand):
+    """Keyboard velocity command that switches between WASD teleop and navigation policy via a key toggle.
+
+    Default mode is CONTROLLER (WASD). Pressing the toggle key (P by default) switches modes.
+    In POLICY mode, velocity is sourced from the DDS vel_cmd topic published by the navigation node.
+    Mirrors ``GameControllerPolicyHybridVelocityCommand``'s behavior for keyboard input.
+    """
+
+    def __init__(self, env: Environment, cfg: WasdPolicyHybridVelocityCommandConfig, device: str = "cpu"):
+        super().__init__(env, cfg, device)
+        self.cfg = cfg
+        self._mode = LocomotionMode.CONTROLLER
+        self._toggle_key_pressed_this_frame = False
+        self._policy_vel_lock = threading.Lock()
+        self._policy_vel_cmd: torch.Tensor | None = None
+        self._policy_vel_last_recv_time: float | None = None
+
+        from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber
+        from unitree_sdk2py.idl.default import (
+            unitree_go_msg_dds__UwbSwitch_ as UwbSwitchDefault,
+        )
+        from unitree_sdk2py.idl.geometry_msgs.msg.dds_ import TwistStamped_
+        from unitree_sdk2py.idl.unitree_go.msg.dds_ import UwbSwitch_
+
+        self._uwb_switch_default = UwbSwitchDefault
+
+        self._vel_cmd_subscriber = ChannelSubscriber(cfg.vel_cmd_dds_topic, TwistStamped_)
+        self._vel_cmd_subscriber.Init(self._dds_vel_cmd_handler, 10)
+
+        self._mode_publisher = ChannelPublisher(cfg.mode_dds_topic, UwbSwitch_)
+        self._mode_publisher.Init()
+        self._publish_mode()
+
+    def _dds_vel_cmd_handler(self, msg) -> None:
+        vel = torch.tensor(
+            [msg.twist.linear.x, msg.twist.linear.y, msg.twist.angular.z],
+            device=self.device,
+            dtype=torch.float32,
+        )
+        with self._policy_vel_lock:
+            self._policy_vel_cmd = vel
+            self._policy_vel_last_recv_time = time.monotonic()
+
+    def _publish_mode(self) -> None:
+        msg = self._uwb_switch_default()
+        msg.enabled = int(self._mode)
+        self._mode_publisher.Write(msg)
+
+    def _read_keys(self):
+        """Read held movement keys (base behavior) plus edge-detect the mode-toggle key."""
+        if not self.initialized:
+            self._init_pygame()
+            if not self.initialized:
+                return
+        self._toggle_key_pressed_this_frame = False
+        try:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    self.initialized = False
+                elif event.type == pygame.KEYDOWN and event.key in self.keys_pressed:
+                    self.keys_pressed[event.key] = True
+                elif event.type == pygame.KEYUP and event.key in self.keys_pressed:
+                    self.keys_pressed[event.key] = False
+                elif event.type == pygame.KEYDOWN and event.key == self.cfg.toggle_key:
+                    self._toggle_key_pressed_this_frame = True
+            self._draw()
+        except Exception as exc:
+            print(f"Error reading keyboard: {exc}")
+            self.initialized = False
+
+    def _draw(self):
+        super()._draw()
+        if not self.initialized or self._screen is None:
+            return
+        mode_label = f"Mode: {self._mode.name}  (P to toggle)"
+        mode_color = (90, 200, 120) if self._mode == LocomotionMode.POLICY else (230, 230, 230)
+        line = self._small_font.render(mode_label, True, mode_color)
+        self._screen.blit(line, (16, self._WINDOW_SIZE[1] - 52))
+        pygame.display.flip()
+
+    def resample(self):
+        super().resample()  # reads keys (including toggle edge) and updates the WASD target command
+
+        if self._toggle_key_pressed_this_frame:
+            self._mode = (
+                LocomotionMode.POLICY
+                if self._mode == LocomotionMode.CONTROLLER
+                else LocomotionMode.CONTROLLER
+            )
+            self._publish_mode()
+            print(f"Locomotion mode: {self._mode.name}")
+
+    def update(self):
+        if self._mode == LocomotionMode.POLICY:
+            with self._policy_vel_lock:
+                policy_cmd = self._policy_vel_cmd
+                last_recv = self._policy_vel_last_recv_time
+
+            timed_out = last_recv is None or (time.monotonic() - last_recv) > self.cfg.vel_cmd_timeout
+            if timed_out:
+                self._command = torch.zeros_like(self._command)
+                self._mode = LocomotionMode.CONTROLLER
+                self._publish_mode()
+                print(f"[WARNING] vel_cmd timeout — switched to CONTROLLER mode")
+                super().update()
+                return
+
+            if policy_cmd is None:
+                self._command = torch.zeros_like(self._command)
+            else:
+                self._target_command = policy_cmd.clone()
+                # ROS CBF applies the training deadzone before publishing /cmd_vel.
+                # Do not deadzone the same policy command again here.
+                self._command = self._target_command.clone()
+        else:
+            super().update()
 
 
 @dataclass

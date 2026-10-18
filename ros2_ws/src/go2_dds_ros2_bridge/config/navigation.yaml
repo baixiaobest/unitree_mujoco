@@ -1,6 +1,6 @@
 navigation:
   ros__parameters:
-    policy_path: "/home/baixiao/Desktop/IsaacLab/logs/rsl_rl/ObstacleAvoidance/Navigation/exported/navigation_policy_jit.pt"
+    policy_path: "/home/baiyu/Desktop/IsaacLab/logs/rsl_rl/ObstacleAvoidance/Navigation/CBF/exported/policy.pt"
     goal_topic: /goal_pose
     velocity_topic: /estimated_velocity
     imu_topic: /imu/data_fastlio

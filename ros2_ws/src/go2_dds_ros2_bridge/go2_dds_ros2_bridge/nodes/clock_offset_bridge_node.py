@@ -290,6 +290,7 @@ class Go2ClockOffsetBridge(Node):
         self._filtered_offset_sec: float | None = None
         self._offset_samples: deque[tuple[int, float]] = deque()
         self._last_remote_stamp_ns: int | None = None
+        self._last_corrected_stamp_ns: int | None = None
         self._message_version = 0
         self._last_published_version = 0
         self._sample_count = 0
@@ -448,6 +449,12 @@ class Go2ClockOffsetBridge(Node):
             corrected_stamp_ns = remote_stamp_ns + int(round(self._filtered_offset_sec * 1_000_000_000.0))
             if corrected_stamp_ns < 0:
                 corrected_stamp_ns = 0
+            # The rolling low-quantile offset estimate can shift slightly between messages
+            # (window sliding, new samples). Clamp to strictly increasing so downstream
+            # consumers (FAST-LIO) never see a timestamp regression and clear their buffer.
+            if self._last_corrected_stamp_ns is not None and corrected_stamp_ns <= self._last_corrected_stamp_ns:
+                corrected_stamp_ns = self._last_corrected_stamp_ns + 1
+            self._last_corrected_stamp_ns = corrected_stamp_ns
             self._message_version += 1
             self._sample_count += 1
             filtered_offset_sec = self._filtered_offset_sec
