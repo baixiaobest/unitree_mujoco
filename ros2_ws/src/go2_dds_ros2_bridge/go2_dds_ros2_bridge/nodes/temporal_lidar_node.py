@@ -17,6 +17,9 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointField
+from sensor_msgs.msg import Imu
+from geometry_msgs.msg import TwistStamped
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from go2_dds_ros2_bridge_msgs.msg import CbfScan, CbfScan3D, TemporalLidarObservation
@@ -46,6 +49,9 @@ from go2_dds_ros2_bridge.temporal_lidar_processing import (
     upsample_polar_bins,
 )
 from go2_dds_ros2_bridge.tf_utils import rotation_matrix_from_quaternion_xyzw
+from go2_dds_ros2_bridge.cbf_pose_prediction import (
+    propagate_base_pose, newest_sample_at, claim_pair_once, bounded_prediction_seconds,
+)
 
 
 DEFAULT_INPUT_TOPIC = "/utlidar/time_corrected/cloud"
@@ -58,6 +64,7 @@ DEFAULT_INTERCLOUD_TOLERANCE_S = 0.025
 DEFAULT_POLICY_HZ = 12.5
 DEFAULT_PROCESSING_HZ = 100.0
 DEFAULT_TF_WAIT_S = 0.25
+DEFAULT_CBF_PREDICTION_MAX_S = 0.20
 # FAST-LIO publishes scan-end TF stamps after converting an epoch-scale double
 # back to integer nanoseconds.  Temporal lidar instead retains the corrected
 # integer cloud stamp and its per-point offset.  The two representations can
@@ -114,6 +121,8 @@ class TemporalLidarConfig:
     policy_hz: float
     processing_hz: float
     tf_wait_s: float
+    cbf_pose_prediction: bool
+    cbf_prediction_max_s: float
     tf_timestamp_tolerance_s: float
     max_pending_clouds: int
     min_z_m: float
@@ -147,6 +156,8 @@ def parse_args() -> TemporalLidarConfig:
     parser.add_argument("--policy-hz", type=float, default=DEFAULT_POLICY_HZ)
     parser.add_argument("--processing-hz", type=float, default=DEFAULT_PROCESSING_HZ)
     parser.add_argument("--tf-wait-s", type=float, default=DEFAULT_TF_WAIT_S)
+    parser.add_argument("--cbf-pose-prediction", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--cbf-prediction-max-s", type=float, default=DEFAULT_CBF_PREDICTION_MAX_S)
     parser.add_argument(
         "--tf-timestamp-tolerance-s",
         type=float,
@@ -191,6 +202,8 @@ def parse_args() -> TemporalLidarConfig:
         raise SystemExit("policy-hz, processing-hz, and max-range-m must be positive")
     if args.tf_wait_s <= 0 or args.max_pending_clouds <= 0:
         raise SystemExit("tf-wait-s and max-pending-clouds must be positive")
+    if not 0 < args.cbf_prediction_max_s <= 0.20:
+        raise SystemExit("cbf-prediction-max-s must be in (0, 0.20]")
     if not 0.0 <= args.tf_timestamp_tolerance_s <= 0.005:
         raise SystemExit("tf-timestamp-tolerance-s must be in [0, 0.005]")
     if args.max_z_m <= args.min_z_m or args.max_z_m <= args.static_min_z_m or args.scan_age_max_s <= 0:
@@ -246,13 +259,31 @@ class TemporalLidarNode(Node):
         self._frozen_validity: np.ndarray | None = None
         self._frozen_normalized_scan_age: float | None = None
         self._pending_clouds: deque[PendingCloud] = deque()
+        self._velocity_samples = deque(maxlen=256)
+        self._gyro_samples = deque(maxlen=1024)
+        self._cbf_published_pairs = set()
+        self._exact_cbf_completed = {}
+        self._prediction_count = 0
+        self._prediction_horizon_s = 0.0
+        self._prediction_rejection = "disabled"
+        self._pair_used_prediction = False
+        self._predicted_base_poses = {}
+        self._prediction_comparison_count = 0
+        self._last_position_error_m = 0.0
+        self._last_angle_error_deg = 0.0
         self._tf_warning_last_ns = 0
         self._gap_warning_last_ns = 0
         self._subscription = self.create_subscription(PointCloud2, self._config.input_topic, self._cloud_callback, CLOUD_QOS)
+        if self._config.cbf_pose_prediction:
+            self.create_subscription(TwistStamped, "/estimated_velocity", self._velocity_callback, CLOUD_QOS)
+            self.create_subscription(Imu, "/imu/data_fastlio", self._gyro_callback, CLOUD_QOS)
+        self._prediction_diagnostics = self.create_publisher(DiagnosticArray, "/temporal_lidar/cbf_prediction_status", 10)
+        self.create_timer(1.0, self._publish_prediction_diagnostics)
         self._publisher = self.create_publisher(TemporalLidarObservation, self._config.output_topic, OBSERVATION_QOS)
         self._cbf_scan_publisher = self.create_publisher(CbfScan, self._config.cbf_scan_topic, OBSERVATION_QOS)
         self._cbf_xyz_publisher = self.create_publisher(CbfScan3D, "/cbf/scan_xyz", OBSERVATION_QOS)
         self._cbf_scan_sequence = 0
+        self._last_cbf_stamp_ns = -1
         self._debug_frame_publishers = []
         self._debug_frame_0_with_invalid_publisher = None
         self._debug_all_publisher = None
@@ -295,7 +326,91 @@ class TemporalLidarNode(Node):
                 self._tf_warning_last_ns = now_ns
             self.get_logger().warning(message)
 
-    def _lookup_transform(self, target_frame: str, source_frame: str, stamp: Time) -> tuple[np.ndarray, np.ndarray] | None:
+    def _velocity_callback(self, message: TwistStamped) -> None:
+        if message.header.frame_id != self._config.base_frame:
+            self._prediction_rejection = "velocity_frame_mismatch"
+            return
+        v = message.twist.linear
+        values = np.array((v.x, v.y, v.z), dtype=float)
+        stamp = Time.from_msg(message.header.stamp).nanoseconds
+        if stamp > 0 and np.isfinite(values).all():
+            self._velocity_samples.append((stamp, values))
+
+    def _gyro_callback(self, message: Imu) -> None:
+        if message.header.frame_id != "body":
+            self._prediction_rejection = "gyro_frame_mismatch"
+            return
+        w = message.angular_velocity
+        values = np.array((w.x, w.y, w.z), dtype=float)
+        stamp = Time.from_msg(message.header.stamp).nanoseconds
+        if stamp > 0 and np.isfinite(values).all():
+            self._gyro_samples.append((stamp, values))
+
+    def _publish_prediction_diagnostics(self) -> None:
+        for stamp_ns, (predicted_position, predicted_rotation) in list(self._predicted_base_poses.items()):
+            try:
+                actual = self._tf_buffer.lookup_transform(
+                    self._config.map_frame, self._config.base_frame,
+                    Time(nanoseconds=stamp_ns), timeout=Duration())
+            except TransformException:
+                if self.get_clock().now().nanoseconds - stamp_ns > 2_000_000_000:
+                    del self._predicted_base_poses[stamp_ns]
+                continue
+            t, q = actual.transform.translation, actual.transform.rotation
+            actual_rotation = rotation_matrix_from_quaternion_xyzw(q.x, q.y, q.z, q.w)
+            self._last_position_error_m = float(np.linalg.norm(predicted_position - np.array((t.x, t.y, t.z))))
+            cosine = np.clip((np.trace(predicted_rotation.T @ actual_rotation) - 1) / 2, -1, 1)
+            self._last_angle_error_deg = float(np.degrees(np.arccos(cosine)))
+            self._prediction_comparison_count += 1
+            del self._predicted_base_poses[stamp_ns]
+        status = DiagnosticStatus()
+        status.name = "temporal_lidar_cbf_pose_prediction"
+        status.hardware_id = "go2"
+        status.message = self._prediction_rejection
+        status.values = [KeyValue(key="enabled", value=str(self._config.cbf_pose_prediction)),
+                         KeyValue(key="predicted_scan_count", value=str(self._prediction_count)),
+                         KeyValue(key="last_horizon_s", value=str(self._prediction_horizon_s)),
+                         KeyValue(key="last_rejection", value=self._prediction_rejection),
+                         KeyValue(key="comparison_count", value=str(self._prediction_comparison_count)),
+                         KeyValue(key="last_position_error_m", value=str(self._last_position_error_m)),
+                         KeyValue(key="last_angle_error_deg", value=str(self._last_angle_error_deg))]
+        msg = DiagnosticArray()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.status = [status]
+        self._prediction_diagnostics.publish(msg)
+
+    def _predicted_transform(self, source_frame: str, stamp: Time):
+        try:
+            anchor = self._tf_buffer.lookup_transform(self._config.map_frame, self._config.base_frame, Time(), timeout=Duration())
+            anchor_ns = Time.from_msg(anchor.header.stamp).nanoseconds
+            seconds = bounded_prediction_seconds(anchor_ns, stamp.nanoseconds,
+                                                 self._config.cbf_prediction_max_s)
+            velocity = newest_sample_at(self._velocity_samples, stamp.nanoseconds, 50_000_000)
+            gyro_body = newest_sample_at(self._gyro_samples, stamp.nanoseconds, 30_000_000)
+            body_in_base = self._tf_buffer.lookup_transform(self._config.base_frame, "body", Time(), timeout=Duration())
+            q = body_in_base.transform.rotation
+            gyro_base = rotation_matrix_from_quaternion_xyzw(q.x, q.y, q.z, q.w) @ gyro_body
+            t, q = anchor.transform.translation, anchor.transform.rotation
+            position, rotation = propagate_base_pose(
+                (t.x, t.y, t.z), rotation_matrix_from_quaternion_xyzw(q.x, q.y, q.z, q.w),
+                velocity, gyro_base, seconds)
+            if stamp.nanoseconds not in self._predicted_base_poses:
+                self._predicted_base_poses[stamp.nanoseconds] = (position.copy(), rotation.copy())
+            if source_frame != self._config.base_frame:
+                static = self._tf_buffer.lookup_transform(self._config.base_frame, source_frame, Time(), timeout=Duration())
+                t, q = static.transform.translation, static.transform.rotation
+                position = position + rotation @ np.array((t.x, t.y, t.z))
+                rotation = rotation @ rotation_matrix_from_quaternion_xyzw(q.x, q.y, q.z, q.w)
+            self._prediction_horizon_s = max(self._prediction_horizon_s, seconds)
+            self._pair_used_prediction = True
+            self._prediction_rejection = "none"
+            return position, rotation
+        except (TransformException, ValueError) as error:
+            self._prediction_rejection = str(error)
+            return None
+
+    def _lookup_transform(self, target_frame: str, source_frame: str, stamp: Time,
+                          allow_prediction: bool = False) -> tuple[np.ndarray, np.ndarray] | None:
         """Look up a transform without blocking this node's single-threaded executor.
 
         The first lookup is always at the exact physical timestamp.  A bounded
@@ -323,6 +438,10 @@ class TemporalLidarNode(Node):
                     timeout=Duration(),
                 )
             except TransformException as fallback_error:
+                if allow_prediction and target_frame == self._config.map_frame:
+                    predicted = self._predicted_transform(source_frame, stamp)
+                    if predicted is not None:
+                        return predicted
                 self._warn_throttled(
                     "Missing timestamped transform %s <- %s: exact lookup: %s; %.0f-us bounded lookback: %s"
                     % (
@@ -362,7 +481,10 @@ class TemporalLidarNode(Node):
         """Deskew and reduce the oldest valid pair once all its TF samples exist."""
         if self._frozen_distances is not None:
             self._pending_clouds.clear()
+            self._exact_cbf_completed.clear()
             return
+        if self._config.cbf_pose_prediction:
+            self._process_cbf_pending()
         if len(self._pending_clouds) < 2:
             return
         first, second = self._pending_clouds[0], self._pending_clouds[1]
@@ -390,7 +512,10 @@ class TemporalLidarNode(Node):
             self._warn_throttled("Dropping malformed rolling-cloud pair: %s" % error, gap=True)
             return
 
-        completed = self._complete_deskewed_pair(first_cloud, second_cloud)
+        pair_key = (first.stamp.nanoseconds, second.stamp.nanoseconds)
+        completed = self._exact_cbf_completed.pop(pair_key, None)
+        if completed is None:
+            completed = self._complete_deskewed_pair(first_cloud, second_cloud)
         if completed is None:
             wait_s = (self.get_clock().now().nanoseconds - second.received_ns) / 1e9
             if wait_s <= self._config.tf_wait_s:
@@ -405,7 +530,47 @@ class TemporalLidarNode(Node):
         self._pending_clouds.popleft()
         self._pending_clouds.popleft()
         self._history.push(completed)
-        self._publish_cbf_scan(completed)
+        if claim_pair_once(self._cbf_published_pairs, pair_key):
+            self._publish_cbf_scan(completed)
+
+    def _process_cbf_pending(self) -> None:
+        """Publish ready CBF pairs without blocking behind the exact-TF policy queue."""
+        pending = list(self._pending_clouds)
+        index = 0
+        while index + 1 < len(pending):
+            first, second = pending[index:index + 2]
+            if not is_adjacent_cloud_pair(first.stamp.nanoseconds, second.stamp.nanoseconds,
+                                          expected_period_s=self._config.raw_cloud_period_s,
+                                          tolerance_s=self._config.intercloud_tolerance_s):
+                index += 1
+                continue
+            index += 2
+            pair_key = (first.stamp.nanoseconds, second.stamp.nanoseconds)
+            if pair_key in self._cbf_published_pairs:
+                continue
+            try:
+                decoded = (self._decode_rolling_cloud(first), self._decode_rolling_cloud(second))
+            except ValueError as error:
+                self._prediction_rejection = str(error)
+                continue
+            self._pair_used_prediction = False
+            self._prediction_horizon_s = 0.0
+            completed = self._complete_deskewed_pair(*decoded, allow_prediction=True)
+            if completed is not None and claim_pair_once(self._cbf_published_pairs, pair_key):
+                if not self._pair_used_prediction:
+                    self._exact_cbf_completed[pair_key] = completed
+                published = self._publish_cbf_scan(completed)
+                if published and self._pair_used_prediction:
+                    self._prediction_count += 1
+        if len(self._cbf_published_pairs) > 512:
+            active = {(cloud.stamp.nanoseconds, pending[i + 1].stamp.nanoseconds)
+                      for i, cloud in enumerate(pending[:-1])}
+            self._cbf_published_pairs.intersection_update(active)
+        if len(self._exact_cbf_completed) > self._config.max_pending_clouds:
+            active = {(cloud.stamp.nanoseconds, pending[i + 1].stamp.nanoseconds)
+                      for i, cloud in enumerate(pending[:-1])}
+            self._exact_cbf_completed = {key: value for key, value in self._exact_cbf_completed.items()
+                                         if key in active}
 
     def _decode_rolling_cloud(self, pending: PendingCloud) -> DecodedRollingCloud:
         points, offsets, time_field = extract_xyz_time_points(
@@ -424,17 +589,18 @@ class TemporalLidarNode(Node):
         )
 
     def _complete_deskewed_pair(
-        self, first: DecodedRollingCloud, second: DecodedRollingCloud
+        self, first: DecodedRollingCloud, second: DecodedRollingCloud, allow_prediction: bool = False
     ) -> "CompletedScan | None":
         reference_stamp = Time(nanoseconds=second.end_stamp_ns)
-        reference_base = self._lookup_transform(self._config.map_frame, self._config.base_frame, reference_stamp)
+        reference_base = self._lookup_transform(self._config.map_frame, self._config.base_frame, reference_stamp,
+                                                allow_prediction)
         transforms = []
         for cloud in (first, second):
             start = self._lookup_transform(
-                self._config.map_frame, cloud.frame_id, Time(nanoseconds=cloud.start_stamp_ns)
+                self._config.map_frame, cloud.frame_id, Time(nanoseconds=cloud.start_stamp_ns), allow_prediction
             )
             end = self._lookup_transform(
-                self._config.map_frame, cloud.frame_id, Time(nanoseconds=cloud.end_stamp_ns)
+                self._config.map_frame, cloud.frame_id, Time(nanoseconds=cloud.end_stamp_ns), allow_prediction
             )
             transforms.append((start, end))
         if reference_base is None or any(start is None or end is None for start, end in transforms):
@@ -499,15 +665,17 @@ class TemporalLidarNode(Node):
             scan_start_ns=min(first.start_stamp_ns, second.start_stamp_ns),
         )
 
-    def _publish_cbf_scan(self, completed: CompletedScan) -> None:
+    def _publish_cbf_scan(self, completed: CompletedScan) -> bool:
         """Publish the newest physical hit bins used by the static CBF only."""
+        if completed.stamp_ns <= self._last_cbf_stamp_ns:
+            return False
         if (
             completed.endpoints_base_m is None
             or completed.static_points_base_m is None
             or completed.scan_start_ns is None
         ):
             self.get_logger().error("Completed scan lacks base-frame geometry; CBF scan was not published.")
-            return
+            return False
         points_xy_m, hits = cbf_bins_from_capture(completed.endpoints_base_m, completed.ray_states, cbf_bins=CBF_BINS)
         static_points_xy_m, static_hits = cbf_static_bins_from_points(
             completed.static_points_base_m,
@@ -540,6 +708,8 @@ class TemporalLidarNode(Node):
         raw.capture_points_xyz_m = completed.endpoints_base_m[:, :3].ravel().tolist()
         raw.ray_states = completed.ray_states.tolist()
         self._cbf_xyz_publisher.publish(raw)
+        self._last_cbf_stamp_ns = completed.stamp_ns
+        return True
 
     def _current_pose(self) -> tuple[np.ndarray, float, Time] | None:
         """Return the latest base pose together with the TF sample time used.

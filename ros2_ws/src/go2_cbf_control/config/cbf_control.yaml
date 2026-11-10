@@ -6,7 +6,7 @@ cbf_control:
     scan_topic: /cbf/snapshot
     cmd_topic: /cmd_vel
     # Switch with this single setting and restart the CBF launch.
-    cbf_mode: dynamic  # static or dynamic
+    cbf_mode: static  # static or dynamic
 
     # Control rate, solver deadline, and maximum accepted input ages.
     # A scan combines two 65-ms rolling clouds; scan_timeout_s measures from
@@ -22,7 +22,7 @@ cbf_control:
     # Obstacle geometry. d_margin_m is the center-to-obstacle clearance to
     # tune first; d_cbf_active_m is the range at which obstacles enter the CBF.
     # The fixed-size solver requires max_lidar_points to remain 64.
-    d_margin_m: 0.1
+    d_margin_m: 0.3
     d_cbf_active_m: 8.0
     max_lidar_points: 64
 

@@ -19,6 +19,10 @@ temporal_lidar:
     # lookups without blocking TF reception in the single-threaded executor.
     processing_hz: 100.0
     tf_wait_s: 0.25
+    # Evaluation only: predict CBF deskew poses using estimated velocity and
+    # calibrated body gyro when the requested pose is ahead of the latest TF.
+    cbf_pose_prediction: true
+    cbf_prediction_max_s: 0.30
     # Strictly bounded representation-rounding tolerance. FAST-LIO derives
     # TF stamps from epoch-scale doubles, while this node retains integer cloud
     # timestamps plus point offsets. This is not a latency compensation.
