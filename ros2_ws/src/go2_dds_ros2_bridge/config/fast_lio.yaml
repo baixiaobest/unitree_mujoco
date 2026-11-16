@@ -13,7 +13,7 @@
             lid_topic: "/utlidar/time_corrected/cloud"
             imu_topic: "/imu/data_fastlio"
             time_sync_en: false
-            time_offset_lidar_to_imu: 0.0
+            time_offset_lidar_to_imu: -0.193995
 
         preprocess:
             # Best-effort default for the Unitree cloud. If the upstream PointCloud2 field layout
