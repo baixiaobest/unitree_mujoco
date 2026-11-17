@@ -4,7 +4,7 @@ from collections import deque
 import numpy as np
 import pytest
 
-from go2_dds_ros2_bridge.cbf_pose_prediction import (
+from go2_dds_ros2_bridge.pose_prediction import (
     bounded_prediction_seconds, claim_pair_once, newest_sample_at, propagate_base_pose,
 )
 

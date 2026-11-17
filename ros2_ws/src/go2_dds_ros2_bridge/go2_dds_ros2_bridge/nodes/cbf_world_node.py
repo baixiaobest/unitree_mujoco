@@ -27,6 +27,7 @@ class CbfWorldNode(Node):
         self.declare_parameter('max_state_age_s', .1)
         self.declare_parameter('max_interpolation_gap_s', .1)
         self.declare_parameter('scan_timeout_s', .5)
+        self.declare_parameter('global_frame', 'camera_init_correct')
         self.tf = Buffer(cache_time=Duration(seconds=10))
         self.listener = TransformListener(self.tf, self)
         self.broadcaster = StaticTransformBroadcaster(self)
@@ -92,7 +93,7 @@ class CbfWorldNode(Node):
 
     def initialize_reference(self):
         # camera_init has an existing parent; publish the INVERSE as its child.
-        correction = self.tf.lookup_transform('camera_init_correct', 'camera_init', Time())
+        correction = self.tf.lookup_transform(self.get_parameter('global_frame').value, 'camera_init', Time())
         offset = self.tf.lookup_transform('body', 'base_link', Time())
         t, q = correction.transform.translation, correction.transform.rotation
         rotation = rotation_matrix_from_quaternion_xyzw(q.x, q.y, q.z, q.w)
