@@ -26,6 +26,11 @@ ros2 launch go2_dds_ros2_bridge fast_lio.launch.py run_mode:=hardware rviz:=true
 ros2 launch go2_dds_ros2_bridge fast_lio_mapping.launch.py \
   run_mode:=hardware navigation:=false cbf:=false rviz:=true
 
+# Resume mapping from a saved PCD; RViz will open in the map frame
+ros2 launch go2_dds_ros2_bridge fast_lio_mapping.launch.py \
+  run_mode:=hardware navigation:=false cbf:=false rviz:=true \
+  checkpoint_map_path:=/absolute/path/to/map.pcd
+
 # Save the map while mapping is running (run in another terminal)
 ros2 service call /map_save std_srvs/srv/Trigger '{}'
 
@@ -42,6 +47,15 @@ pose before matching scans; FAST-LIO waits for ICP to initialize. Send another
 **2D Pose Estimate** at any time to run ICP again and reset the map alignment.
 On an accepted new match, FAST-LIO resets its filter and IMU initialization.
 Keep the robot still until localized odometry resumes.
+
+For resumed mapping, give an RViz **2D Pose Estimate** near the robot after the
+checkpoint appears. Mapping and map saving wait for a successful ICP match.
+The default output is `map_resumed.pcd` beside the checkpoint; pass
+`map_path:=/absolute/path/to/output.pcd` to choose another output. The input
+checkpoint is never overwritten. Send another pose estimate to pause mapping
+and realign against the accumulated map; a failed match keeps mapping paused.
+Use the same `/map_save` service to write the merged map. ICP does not provide
+continuous drift correction between pose estimates.
 
 ## View a saved map without localization
 

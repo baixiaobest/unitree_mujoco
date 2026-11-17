@@ -1,5 +1,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_msgs/msg/empty.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
@@ -35,6 +36,8 @@ public:
         this->declare_parameter("cloud_voxel_leaf_size", 0.1);
         this->declare_parameter("converged_count_thre", 20);
         this->declare_parameter("pcl_type","livox");
+        this->declare_parameter("checkpoint_mapping", false);
+        checkpoint_mapping_ = this->get_parameter("checkpoint_mapping").as_bool();
 
         const auto ext_t = this->get_parameter("lidar_in_imu_translation").as_double_array();
         const auto ext_r = this->get_parameter("lidar_in_imu_rotation").as_double_array();
@@ -73,6 +76,27 @@ public:
 #endif
         pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
             "initialpose", 10, std::bind(&ICPNode::pose_callback, this, std::placeholders::_1));
+        if (checkpoint_mapping_)
+        {
+            pause_pub_ = this->create_publisher<std_msgs::msg::Empty>("/checkpoint_map/pause_mapping", 10);
+            checkpoint_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+                "/checkpoint_map/icp_target", rclcpp::QoS(1).reliable().transient_local(),
+                [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+                    pcl::PointCloud<pcl::PointXYZ>::Ptr updated(new pcl::PointCloud<pcl::PointXYZ>);
+                    pcl::fromROSMsg(*msg, *updated);
+                    if (updated->empty()) return;
+                    pcl::VoxelGrid<pcl::PointXYZ> voxel;
+                    voxel.setInputCloud(updated);
+                    voxel.setLeafSize(map_voxel_leaf_size, map_voxel_leaf_size, map_voxel_leaf_size);
+                    voxel.filter(*target_cloud_);
+                    target_cloud_msg = *msg;
+                    if (awaiting_checkpoint_target_) {
+                        awaiting_checkpoint_target_ = false;
+                        initial_pose_received_ = true;
+                    }
+                    RCLCPP_INFO(this->get_logger(), "Updated ICP checkpoint target: %zu points", target_cloud_->size());
+                });
+        }
         map_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("prior_map", 10);
         transformed_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("transformed_cloud", 10);
         
@@ -311,6 +335,7 @@ private:
             RCLCPP_WARN(this->get_logger(), "Ignoring /initialpose outside map frame '%s'", map_frame.c_str());
             return;
         }
+        if (checkpoint_mapping_) pause_pub_->publish(std_msgs::msg::Empty());
         Eigen::Quaternionf q(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x,
                              msg->pose.pose.orientation.y, msg->pose.pose.orientation.z);
         Eigen::Affine3f imu_in_map = Eigen::Affine3f::Identity();
@@ -319,7 +344,8 @@ private:
                                                    msg->pose.pose.position.z);
         imu_in_map.linear() = q.normalized().toRotationMatrix();
         initGuess = (imu_in_map * lidar_in_imu_).matrix();
-        initial_pose_received_ = true;
+        initial_pose_received_ = !checkpoint_mapping_;
+        awaiting_checkpoint_target_ = checkpoint_mapping_;
         converged_count = 0;
         const double yaw = std::atan2(imu_in_map.linear()(1, 0), imu_in_map.linear()(0, 0));
         RCLCPP_INFO(this->get_logger(), "Initial guess: \n x: %f, y: %f, z: %f, a: %f", msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z, yaw);
@@ -331,6 +357,10 @@ private:
     rclcpp::Subscription<livox_ros_driver2::msg::CustomMsg>::SharedPtr lvx_cloud_sub_;
 #endif
     rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr pose_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr checkpoint_sub_;
+    rclcpp::Publisher<std_msgs::msg::Empty>::SharedPtr pause_pub_;
+    bool checkpoint_mapping_ = false;
+    bool awaiting_checkpoint_target_ = false;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_;
     rclcpp::TimerBase::SharedPtr map_timer_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr transformed_cloud_pub_;

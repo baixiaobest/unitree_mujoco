@@ -65,6 +65,16 @@ def _make_runtime_nodes(context, mode: str):
     cloud_topic = LaunchConfiguration("cloud_topic").perform(context)
     localization = mode == "localization"
     map_path = LaunchConfiguration("map_path").perform(context).strip() if mode != "odometry" else ""
+    checkpoint_map_path = LaunchConfiguration("checkpoint_map_path").perform(context).strip() if mode == "mapping" else ""
+    checkpoint_mapping = bool(checkpoint_map_path)
+    if checkpoint_mapping:
+        checkpoint = Path(checkpoint_map_path).expanduser().resolve()
+        if not checkpoint.is_file():
+            raise ValueError(f"checkpoint_map_path does not exist: {checkpoint}")
+        if map_path == DEFAULT_MAP_PATH:
+            map_path = str(checkpoint.with_name(checkpoint.stem + "_resumed.pcd"))
+        if Path(map_path).expanduser().resolve() == checkpoint:
+            raise ValueError("Checkpoint input and mapping output must be different PCD files")
     if mode == "mapping":
         Path(map_path).parent.mkdir(parents=True, exist_ok=True)
     if localization and (not map_path or not Path(map_path).is_file()):
@@ -74,7 +84,7 @@ def _make_runtime_nodes(context, mode: str):
     if LaunchConfiguration("run_mode").perform(context) == "simulation":
         imu_bridge_config = str(Path(imu_bridge_config).with_name("imu_bridge.yaml"))
     corrected_map_frame = LaunchConfiguration("corrected_map_frame").perform(context)
-    if localization:
+    if localization or checkpoint_mapping:
         corrected_map_frame = "map"
     occupancy_config = LaunchConfiguration("occupancy_config").perform(context)
     occupancy_scan_config = LaunchConfiguration("occupancy_scan_config").perform(context)
@@ -87,7 +97,9 @@ def _make_runtime_nodes(context, mode: str):
     cbf_mode = yaml.safe_load(Path(cbf_config).read_text())["cbf_control"]["ros__parameters"].get("cbf_mode", "static")
     if cbf_mode not in ("static", "dynamic"):
         raise ValueError("cbf_mode must be static or dynamic")
-    rviz_config = LaunchConfiguration("rviz_config")
+    rviz_config = LaunchConfiguration("rviz_config").perform(context)
+    if checkpoint_mapping and rviz_config.endswith("fast_lio_mapping.rviz"):
+        rviz_config = str(Path(rviz_config).with_name("fast_lio_localization.rviz"))
 
     # FAST-LIO expects the pose of the frame that the incoming points are expressed in.
     # The corrected Unitree cloud preserves the incoming utlidar_lidar frame, so pass
@@ -98,12 +110,14 @@ def _make_runtime_nodes(context, mode: str):
     return [
         *([Node(package="icp_relocalization", executable="icp_node", name="icp_node",
                 output="screen", parameters=[{
-                    "map_path": map_path, "map_frame_id": "map", "pcl_type": "pointcloud2",
+                    "map_path": checkpoint_map_path if checkpoint_mapping else map_path,
+                    "checkpoint_mapping": checkpoint_mapping,
+                    "map_frame_id": "map", "pcl_type": "pointcloud2",
                     "fitness_score_thre": 0.2, "converged_count_thre": 5,
                     "max_correspondence_distance": 1.0,
                     "lidar_in_imu_translation": [float(value) for value in extrinsic_translation],
                     "lidar_in_imu_rotation": flatten_rotation_matrix(extrinsic_rotation),
-                }], remappings=[("/pointcloud2", cloud_topic)])] if localization else []),
+                }], remappings=[("/pointcloud2", cloud_topic)])] if localization or checkpoint_mapping else []),
         Node(
             package="go2_dds_ros2_bridge",
             executable="temporal_lidar",
@@ -173,12 +187,14 @@ def _make_runtime_nodes(context, mode: str):
                 {
                     "common.lid_topic": cloud_topic,
                     "common.imu_topic": imu_topic,
-                    "locate_in_prior_map": localization,
+                    "locate_in_prior_map": localization or checkpoint_mapping,
+                    "append_to_prior_map": checkpoint_mapping,
                     "mapping.extrinsic_est_en": False,
                     "mapping.extrinsic_T": [float(value) for value in extrinsic_translation],
                     "mapping.extrinsic_R": flatten_rotation_matrix(extrinsic_rotation),
                 },
-                *([{"prior_map_path": map_path, "map_file_path": map_path,
+                *([{"prior_map_path": checkpoint_map_path if checkpoint_mapping else map_path,
+                    "map_file_path": map_path,
                     "pcd_save.pcd_save_en": not localization,
                     "publish.map_en": not localization}] if map_path else []),
             ],
@@ -188,7 +204,7 @@ def _make_runtime_nodes(context, mode: str):
             executable="fast_lio_frame_correction",
             name="fast_lio_frame_correction",
             output="screen",
-            condition=IfCondition("false" if localization else "true"),
+            condition=IfCondition("false" if localization or checkpoint_mapping else "true"),
             arguments=common_bridge_arguments
             + [
                 "--imu-topic", imu_topic,
@@ -270,6 +286,11 @@ def generate_launch_description(mode: str = "odometry") -> LaunchDescription:
         mode_arguments.append(DeclareLaunchArgument(
             "map_path", default_value=DEFAULT_MAP_PATH,
             description="Absolute PCD map path. Mapping creates its parent directory; localization reads the file.",
+        ))
+    if mode == "mapping":
+        mode_arguments.append(DeclareLaunchArgument(
+            "checkpoint_map_path", default_value="",
+            description="Existing PCD to resume mapping from; waits for an RViz 2D Pose Estimate.",
         ))
     return LaunchDescription(
         [

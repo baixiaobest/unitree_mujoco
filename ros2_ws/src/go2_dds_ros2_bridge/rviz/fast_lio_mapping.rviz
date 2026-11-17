@@ -26,7 +26,7 @@ Panels:
     Experimental: false
     Name: Time
     SyncMode: 0
-    SyncSource: CloudRegistered
+    SyncSource: CloudMap
 Visualization Manager:
   Class: ""
   Displays:
@@ -39,12 +39,6 @@ Visualization Manager:
           Value: true
         body:
           Value: true
-        camera_init:
-          Value: true
-        camera_init_correct:
-          Value: true
-        cbf_world:
-          Value: true
         utlidar_lidar:
           Value: true
       Marker Scale: 1
@@ -53,17 +47,10 @@ Visualization Manager:
       Show Axes: true
       Show Names: false
       Tree:
-        camera_init_correct:
-          camera_init:
-            body:
-              base_link:
-                utlidar_lidar:
-                  {}
-            cbf_world:
-              {}
+        {}
       Update Interval: 0
       Value: true
-    - Angle Tolerance: 0.10000000149011612
+    - Angle Tolerance: 0.05000000074505806
       Class: rviz_default_plugins/Odometry
       Covariance:
         Orientation:
@@ -81,9 +68,9 @@ Visualization Manager:
           Value: true
         Value: true
       Enabled: true
-      Keep: 10
+      Keep: 1
       Name: Odometry
-      Position Tolerance: 0.10000000149011612
+      Position Tolerance: 0.009999999776482582
       Shape:
         Alpha: 1
         Axes Length: 1
@@ -133,8 +120,8 @@ Visualization Manager:
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 1.6933369636535645
-        Min Value: -0.1717260181903839
+        Max Value: 1.0348014831542969
+        Min Value: -0.14710447192192078
         Value: true
       Axis: Z
       Channel Name: intensity
@@ -142,7 +129,7 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: AxisColor
       Decay Time: 30
-      Enabled: true
+      Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 186
@@ -163,12 +150,12 @@ Visualization Manager:
         Value: /cloud_registered
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
-        Max Value: 2.529560089111328
-        Min Value: -0.36251774430274963
+        Max Value: 1.6481927633285522
+        Min Value: -0.9780238270759583
         Value: true
       Axis: Z
       Channel Name: intensity
@@ -201,7 +188,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 0; 0; 0
-    Fixed Frame: camera_init_correct
+    Fixed Frame: map
     Frame Rate: 30
   Name: root
   Tools:
@@ -244,25 +231,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 3.585789442062378
+      Distance: 8.644532203674316
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -0.008504047989845276
-        Y: -0.0005770106799900532
-        Z: 0.034441977739334106
+        X: 0.11016935855150223
+        Y: 1.0489290952682495
+        Z: 1.3031063079833984
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.669796884059906
+      Pitch: 0.77979576587677
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 6.188557147979736
+      Yaw: 6.025392532348633
     Saved: ~
 Window Geometry:
   Displays:
@@ -280,5 +267,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1453
-  X: 368
-  Y: 104
+  X: 302
+  Y: 111
