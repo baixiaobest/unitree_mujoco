@@ -25,10 +25,24 @@ class CbfMapObstacles(Node):
         self.declare_parameter('map_path', '')
         self.declare_parameter('map_obstacle_range_m', 3.0)
         self.declare_parameter('map_voxel_m', 0.1)
+        self.declare_parameter('min_obstacle_height_m', 0.12)
+        self.declare_parameter('max_obstacle_height_m', 1.4)
+        self.declare_parameter('floor_tolerance_m', 0.08)
+        self.declare_parameter('support_radius_m', 0.2)
+        self.declare_parameter('min_support_points', 3)
         self.declare_parameter('max_pose_age_s', 0.2)
         self.map_obstacle_range_m = float(self.get_parameter('map_obstacle_range_m').value)
         if not np.isfinite(self.map_obstacle_range_m) or self.map_obstacle_range_m <= 0:
             raise ValueError('map_obstacle_range_m must be a finite positive distance')
+        self.min_obstacle_height_m = float(self.get_parameter('min_obstacle_height_m').value)
+        self.max_obstacle_height_m = float(self.get_parameter('max_obstacle_height_m').value)
+        self.floor_tolerance_m = float(self.get_parameter('floor_tolerance_m').value)
+        if (not all(np.isfinite(v) for v in (self.min_obstacle_height_m,
+                                            self.max_obstacle_height_m, self.floor_tolerance_m))
+                or self.min_obstacle_height_m < 0
+                or self.max_obstacle_height_m <= self.min_obstacle_height_m
+                or self.floor_tolerance_m <= 0):
+            raise ValueError('Invalid map obstacle height band or floor tolerance')
         self.points = voxel_downsample(
             load_pcd_xyz(self.get_parameter('map_path').value),
             float(self.get_parameter('map_voxel_m').value),
@@ -44,6 +58,8 @@ class CbfMapObstacles(Node):
         self.aligned = False
         self.odom_stamp = None
         self.pub = self.create_publisher(PointCloud2, '/cbf/map_rear_obstacles', 10)
+        self.filtered_pub = self.create_publisher(PointCloud2, '/cbf/map_filtered_obstacles', 10)
+        self.rejected_pub = self.create_publisher(PointCloud2, '/cbf/map_rejected_obstacles', 10)
         self.floor_pub = self.create_publisher(MarkerArray, '/cbf/map_floor', 10)
         self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self.on_initialpose, 10)
         self.create_subscription(PoseWithCovarianceStamped, '/icp_result', self.on_icp, 10)
@@ -57,6 +73,7 @@ class CbfMapObstacles(Node):
         marker.action = Marker.DELETEALL
         self.floor_pub.publish(MarkerArray(markers=[marker]))
         self.publish_cloud(np.empty((0, 3)), self.get_clock().now().to_msg())
+        self.publish_debug_clouds(np.empty((0, 3)), np.empty((0, 3)), self.get_clock().now().to_msg())
 
     def on_initialpose(self, msg):
         self.icp_stamp = None
@@ -80,7 +97,7 @@ class CbfMapObstacles(Node):
             self.odom_stamp = stamp
             self.active = True
 
-    def publish_cloud(self, points, stamp):
+    def build_cloud(self, points, stamp):
         msg = PointCloud2()
         msg.header.frame_id = 'map'
         msg.header.stamp = stamp
@@ -93,7 +110,14 @@ class CbfMapObstacles(Node):
         msg.fields = [PointField(name=n, offset=i * 4, datatype=PointField.FLOAT32, count=1)
                       for i, n in enumerate(('x', 'y', 'z'))]
         msg.data = np.asarray(points, dtype='<f4').reshape(-1, 3).tobytes()
-        self.pub.publish(msg)
+        return msg
+
+    def publish_cloud(self, points, stamp):
+        self.pub.publish(self.build_cloud(points, stamp))
+
+    def publish_debug_clouds(self, filtered, rejected, stamp):
+        self.filtered_pub.publish(self.build_cloud(filtered, stamp))
+        self.rejected_pub.publish(self.build_cloud(rejected, stamp))
 
     def publish_floor(self, support_base, plane, rotation, translation, stamp):
         marker = Marker()
@@ -156,13 +180,23 @@ class CbfMapObstacles(Node):
         ids = self.tree.query_ball_point(translation[:2], self.map_obstacle_range_m + 1.0)
         nearby = self.points[ids]
         local = (nearby - translation) @ rotation
-        result = floor_and_rear(local, max_range=self.map_obstacle_range_m)
+        result = floor_and_rear(
+            local, max_range=self.map_obstacle_range_m,
+            min_obstacle_height=self.min_obstacle_height_m,
+            max_obstacle_height=self.max_obstacle_height_m,
+            floor_tolerance=self.floor_tolerance_m,
+            support_radius_m=float(self.get_parameter('support_radius_m').value),
+            min_support_points=int(self.get_parameter('min_support_points').value),
+        )
         if result is None:
             self.publish_cloud(np.empty((0, 3)), now.to_msg())
+            self.publish_debug_clouds(np.empty((0, 3)), np.empty((0, 3)), now.to_msg())
             self.floor_pub.publish(MarkerArray(markers=[Marker(action=Marker.DELETEALL)]))
             return
-        support, rear, plane = result
+        support, rear, plane, filtered, rejected = result
         self.publish_cloud(rear @ rotation.T + translation, now.to_msg())
+        self.publish_debug_clouds(filtered @ rotation.T + translation,
+                                  rejected @ rotation.T + translation, now.to_msg())
         self.publish_floor(support, plane, rotation, translation, now.to_msg())
 
 

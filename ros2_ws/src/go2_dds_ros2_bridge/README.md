@@ -60,6 +60,11 @@ in `config/cbf_map_obstacles.yaml` (or pass another file with
 `cbf_map_obstacles_config:=/absolute/path/to/config.yaml`) without changing
 the live LiDAR CBF range. The PCD cannot detect newly moved obstacles in the
 rear blind spot.
+The map node also publishes `/cbf/map_filtered_obstacles` (all retained rear
+points before 64-bin reduction) and `/cbf/map_rejected_obstacles` (isolated
+returns). The localization RViz config shows retained points by default;
+enable **CBF Map Rejected Obstacles** to tune `support_radius_m` and
+`min_support_points` in `config/cbf_map_obstacles.yaml`.
 
 For resumed mapping, give an RViz **2D Pose Estimate** near the robot after the
 checkpoint appears. Mapping and map saving wait for a successful ICP match.

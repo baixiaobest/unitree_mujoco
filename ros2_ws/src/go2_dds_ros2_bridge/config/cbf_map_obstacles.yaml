@@ -4,5 +4,14 @@ cbf_map_obstacles:
     map_obstacle_range_m: 3.0
     # Reduce dense PCD points before floor fitting and rear binning.
     map_voxel_m: 0.1
+    # Heights are relative to the locally fitted floor, not map Z.
+    min_obstacle_height_m: 0.15
+    max_obstacle_height_m: 1.4
+    # Maximum point-to-plane distance for floor-fit support.
+    floor_tolerance_m: 0.08
+    # Require a cluster of at least 3 post-voxel points (including the point)
+    # within 20 cm before a mapped return can become a CBF obstacle.
+    support_radius_m: 0.2
+    min_support_points: 3
     # Stop publishing map candidates when localized odometry is stale.
     max_pose_age_s: 0.2

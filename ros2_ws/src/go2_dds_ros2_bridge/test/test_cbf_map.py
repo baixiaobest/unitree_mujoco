@@ -1,6 +1,6 @@
 import numpy as np
 
-from go2_dds_ros2_bridge.cbf_map import floor_and_rear, load_pcd_xyz, voxel_downsample
+from go2_dds_ros2_bridge.cbf_map import floor_and_rear, load_pcd_xyz, voxel_downsample, supported_obstacles
 
 
 def test_floor_and_rear_rejects_ground_and_front():
@@ -8,9 +8,9 @@ def test_floor_and_rear_rejects_ground_and_front():
     floor = np.column_stack((xs.ravel(), ys.ravel(), 0.05 * xs.ravel() - 0.03 * ys.ravel() - 0.3))
     rear = np.array([[-1.0, 0.0, -0.3 + 0.05 * -1.0 + 0.5]])
     front = np.array([[1.0, 0.0, -0.3 + 0.05 + 0.5]])
-    result = floor_and_rear(np.vstack((floor, rear, front)))
+    result = floor_and_rear(np.vstack((floor, rear, front)), min_support_points=1)
     assert result is not None
-    support, candidates, plane = result
+    support, candidates, plane, _, _ = result
     assert len(support) > 100
     np.testing.assert_allclose(plane, [0.05, -0.03, -0.3], atol=0.01)
     assert len(candidates) == 1
@@ -27,7 +27,8 @@ def test_map_obstacle_range_is_independent():
     floor = np.column_stack((xs.ravel(), ys.ravel(), np.full(xs.size, -0.3)))
     near = np.array([[-2.0, 0.0, 0.2]])
     far = np.array([[-4.0, 0.0, 0.2]])
-    _, candidates, _ = floor_and_rear(np.vstack((floor, near, far)), max_range=3.0)
+    _, candidates, _, _, _ = floor_and_rear(np.vstack((floor, near, far)), max_range=3.0,
+                                           min_support_points=1)
     assert len(candidates) == 1
     np.testing.assert_allclose(candidates[0], near[0])
 
@@ -47,3 +48,12 @@ def test_voxel_downsample_preserves_separate_heights():
     result = voxel_downsample(points, 0.1)
     assert len(result) == 2
     assert np.max(result[:, 2]) == 0.3
+
+
+def test_sparse_map_returns_are_rejected_before_binning():
+    points = np.array([[-1.0, 0, 0.3], [-1.08, 0, 0.32], [-0.95, 0.05, 0.31],
+                       [-2.0, 0, 0.3], [-2.05, 0, 0.3]])
+    accepted, rejected = supported_obstacles(points, radius_m=0.2, min_points=3)
+    assert len(accepted) == 3
+    assert len(rejected) == 2
+    np.testing.assert_allclose(accepted, points[:3])

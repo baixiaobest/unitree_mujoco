@@ -1,6 +1,7 @@
 """Local floor and rear obstacle extraction from a PCD map."""
 import math
 import numpy as np
+from scipy.spatial import cKDTree
 
 
 def load_pcd_xyz(path):
@@ -53,10 +54,23 @@ def voxel_downsample(points, size_m):
     return points[np.sort(indices)]
 
 
+def supported_obstacles(points, radius_m=0.2, min_points=3):
+    """Separate isolated returns from 3D clusters after floor removal."""
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if not np.isfinite(radius_m) or radius_m <= 0 or min_points < 1:
+        raise ValueError("Invalid obstacle support settings")
+    if not len(points):
+        return points, points
+    counts = cKDTree(points).query_ball_point(points, radius_m, return_length=True)
+    keep = counts >= min_points  # Count includes the point itself.
+    return points[keep], points[~keep]
+
+
 def floor_and_rear(points_base, *, floor_radius=2.0, floor_tolerance=0.08,
                    min_obstacle_height=0.12, max_obstacle_height=1.4,
-                   max_range=8.0, bins=64):
-    """Return floor support, nearest rear obstacles, and local floor coefficients.
+                   max_range=8.0, bins=64, support_radius_m=0.2,
+                   min_support_points=3):
+    """Return floor support, binned rear hits, plane, retained and rejected points.
 
     A low-point RANSAC plane is required so a wall cannot silently become floor.
     """
@@ -92,12 +106,12 @@ def floor_and_rear(points_base, *, floor_radius=2.0, floor_tolerance=0.08,
         return None
     height = points[:, 2] - (points[:, :2] @ plane[:2] + plane[2])
     valid = (points[:, 0] < 0) & (xy <= max_range) & (height >= min_obstacle_height) & (height <= max_obstacle_height)
-    rear = points[valid]
-    ranges = xy[valid]
+    rear, rejected = supported_obstacles(points[valid], support_radius_m, min_support_points)
+    ranges = np.linalg.norm(rear[:, :2], axis=1)
     indices = np.minimum((np.arctan2(rear[:, 1], -rear[:, 0]) / math.pi + 0.5) * bins, bins - 1).astype(int)
     chosen = []
     for index in range(bins):
         members = np.flatnonzero(indices == index)
         if len(members):
             chosen.append(rear[members[np.argmin(ranges[members])]])
-    return local[inliers], np.asarray(chosen, dtype=np.float64).reshape(-1, 3), plane
+    return local[inliers], np.asarray(chosen, dtype=np.float64).reshape(-1, 3), plane, rear, rejected
