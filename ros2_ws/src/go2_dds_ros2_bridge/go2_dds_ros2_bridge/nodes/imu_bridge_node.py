@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import rclpy
 from builtin_interfaces.msg import Time
 from rclpy.node import Node
-from sensor_msgs.msg import Imu
+from sensor_msgs.msg import Imu, JointState
 
 from go2_dds_ros2_bridge.dds_runtime import add_dds_runtime_arguments, resolve_runtime_arguments
 
@@ -22,6 +22,14 @@ DEFAULT_DDS_IMU_TOPIC = "rt/lowstate"
 DEFAULT_ROS_IMU_TOPIC = "/imu/data_raw"
 DEFAULT_IMU_FRAME_ID = "imu_link"
 DEFAULT_IMU_CONFIG_FILE = "imu_bridge.yaml"
+JOINT_STATES_INTERVAL_NS = 33_333_333
+# Unitree LowState motor_state indices, verified against the simulation bridge.
+GO2_JOINT_NAMES = (
+    "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
+    "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
+    "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
+    "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
+)
 LOWSTATE_TICK_NS = 1_000_000
 LOWSTATE_TICK_WRAPAROUND = 1 << 32
 LOWSTATE_TICK_HALF_WRAPAROUND = LOWSTATE_TICK_WRAPAROUND // 2
@@ -50,6 +58,7 @@ class BridgeConfig:
     accelerometer_scale: tuple[float, float, float] | None
     gyroscope_bias: tuple[float, float, float] | None
     gyroscope_scale: tuple[float, float, float] | None
+    joint_states_topic: str = ""
 
 
 def _import_yaml_module():
@@ -201,6 +210,11 @@ def parse_args() -> BridgeConfig:
         default=DEFAULT_ROS_IMU_TOPIC,
         help="ROS2 IMU topic to publish.",
     )
+    parser.add_argument(
+        "--joint-states-topic",
+        default="",
+        help="Publish the 12 Go2 motor joints on this ROS2 topic when set.",
+    )
     parser.add_argument('--raw-ros-topic', default='',
                         help='Optional second ROS2 topic carrying the uncalibrated IMU sample.')
     parser.add_argument(
@@ -244,6 +258,7 @@ def parse_args() -> BridgeConfig:
         accelerometer_scale=calibration[1] if calibration else None,
         gyroscope_bias=calibration[2] if calibration else None,
         gyroscope_scale=calibration[3] if calibration else None,
+        joint_states_topic=args.joint_states_topic,
     )
 
 
@@ -262,6 +277,27 @@ def stamp_from_ns(stamp_ns: int) -> Time:
     return stamp
 
 
+def joint_state_from_lowstate(msg, stamp_ns: int) -> JointState | None:
+    motors = getattr(msg, "motor_state", ())
+    if len(motors) < len(GO2_JOINT_NAMES):
+        return None
+    motors = motors[:len(GO2_JOINT_NAMES)]
+    positions = [float(motor.q) for motor in motors]
+    if not all(math.isfinite(position) for position in positions):
+        return None
+    result = JointState()
+    result.header.stamp = stamp_from_ns(stamp_ns)
+    result.name = list(GO2_JOINT_NAMES)
+    result.position = positions
+    velocities = [float(motor.dq) for motor in motors]
+    if all(math.isfinite(velocity) for velocity in velocities):
+        result.velocity = velocities
+    efforts = [float(motor.tau_est) for motor in motors]
+    if all(math.isfinite(effort) for effort in efforts):
+        result.effort = efforts
+    return result
+
+
 def low_quantile(values: deque[tuple[int, int]]) -> int:
     ordered = sorted(offset_ns for _, offset_ns in values)
     index = min(int(math.floor((len(ordered) - 1) * CLOCK_OFFSET_QUANTILE)), len(ordered) - 1)
@@ -275,6 +311,9 @@ class DdsImuBridge(Node):
         self._publisher = self.create_publisher(Imu, self._config.ros_topic, 10)
         self._raw_publisher = (self.create_publisher(Imu, self._config.raw_ros_topic, 10)
                                if self._config.raw_ros_topic else None)
+        self._joint_publisher = (self.create_publisher(JointState, self._config.joint_states_topic, 10)
+                                 if self._config.joint_states_topic else None)
+        self._last_joint_stamp_ns: int | None = None
         self._orientation_covariance = diagonal_covariance(self._config.orientation_variance)
         self._angular_velocity_covariance = diagonal_covariance(self._config.angular_velocity_variance)
         self._linear_acceleration_covariance = diagonal_covariance(self._config.linear_acceleration_variance)
@@ -304,6 +343,18 @@ class DdsImuBridge(Node):
         )
 
     def _dds_lowstate_handler(self, msg) -> None:
+        receive_time_ns = self.get_clock().now().nanoseconds
+        stamp_ns = self._stamp_from_tick(int(msg.tick), receive_time_ns)
+        if self._joint_publisher is not None and (
+            self._last_joint_stamp_ns is None
+            or stamp_ns - self._last_joint_stamp_ns >= JOINT_STATES_INTERVAL_NS
+            or stamp_ns < self._last_joint_stamp_ns
+        ):
+            joint_state = joint_state_from_lowstate(msg, stamp_ns)
+            if joint_state is not None:
+                self._joint_publisher.publish(joint_state)
+                self._last_joint_stamp_ns = stamp_ns
+
         imu_state = msg.imu_state
         quaternion = [float(value) for value in imu_state.quaternion]
         gyroscope = [float(value) for value in imu_state.gyroscope]
@@ -315,9 +366,6 @@ class DdsImuBridge(Node):
         normalized_quaternion = self._normalize_quaternion(quaternion)
         if normalized_quaternion is None:
             return
-
-        receive_time_ns = self.get_clock().now().nanoseconds
-        stamp_ns = self._stamp_from_tick(int(msg.tick), receive_time_ns)
 
         ros_msg = Imu()
         ros_msg.header.stamp = stamp_from_ns(stamp_ns)

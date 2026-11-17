@@ -17,6 +17,11 @@ Source `/opt/ros/humble/setup.bash` and `install/setup.bash` in each new termina
 
 Use `run_mode:=simulation` instead of `hardware` when using the simulator.
 Set `rviz:=true` to open the matching RViz view.
+The Go2 RobotModel and animated legs are enabled by default. Pass
+`robot_model:=false` to omit the model and joint-state publisher. When enabled,
+`/joint_states` carries the 12 motor joints, `/robot_description` carries the
+URDF, and `go2_robot_state_publisher` supplies the leg transforms. These are
+also available to an RViz instance started separately from the launch.
 
 ```bash
 # Odometry only

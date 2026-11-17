@@ -29,6 +29,21 @@ Panels:
 Visualization Manager:
   Class: ''
   Displays:
+  - Alpha: 1
+    Class: rviz_default_plugins/RobotModel
+    Collision Enabled: false
+    Description Source: Topic
+    Description Topic:
+      Depth: 5
+      Durability Policy: Transient Local
+      History Policy: Keep Last
+      Reliability Policy: Reliable
+      Value: /robot_description
+    Enabled: true
+    Name: Go2 Robot
+    TF Prefix: ''
+    Update Interval: 0
+    Visual Enabled: true
   - Class: rviz_default_plugins/TF
     Enabled: true
     Frame Timeout: 15

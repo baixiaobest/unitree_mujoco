@@ -80,6 +80,7 @@ def _make_runtime_nodes(context, mode: str):
     if localization and (not map_path or not Path(map_path).is_file()):
         raise ValueError("localization requires map_path pointing to an existing PCD file")
     imu_topic = LaunchConfiguration("imu_topic").perform(context)
+    robot_model = LaunchConfiguration("robot_model").perform(context).strip().lower() in ("true", "1", "yes")
     imu_bridge_config = LaunchConfiguration("imu_bridge_config").perform(context)
     if LaunchConfiguration("run_mode").perform(context) == "simulation":
         imu_bridge_config = str(Path(imu_bridge_config).with_name("imu_bridge.yaml"))
@@ -144,8 +145,18 @@ def _make_runtime_nodes(context, mode: str):
             output="screen",
             arguments=common_bridge_arguments + ["--ros-topic", imu_topic,
                                                   "--raw-ros-topic", f"{imu_topic}_raw",
-                                                  "--frame-id", "body", "--config-file", imu_bridge_config],
+                                                  "--frame-id", "body", "--config-file", imu_bridge_config]
+                      + (["--joint-states-topic", "/joint_states"] if robot_model else []),
         ),
+        *([Node(
+            package="robot_state_publisher",
+            executable="robot_state_publisher",
+            name="go2_robot_state_publisher",
+            output="screen",
+            parameters=[{"robot_description": Path(PathJoinSubstitution([
+                FindPackageShare("go2_description"), "urdf", "go2_description.urdf"
+            ]).perform(context)).read_text()}],
+        )] if robot_model else []),
         Node(
             package="tf2_ros",
             executable="static_transform_publisher",
@@ -446,6 +457,11 @@ def generate_launch_description(mode: str = "odometry") -> LaunchDescription:
                     [FindPackageShare("go2_cbf_control"), "config", "cbf_control.yaml"]
                 ),
                 description="Path to the native CBF controller parameter YAML file.",
+            ),
+            DeclareLaunchArgument(
+                "robot_model",
+                default_value="true",
+                description="Publish Go2 joint states and robot model TF for RViz.",
             ),
             DeclareLaunchArgument(
                 "rviz",

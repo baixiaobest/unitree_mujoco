@@ -9,7 +9,6 @@ Panels:
         - /Odometry1/Shape1
         - /CBF Selected Points1/Topic1
         - /CBF Velocity Predictions1/Namespaces1
-        - /policy_vel1
       Splitter Ratio: 0.5698005557060242
     Tree Height: 638
   - Class: rviz_common/Selection
@@ -33,6 +32,21 @@ Panels:
 Visualization Manager:
   Class: ""
   Displays:
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Name: Go2 Robot
+      TF Prefix: ""
+      Update Interval: 0
+      Visual Enabled: true
     - Class: rviz_default_plugins/TF
       Enabled: true
       Frame Timeout: 15
@@ -315,7 +329,7 @@ Visualization Manager:
       Color: 255; 70; 70
       Color Transformer: FlatColor
       Decay Time: 0
-      Enabled: true
+      Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
@@ -336,7 +350,7 @@ Visualization Manager:
         Value: /cbf/map_rear_obstacles
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Alpha: 0.699999988079071
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -406,18 +420,17 @@ Visualization Manager:
       Use rainbow: true
       Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
+      Enabled: false
       Name: CBF Map Floor
       Namespaces:
-        floor_support: true
-        local_floor: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /cbf/map_floor
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/MarkerArray
       Enabled: false
       Name: CBF Velocity Predictions
@@ -555,25 +568,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 4.659890174865723
+      Distance: 5.778561592102051
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.9833589196205139
-        Y: 0.6417379975318909
-        Z: 0.5104457139968872
+        X: -1.337110161781311
+        Y: 0.1884349137544632
+        Z: 0.18578000366687775
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5447974801063538
+      Pitch: 0.8347963094711304
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 3.61037540435791
+      Yaw: 1.8031121492385864
     Saved: ~
 Window Geometry:
   Displays:
@@ -591,5 +604,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1561
-  X: 303
-  Y: 86
+  X: 298
+  Y: 82

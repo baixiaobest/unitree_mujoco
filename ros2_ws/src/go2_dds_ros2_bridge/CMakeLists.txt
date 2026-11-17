@@ -115,6 +115,7 @@ if(BUILD_TESTING)
     ENV ROS_DOMAIN_ID=187 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TIMEOUT 60)
   ament_add_pytest_test(test_temporal_lidar_processing test/test_temporal_lidar_processing.py)
   ament_add_pytest_test(test_cbf_dynamic test/test_cbf_dynamic.py)
+  ament_add_pytest_test(test_joint_state_bridge test/test_joint_state_bridge.py)
   ament_add_pytest_test(test_cbf_dynamic_ros test/test_cbf_dynamic_ros.py
     ENV ROS_DOMAIN_ID=188 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TIMEOUT 60)
 endif()
