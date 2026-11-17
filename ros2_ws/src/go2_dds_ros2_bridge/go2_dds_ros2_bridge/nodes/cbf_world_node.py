@@ -2,6 +2,8 @@
 """Prepare atomic CBF snapshots without blocking the control/QP thread."""
 from collections import deque
 from uuid import uuid4
+from copy import deepcopy
+import math
 import numpy as np
 import rclpy
 from rclpy.node import Node
@@ -9,7 +11,9 @@ from rclpy.time import Time
 from rclpy.duration import Duration
 from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import TwistStamped, TransformStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
+from sensor_msgs.msg import PointCloud2
 from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster, TransformException
 from go2_dds_ros2_bridge_msgs.msg import CbfScan3D, CbfWorldScan, CbfControlSnapshot
@@ -28,6 +32,7 @@ class CbfWorldNode(Node):
         self.declare_parameter('max_interpolation_gap_s', .1)
         self.declare_parameter('scan_timeout_s', .5)
         self.declare_parameter('global_frame', 'camera_init_correct')
+        self.declare_parameter('map_rear_obstacles', False)
         self.tf = Buffer(cache_time=Duration(seconds=10))
         self.listener = TransformListener(self.tf, self)
         self.broadcaster = StaticTransformBroadcaster(self)
@@ -37,6 +42,12 @@ class CbfWorldNode(Node):
         self.session = uuid4().hex
         self.started = self.get_clock().now().nanoseconds
         self.last_now = self.started
+        self.map_rear = None
+        self.map_enabled = bool(self.get_parameter('map_rear_obstacles').value)
+        if self.map_enabled:
+            self.create_subscription(PointCloud2, '/cbf/map_rear_obstacles', self.map_callback, 10)
+            self.create_subscription(PoseWithCovarianceStamped, '/initialpose', self.reset_pose_callback, 10)
+            self.create_subscription(PoseWithCovarianceStamped, '/icp_result', self.reset_pose_callback, 10)
         self.create_subscription(Odometry, '/Odometry', self.pose_callback, qos_profile_sensor_data)
         self.create_subscription(TwistStamped, '/estimated_velocity', self.velocity_callback, qos_profile_sensor_data)
         self.create_subscription(CbfScan3D, '/cbf/scan_xyz', self.scan_callback, qos_profile_sensor_data)
@@ -50,6 +61,40 @@ class CbfWorldNode(Node):
         self.reference = None
         self.session = uuid4().hex
         self.started = self.get_clock().now().nanoseconds
+        self.map_rear = None
+
+    def reset_pose_callback(self, msg):
+        self.invalidate()
+
+    def map_callback(self, msg):
+        if msg.header.frame_id != self.get_parameter('global_frame').value or msg.point_step != 12:
+            return
+        if [f.name for f in msg.fields] != ['x', 'y', 'z']:
+            return
+        points = np.frombuffer(msg.data, dtype='<f4').reshape(-1, 3).astype(np.float64)
+        stamp = ns(msg.header.stamp)
+        if stamp >= self.started and np.isfinite(points).all():
+            self.map_rear = stamp, points
+
+    def merge_map_rear(self, scan, robot_xy, yaw, now):
+        if not self.map_enabled or self.map_rear is None:
+            return scan
+        stamp, points = self.map_rear
+        if now - stamp > 200_000_000 or stamp > now + 1_000_000 or not len(points):
+            return scan
+        merged = deepcopy(scan)
+        c, s = math.cos(yaw), math.sin(yaw)
+        for point in points:
+            dx, dy = point[0] - robot_xy[0], point[1] - robot_xy[1]
+            x, y = c * dx + s * dy, -s * dx + c * dy
+            if x >= 0:
+                continue
+            index = min(63, max(0, int((math.atan2(y, -x) / math.pi + 0.5) * 64)))
+            old_x, old_y = merged.static_points_xy_m[2 * index:2 * index + 2]
+            if not merged.static_hits[index] or dx * dx + dy * dy < (old_x - robot_xy[0]) ** 2 + (old_y - robot_xy[1]) ** 2:
+                merged.static_points_xy_m[2 * index:2 * index + 2] = [float(point[0]), float(point[1])]
+                merged.static_hits[index] = 1
+        return merged
 
     def reset_callback(self, request, response):
         self.invalidate()
@@ -93,7 +138,8 @@ class CbfWorldNode(Node):
 
     def initialize_reference(self):
         # camera_init has an existing parent; publish the INVERSE as its child.
-        correction = self.tf.lookup_transform(self.get_parameter('global_frame').value, 'camera_init', Time())
+        lookup_time = Time(nanoseconds=self.poses[-1][0]) if self.map_enabled else Time()
+        correction = self.tf.lookup_transform(self.get_parameter('global_frame').value, 'camera_init', lookup_time)
         offset = self.tf.lookup_transform('body', 'base_link', Time())
         t, q = correction.transform.translation, correction.transform.rotation
         rotation = rotation_matrix_from_quaternion_xyzw(q.x, q.y, q.z, q.w)
@@ -126,6 +172,8 @@ class CbfWorldNode(Node):
             if self.blocked:
                 raise ValueError('world_reset_required')
             if self.reference is None:
+                if self.map_enabled and not self.poses:
+                    raise ValueError('state_unavailable')
                 self.initialize_reference()
             rotation, translation, offset = self.reference
             gap_ns = int(self.get_parameter('max_interpolation_gap_s').value * 1e9)
@@ -156,6 +204,8 @@ class CbfWorldNode(Node):
                 )[:, :2].ravel().tolist()
                 world.ray_states = raw.ray_states
                 self.scans.append(world)
+                capture_position = rotation @ p + translation + wr @ offset
+                world = self.merge_map_rear(world, capture_position[:2], world.capture_yaw, now)
                 self.world_pub.publish(world)
             # Only samples whose own attitude is covered can supply world velocity.
             velocities = [v for v in self.velocities if self.poses and self.poses[0][0] <= v[0] <= self.poses[-1][0]]
@@ -168,7 +218,7 @@ class CbfWorldNode(Node):
             snapshot.robot_yaw = float(yaw)
             snapshot.velocity_xy_mps = velocity[:2].tolist()
             snapshot.interpolation_gap_s = gap
-            snapshot.scan = eligible[-1]
+            snapshot.scan = self.merge_map_rear(eligible[-1], p[:2], yaw, now)
             snapshot.valid = True
             snapshot.reason = 'aligned_measured_state'
         except (ValueError, TransformException) as error:

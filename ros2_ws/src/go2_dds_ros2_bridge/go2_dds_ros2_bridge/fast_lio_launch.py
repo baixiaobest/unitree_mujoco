@@ -93,6 +93,7 @@ def _make_runtime_nodes(context, mode: str):
     navigation_config = LaunchConfiguration("navigation_config").perform(context)
     navigation_policy_path = LaunchConfiguration("navigation_policy_path").perform(context)
     cbf_enabled = LaunchConfiguration("cbf").perform(context).strip().lower() in ("true", "1", "yes")
+    map_obstacles = localization and cbf_enabled and LaunchConfiguration("cbf_map_obstacles").perform(context).strip().lower() in ("true", "1", "yes") if localization else False
     cbf_config = LaunchConfiguration("cbf_config").perform(context)
     cbf_mode = yaml.safe_load(Path(cbf_config).read_text())["cbf_control"]["ros__parameters"].get("cbf_mode", "static")
     if cbf_mode not in ("static", "dynamic"):
@@ -255,8 +256,13 @@ def _make_runtime_nodes(context, mode: str):
         ),
         Node(package="go2_dds_ros2_bridge", executable="cbf_world_state",
              name="cbf_world_state", output="screen",
-             parameters=[cbf_config, {"global_frame": corrected_map_frame}],
+             parameters=[cbf_config, {"global_frame": corrected_map_frame, "map_rear_obstacles": map_obstacles}],
              condition=IfCondition(LaunchConfiguration("cbf"))),
+        *([Node(package="go2_dds_ros2_bridge", executable="cbf_map_obstacles",
+                name="cbf_map_obstacles", output="screen", parameters=[
+                    LaunchConfiguration("cbf_map_obstacles_config"), {"map_path": map_path},
+                ])]
+          if map_obstacles else []),
         Node(package="go2_dds_ros2_bridge", executable="cbf_velocity_predictor",
              name="cbf_velocity_predictor", output="screen", parameters=[cbf_config, {"cbf_mode": cbf_mode}],
              condition=IfCondition(LaunchConfiguration("cbf"))),
@@ -265,7 +271,7 @@ def _make_runtime_nodes(context, mode: str):
             executable="cbf_control",
             name="cbf_control",
             output="screen",
-            parameters=[cbf_config],
+            parameters=[cbf_config, {"reserve_rear_slots": map_obstacles}],
             condition=IfCondition(LaunchConfiguration("cbf")),
         ),
         Node(
@@ -291,6 +297,18 @@ def generate_launch_description(mode: str = "odometry") -> LaunchDescription:
         mode_arguments.append(DeclareLaunchArgument(
             "checkpoint_map_path", default_value="",
             description="Existing PCD to resume mapping from; waits for an RViz 2D Pose Estimate.",
+        ))
+    if mode == "localization":
+        mode_arguments.append(DeclareLaunchArgument(
+            "cbf_map_obstacles", default_value="false",
+            description="Use ground-filtered rear obstacles from the localization PCD in CBF.",
+        ))
+        mode_arguments.append(DeclareLaunchArgument(
+            "cbf_map_obstacles_config",
+            default_value=PathJoinSubstitution(
+                [FindPackageShare("go2_dds_ros2_bridge"), "config", "cbf_map_obstacles.yaml"]
+            ),
+            description="YAML parameters for the mapped rear CBF obstacle node.",
         ))
     return LaunchDescription(
         [

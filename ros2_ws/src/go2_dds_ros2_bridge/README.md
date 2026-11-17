@@ -48,6 +48,19 @@ pose before matching scans; FAST-LIO waits for ICP to initialize. Send another
 On an accepted new match, FAST-LIO resets its filter and IMU initialization.
 Keep the robot still until localized odometry resumes.
 
+To include mapped rear obstacles in CBF, launch localization with
+`cbf:=true cbf_map_obstacles:=true`. This option is off by default. RViz's
+**CBF Map Floor** and **CBF Map Rear Obstacles** displays show the fitted local
+floor and filtered PCD points; **CBF Selected Points** shows the points passed
+to the solver. Map points are cleared on a new 2D Pose Estimate and resume
+after successful ICP and fresh odometry. The CBF retains 16 of its 64 point
+slots for side/rear obstacles when they exist, lending unused slots to the
+front. Mapped rear points are considered within 3 m by default; change this
+in `config/cbf_map_obstacles.yaml` (or pass another file with
+`cbf_map_obstacles_config:=/absolute/path/to/config.yaml`) without changing
+the live LiDAR CBF range. The PCD cannot detect newly moved obstacles in the
+rear blind spot.
+
 For resumed mapping, give an RViz **2D Pose Estimate** near the robot after the
 checkpoint appears. Mapping and map saving wait for a successful ICP match.
 The default output is `map_resumed.pcd` beside the checkpoint; pass

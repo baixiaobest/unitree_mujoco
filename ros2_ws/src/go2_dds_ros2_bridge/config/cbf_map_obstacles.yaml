@@ -1,0 +1,8 @@
+cbf_map_obstacles:
+  ros__parameters:
+    # Only mapped rear obstacles within this distance reach the CBF.
+    map_obstacle_range_m: 3.0
+    # Reduce dense PCD points before floor fitting and rear binning.
+    map_voxel_m: 0.1
+    # Stop publishing map candidates when localized odometry is stale.
+    max_pose_age_s: 0.2

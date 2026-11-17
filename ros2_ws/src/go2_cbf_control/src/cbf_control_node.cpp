@@ -39,6 +39,7 @@ using namespace go2_cbf_control;
 class CbfControlNode final : public rclcpp::Node {
  public:
   CbfControlNode() : Node("cbf_control"), config_(read_config()), qp_(config_) {
+    rear_quota_ = declare_parameter<bool>("reserve_rear_slots", false);
     if (config_.fallback_linear_decel_mps2 <= 0.0 || config_.fallback_yaw_decel_radps2 <= 0.0) {
       throw std::runtime_error(
         "CBF requires positive fallback_linear_decel_mps2 and "
@@ -219,7 +220,7 @@ class CbfControlNode final : public rclcpp::Node {
 
   bool select_points(
     const go2_dds_ros2_bridge_msgs::msg::CbfWorldScan & scan,
-    const double robot_x, const double robot_y,
+    const double robot_x, const double robot_y, const double robot_yaw,
     const go2_dds_ros2_bridge_msgs::msg::CbfDynamicSnapshot * dynamic,
     std::array<Point, kMaxPoints> & selected, int & selected_count,
     std::array<Point, kCandidateBins> & candidates, int & candidate_count,
@@ -254,8 +255,38 @@ class CbfControlNode final : public rclcpp::Node {
     std::sort(candidates.begin(), candidates.begin() + candidate_count, [](const Point & left, const Point & right) {
       return left.range < right.range;
     });
-    selected_count = std::min(candidate_count, kMaxPoints);
-    for (int index = 0; index < selected_count; ++index) selected[index] = candidates[index];
+    if (!rear_quota_) {
+      selected_count = std::min(candidate_count, kMaxPoints);
+      for (int index = 0; index < selected_count; ++index) selected[index] = candidates[index];
+      return true;
+    }
+    // Preserve 16 rear slots when hits exist, without wasting unused slots.
+    std::array<bool, kCandidateBins> used{};
+    selected_count = 0;
+    // First choose the closest hit in each of 16 rear angular sectors.
+    for (int sector = 0; sector < 16 && selected_count < 16; ++sector) {
+      int best = -1;
+      for (int i = 0; i < candidate_count; ++i) {
+        if (!candidates[i].is_static || used[i]) continue;
+        const double c = std::cos(robot_yaw), s = std::sin(robot_yaw);
+        const double bx = c * candidates[i].x + s * candidates[i].y;
+        const double by = -s * candidates[i].x + c * candidates[i].y;
+        const double angle = std::atan2(by, -bx);
+        const int bin = std::clamp(static_cast<int>((angle / M_PI + 0.5) * 16), 0, 15);
+        if (bin == sector && (best < 0 || candidates[i].range < candidates[best].range)) best = i;
+      }
+      if (best >= 0) { selected[selected_count++] = candidates[best]; used[best] = true; }
+    }
+    for (int i = 0; i < candidate_count && selected_count < 16; ++i) {
+      if (candidates[i].is_static && !used[i]) { selected[selected_count++] = candidates[i]; used[i] = true; }
+    }
+    int front_count = 0;
+    for (int i = 0; i < candidate_count && front_count < 48 && selected_count < kMaxPoints; ++i) {
+      if (!candidates[i].is_static) { selected[selected_count++] = candidates[i]; used[i] = true; ++front_count; }
+    }
+    for (int i = 0; i < candidate_count && selected_count < kMaxPoints; ++i) {
+      if (!used[i]) selected[selected_count++] = candidates[i];
+    }
     return true;
   }
 
@@ -339,7 +370,7 @@ class CbfControlNode final : public rclcpp::Node {
     }
     if (healthy) {
       healthy = select_points(
-        scan->scan, scan->robot_xy_m[0], scan->robot_xy_m[1], dynamic_active ? dynamic.get() : nullptr,
+        scan->scan, scan->robot_xy_m[0], scan->robot_xy_m[1], yaw, dynamic_active ? dynamic.get() : nullptr,
         selected, selected_count, candidates, candidate_count, front_candidate_count, static_candidate_count);
       if (!healthy) fallback_reason = "malformed_scan";
     }
@@ -711,6 +742,7 @@ class CbfControlNode final : public rclcpp::Node {
   };
 
   std::string active_session_;
+  bool rear_quota_{};
   Config config_;
   CbfQp qp_;
   rclcpp::CallbackGroup::SharedPtr io_group_, control_group_, debug_group_;
