@@ -270,7 +270,10 @@ def _make_runtime_nodes(context, mode: str):
              parameters=[cbf_config, {"global_frame": corrected_map_frame, "map_rear_obstacles": map_obstacles}],
              condition=IfCondition(LaunchConfiguration("cbf"))),
         *([Node(package="go2_dds_ros2_bridge", executable="cbf_map_obstacles",
-                name="cbf_map_obstacles", output="screen", parameters=[
+                name="cbf_map_obstacles", output="screen",
+                # Small repeated NumPy matrix operations otherwise wake the full OpenBLAS pool.
+                additional_env={"OPENBLAS_NUM_THREADS": "1"},
+                parameters=[
                     LaunchConfiguration("cbf_map_obstacles_config"), {"map_path": map_path},
                 ])]
           if map_obstacles else []),
@@ -390,8 +393,8 @@ def generate_launch_description(mode: str = "odometry") -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "occupancy",
-                default_value="true",
-                description="Launch the legacy rolling 2D occupancy mapper on /cloud_registered.",
+                default_value="false",
+                description="Launch the legacy rolling 2D occupancy mapper on /cloud_registered (disabled by default).",
             ),
             DeclareLaunchArgument(
                 "occupancy_config",
@@ -402,8 +405,8 @@ def generate_launch_description(mode: str = "odometry") -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "occupancy_scan",
-                default_value="true",
-                description="Launch the legacy occupancy ray-cast LaserScan node.",
+                default_value="false",
+                description="Launch the legacy occupancy ray-cast LaserScan node (disabled by default).",
             ),
             DeclareLaunchArgument(
                 "occupancy_scan_config",

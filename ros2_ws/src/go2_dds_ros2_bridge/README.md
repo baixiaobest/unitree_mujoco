@@ -44,6 +44,10 @@ ros2 launch go2_dds_ros2_bridge fast_lio_localization.launch.py \
   run_mode:=hardware navigation:=false cbf:=false rviz:=true
 ```
 
+The legacy `occupancy_2d` and `occupancy_scan` nodes are disabled by default
+in all three launch modes. To use either one, pass `occupancy:=true` or
+`occupancy_scan:=true` to the launch command.
+
 The default map is `~/.local/share/go2_fast_lio/maps/map.pcd`. Pass
 `map_path:=/absolute/path/to/map.pcd` to the mapping or localization launch
 to use another file. For localization, set the initial pose near the robot's

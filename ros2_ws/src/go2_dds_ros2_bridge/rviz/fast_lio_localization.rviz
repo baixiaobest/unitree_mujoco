@@ -6,6 +6,8 @@ Panels:
       Expanded:
         - /Global Options1
         - /Status1
+        - /TF1
+        - /TF1/Frames1
         - /Odometry1/Shape1
         - /CBF Selected Points1/Topic1
         - /CBF Velocity Predictions1/Namespaces1
@@ -35,6 +37,7 @@ Visualization Manager:
     - Alpha: 1
       Class: rviz_default_plugins/RobotModel
       Collision Enabled: false
+      Description File: ""
       Description Source: Topic
       Description Topic:
         Depth: 5
@@ -43,27 +46,236 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /robot_description
       Enabled: true
+      Links:
+        All Links Enabled: true
+        Expand Joint Details: false
+        Expand Link Details: false
+        Expand Tree: false
+        FL_calf:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        FL_calflower:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        FL_calflower1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        FL_foot:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        FL_hip:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        FL_thigh:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        FR_calf:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        FR_calflower:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        FR_calflower1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        FR_foot:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        FR_hip:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        FR_thigh:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        Head_lower:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        Head_upper:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        Link Tree Style: Links in Alphabetic Order
+        RL_calf:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RL_calflower:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RL_calflower1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RL_foot:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RL_hip:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RL_thigh:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RR_calf:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RR_calflower:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RR_calflower1:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RR_foot:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RR_hip:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        RR_thigh:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        imu:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        radar:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+      Mass Properties:
+        Inertia: false
+        Mass: false
       Name: Go2 Robot
       TF Prefix: ""
       Update Interval: 0
+      Value: true
       Visual Enabled: true
     - Class: rviz_default_plugins/TF
       Enabled: true
       Frame Timeout: 15
       Frames:
-        All Enabled: true
+        All Enabled: false
+        FL_calf:
+          Value: false
+        FL_calflower:
+          Value: false
+        FL_calflower1:
+          Value: false
+        FL_foot:
+          Value: false
+        FL_hip:
+          Value: false
+        FL_thigh:
+          Value: false
+        FR_calf:
+          Value: false
+        FR_calflower:
+          Value: false
+        FR_calflower1:
+          Value: false
+        FR_foot:
+          Value: false
+        FR_hip:
+          Value: false
+        FR_thigh:
+          Value: false
+        Head_lower:
+          Value: false
+        Head_upper:
+          Value: false
+        RL_calf:
+          Value: false
+        RL_calflower:
+          Value: false
+        RL_calflower1:
+          Value: false
+        RL_foot:
+          Value: false
+        RL_hip:
+          Value: false
+        RL_thigh:
+          Value: false
+        RR_calf:
+          Value: false
+        RR_calflower:
+          Value: false
+        RR_calflower1:
+          Value: false
+        RR_foot:
+          Value: false
+        RR_hip:
+          Value: false
+        RR_thigh:
+          Value: false
         base_link:
-          Value: true
+          Value: false
         body:
           Value: true
         camera_init:
-          Value: true
+          Value: false
         cbf_world:
-          Value: true
+          Value: false
+        imu:
+          Value: false
         map:
           Value: true
+        radar:
+          Value: false
         utlidar_lidar:
-          Value: true
+          Value: false
       Marker Scale: 1
       Name: TF
       Show Arrows: true
@@ -74,6 +286,45 @@ Visualization Manager:
           camera_init:
             body:
               base_link:
+                FL_hip:
+                  FL_thigh:
+                    FL_calf:
+                      FL_calflower:
+                        FL_calflower1:
+                          {}
+                      FL_foot:
+                        {}
+                FR_hip:
+                  FR_thigh:
+                    FR_calf:
+                      FR_calflower:
+                        FR_calflower1:
+                          {}
+                      FR_foot:
+                        {}
+                Head_upper:
+                  Head_lower:
+                    {}
+                RL_hip:
+                  RL_thigh:
+                    RL_calf:
+                      RL_calflower:
+                        RL_calflower1:
+                          {}
+                      RL_foot:
+                        {}
+                RR_hip:
+                  RR_thigh:
+                    RR_calf:
+                      RR_calflower:
+                        RR_calflower1:
+                          {}
+                      RR_foot:
+                        {}
+                imu:
+                  {}
+                radar:
+                  {}
                 utlidar_lidar:
                   {}
             cbf_world:
@@ -97,7 +348,7 @@ Visualization Manager:
           Scale: 1
           Value: true
         Value: true
-      Enabled: true
+      Enabled: false
       Keep: 1
       Name: Odometry
       Position Tolerance: 0.009999999776482582
@@ -118,7 +369,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /Odometry
-      Value: true
+      Value: false
     - Alpha: 1
       Buffer Length: 1
       Class: rviz_default_plugins/Path
@@ -568,25 +819,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 5.778561592102051
+      Distance: 2.6621885299682617
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -1.337110161781311
-        Y: 0.1884349137544632
-        Z: 0.18578000366687775
+        X: 0.4707024395465851
+        Y: -0.02608456462621689
+        Z: -0.0774238258600235
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.8347963094711304
+      Pitch: 0.9397965669631958
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz_default_plugins)
-      Yaw: 1.8031121492385864
+      Yaw: 1.781305193901062
     Saved: ~
 Window Geometry:
   Displays:
@@ -604,5 +855,5 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1561
-  X: 298
-  Y: 82
+  X: 299
+  Y: 81
