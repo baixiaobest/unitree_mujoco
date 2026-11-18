@@ -67,6 +67,12 @@ def _make_runtime_nodes(context, mode: str):
     map_path = LaunchConfiguration("map_path").perform(context).strip() if mode != "odometry" else ""
     checkpoint_map_path = LaunchConfiguration("checkpoint_map_path").perform(context).strip() if mode == "mapping" else ""
     checkpoint_mapping = bool(checkpoint_map_path)
+    imu_time_offset = 0.0
+    if localization or checkpoint_mapping:
+        fast_lio_parameters = yaml.safe_load(Path(fast_lio_config).read_text())["/**"]["ros__parameters"]
+        imu_time_offset = float(fast_lio_parameters.get("common", {}).get(
+            "time_offset_lidar_to_imu", fast_lio_parameters.get("common.time_offset_lidar_to_imu", 0.0)
+        ))
     if checkpoint_mapping:
         checkpoint = Path(checkpoint_map_path).expanduser().resolve()
         if not checkpoint.is_file():
@@ -116,6 +122,12 @@ def _make_runtime_nodes(context, mode: str):
                     "checkpoint_mapping": checkpoint_mapping,
                     "map_frame_id": "map", "pcl_type": "pointcloud2",
                     "fitness_score_thre": 0.2, "converged_count_thre": 5,
+                    "scan_stack_size": 5,
+                    "scan_stack_max_duration_sec": 0.8,
+                    "scan_stack_max_rotation_deg": 3.0,
+                    "scan_stack_max_accel_rms_m_s2": 0.8,
+                    "imu_topic": imu_topic,
+                    "imu_time_offset_lidar_to_imu": imu_time_offset,
                     "max_correspondence_distance": 1.0,
                     "lidar_in_imu_translation": [float(value) for value in extrinsic_translation],
                     "lidar_in_imu_rotation": flatten_rotation_matrix(extrinsic_rotation),
@@ -314,7 +326,7 @@ def generate_launch_description(mode: str = "odometry") -> LaunchDescription:
         ))
     if mode == "localization":
         mode_arguments.append(DeclareLaunchArgument(
-            "cbf_map_obstacles", default_value="false",
+            "cbf_map_obstacles", default_value="true",
             description="Use ground-filtered rear obstacles from the localization PCD in CBF.",
         ))
         mode_arguments.append(DeclareLaunchArgument(

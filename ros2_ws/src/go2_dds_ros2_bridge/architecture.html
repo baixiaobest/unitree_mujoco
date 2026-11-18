@@ -84,24 +84,36 @@
   <header>
     <p class="eyebrow">GO2 · ROS2 · FAST-LIO</p>
     <h1>Navigation and CBF architecture</h1>
-    <p class="intro">A single launch connects the robot or simulator to mapping, a four-frame LiDAR navigation policy, and an optional world-frame CBF. With CBF enabled, navigation proposes a velocity and the CBF publishes the robot command.</p>
+    <p class="intro">The mapping and localization launches connect the robot or simulator to FAST-LIO, a four-frame LiDAR navigation policy, and an optional world-frame CBF. With CBF enabled, navigation proposes a velocity and the CBF publishes the robot command.</p>
   </header>
 
   <section class="section" aria-labelledby="overview">
     <p class="kicker">01 · Mapping foundation</p>
-    <h2 id="overview">From DDS to a localized robot</h2>
-    <p>Hardware and <code>simulate_python</code> use the same DDS bridge. FAST-LIO provides odometry and the map frame used by navigation and CBF.</p>
+    <h2 id="overview">From DDS to a map-frame pose</h2>
+    <p>Hardware and <code>simulate_python</code> use the same DDS bridge. FAST-LIO builds a PCD in mapping mode or tracks a saved PCD in localization mode.</p>
+    <p class="label">Build a map</p>
     <p class="scroll-hint">Swipe the diagram to follow the flow →</p>
-    <div class="flow" role="img" aria-label="GO2 or simulator DDS data flows through ROS bridges to FAST-LIO and a corrected map frame">
+    <div class="flow" role="img" aria-label="GO2 or simulator DDS data flows through ROS bridges to FAST-LIO mapping and a saved PCD map">
       <div class="node"><strong>GO2 or simulator</strong><small>DDS LiDAR, IMU, and robot state</small></div>
       <div class="edge">DDS</div>
       <div class="node"><strong>ROS bridges</strong><small>Corrected cloud and IMU topics</small></div>
       <div class="edge">cloud + IMU</div>
-      <div class="node"><strong>FAST-LIO</strong><small>Odometry and registered cloud</small></div>
-      <div class="edge">pose + TF</div>
-      <div class="node output"><strong>Corrected map frame</strong><small><code>camera_init_correct</code> for goals and visualization</small></div>
+      <div class="node"><strong>fastlio_mapping</strong><small>Odometry, registered cloud, and map</small></div>
+      <div class="edge">/map_save</div>
+      <div class="node output"><strong>PCD map</strong><small><code>map_path</code> for later localization</small></div>
     </div>
-    <p>Frame correction levels FAST-LIO's <code>camera_init</code> under <code>camera_init_correct</code>. The CBF also uses a fixed, leveled <code>cbf_world</code> frame for its calculations.</p>
+    <p>In fresh mapping, <code>fast_lio_frame_correction</code> levels <code>camera_init</code> under <code>camera_init_correct</code>. To extend a saved map, set <code>checkpoint_map_path</code>; ICP aligns the robot before FAST-LIO appends and saves to a separate PCD.</p>
+    <p class="label">Localize in a saved map</p>
+    <div class="flow" role="img" aria-label="Saved PCD, initial pose, and corrected LiDAR feed ICP alignment, which initializes FAST-LIO localization in the map frame">
+      <div class="node"><strong>PCD + initial pose</strong><small><code>map_path</code> and RViz 2D Pose Estimate</small></div>
+      <div class="edge">PCD + pose</div>
+      <div class="node nav"><strong>icp_node</strong><small>Align corrected LiDAR to the saved map</small></div>
+      <div class="edge">/icp_result</div>
+      <div class="node"><strong>fastlio_mapping</strong><small>Track pose against the prior map</small></div>
+      <div class="edge">odom + TF</div>
+      <div class="node output"><strong>map frame</strong><small>Pose for navigation and CBF</small></div>
+    </div>
+    <p>Localization waits for an accepted ICP match; a new 2D Pose Estimate realigns it. The CBF uses the selected map frame for its world snapshot.</p>
   </section>
 
   <section class="section" aria-labelledby="navigation">
@@ -143,6 +155,15 @@
       <div class="edge">/cbf/dynamic_snapshot</div>
       <div class="node cbf"><strong>cbf_control</strong><small>Use moving front points; keep side/rear returns static</small></div>
     </div>
+    <p class="label">Optional mapped rear obstacles</p>
+    <div class="flow" role="img" aria-label="Saved localization map feeds filtered rear obstacles into the CBF world snapshot">
+      <div class="node"><strong>Saved PCD</strong><small>Localization map</small></div>
+      <div class="edge">map points</div>
+      <div class="node cbf"><strong>cbf_map_obstacles</strong><small>Ground-filtered nearby rear points</small></div>
+      <div class="edge">/cbf/map_rear_obstacles</div>
+      <div class="node nav"><strong>cbf_world_state</strong><small>Merge mapped rear points with live LiDAR</small></div>
+    </div>
+    <p>This branch is enabled by default when CBF runs in localization mode; set <code>cbf_map_obstacles:=false</code> to disable it.</p>
 
     <div class="split">
       <div class="callout static"><h3>Static mode</h3><p><code>cbf_mode: static</code> uses the world scan with zero obstacle velocity. The predictor node is idle.</p></div>
@@ -160,10 +181,13 @@
       <thead><tr><th>Node</th><th>Main output</th><th>Purpose</th></tr></thead>
       <tbody>
         <tr><td>clock_offset_bridge / imu_bridge</td><td>Corrected cloud / IMU</td><td>Move DDS sensor data into ROS time and topics.</td></tr>
-        <tr><td>fastlio_mapping / frame correction</td><td>Odometry, TF, registered cloud</td><td>Localize the robot and establish the corrected map frame.</td></tr>
+        <tr><td>fastlio_mapping</td><td>Odometry, TF, registered cloud, <code>/map_save</code></td><td>Build a PCD or track a saved map after ICP alignment.</td></tr>
+        <tr><td>fast_lio_frame_correction</td><td><code>camera_init_correct</code> TF</td><td>Level the frame during fresh mapping.</td></tr>
+        <tr><td>icp_node</td><td><code>/icp_result</code></td><td>Align scans to a saved map in localization or resumed mapping.</td></tr>
         <tr><td>temporal_lidar</td><td><code>/temporal_lidar/observation</code>, <code>/cbf/scan_xyz</code></td><td>Prepare policy history and measured CBF rays from the same scans.</td></tr>
         <tr><td>navigation</td><td><code>/policy_vel</code>, goal-region flag</td><td>Run the JIT navigation policy and propose a target velocity.</td></tr>
-        <tr><td>cbf_world_state</td><td><code>/cbf/world_scan</code>, <code>/cbf/snapshot</code></td><td>Align scans, pose, and measured velocity in <code>cbf_world</code>.</td></tr>
+        <tr><td>cbf_world_state</td><td><code>/cbf/world_scan</code>, <code>/cbf/snapshot</code></td><td>Align scans, pose, and measured velocity in the selected map frame.</td></tr>
+        <tr><td>cbf_map_obstacles</td><td><code>/cbf/map_rear_obstacles</code></td><td>Optionally supply mapped rear points during localization.</td></tr>
         <tr><td>cbf_velocity_predictor</td><td><code>/cbf/dynamic_snapshot</code></td><td>Predict front obstacle velocities when dynamic mode is selected.</td></tr>
         <tr><td>cbf_control</td><td><code>/cmd_vel</code>, <code>/cbf/status</code></td><td>Filter navigation targets; publish the final command when CBF is enabled.</td></tr>
       </tbody>
@@ -171,7 +195,7 @@
     <p style="margin-top:16px;">Optional <code>occupancy_2d</code> and <code>occupancy_scan</code> nodes serve mapping and LaserScan tools. The current navigation policy reads temporal LiDAR, not <code>/occupancy_scan</code>.</p>
   </section>
 
-  <footer>Source of truth: <code>launch/fast_lio.launch.py</code>, <code>config/cbf_control.yaml</code>, and the node implementations in this ROS workspace.</footer>
+  <footer>Source of truth: <code>launch/fast_lio_mapping.launch.py</code>, <code>launch/fast_lio_localization.launch.py</code>, <code>config/cbf_control.yaml</code>, and the node implementations in this ROS workspace.</footer>
 </main>
 </body>
 </html>
