@@ -17,6 +17,18 @@ def test_floor_and_rear_rejects_ground_and_front():
     np.testing.assert_allclose(candidates[0], rear[0])
 
 
+def test_lidar_centered_rear_includes_near_side_ahead_of_base():
+    xs, ys = np.meshgrid(np.linspace(-2, 2, 41), np.linspace(-2, 2, 41))
+    floor = np.column_stack((xs.ravel(), ys.ravel(), np.full(xs.size, -0.3)))
+    side = np.array([[0.15, 0.5, 0.2]])
+    ahead_of_lidar = np.array([[0.5, 0.5, 0.2]])
+    _, candidates, _, _, _ = floor_and_rear(
+        np.vstack((floor, side, ahead_of_lidar)), min_support_points=1,
+        lidar_origin_xy=(0.3183, 0.00482),
+    )
+    np.testing.assert_allclose(candidates, side)
+
+
 def test_no_floor_does_not_make_obstacles():
     wall = np.column_stack((np.full(80, -1.0), np.linspace(-1, 1, 80), np.linspace(0, 1, 80)))
     assert floor_and_rear(wall) is None

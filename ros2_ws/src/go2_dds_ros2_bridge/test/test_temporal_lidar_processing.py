@@ -7,6 +7,7 @@ from go2_dds_ros2_bridge.temporal_lidar_processing import (
     CompletedScanHistory,
     cbf_bins_from_capture,
     cbf_static_bins_from_points,
+    cbf_xyz_bins,
     deskew_points_to_reference_base,
     FOV_BINS,
     MAX_DISTANCE_M,
@@ -166,6 +167,21 @@ def test_static_cbf_bins_keep_only_real_side_and_rear_returns():
     assert np.allclose(static_points[1], (-1.0, 1.0))
     assert np.allclose(static_points[2], (-1.0, 0.0))
     assert np.allclose(static_points[3], (-1.0, -1.0))
+
+
+def test_lidar_centered_static_bins_include_base_front_side_strip():
+    points = np.array(((0.15, 0.5, 0.3), (0.5, 0.5, 0.3)))
+    static_points, hits = cbf_static_bins_from_points(
+        points, static_bins=4, range_percentile=0.0, lidar_origin_xy=(0.3183, 0.00482)
+    )
+    assert hits.sum() == 1
+    np.testing.assert_allclose(static_points[hits.astype(bool)][0], points[0, :2])
+    _, _, static_xyz, xyz_hits = cbf_xyz_bins(
+        np.zeros((128, 3)), np.zeros(128, dtype=np.uint8), points,
+        lidar_origin_xy=(0.3183, 0.00482),
+    )
+    assert xyz_hits.sum() == 1
+    np.testing.assert_allclose(static_xyz[xyz_hits.astype(bool)][0], points[0])
 
 
 def test_empty_cloud_produces_invalid_max_range_bins():

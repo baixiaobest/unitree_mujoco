@@ -22,7 +22,7 @@ cbf_control:
     # Obstacle geometry. d_margin_m is the center-to-obstacle clearance to
     # tune first; d_cbf_active_m is the range at which obstacles enter the CBF.
     # The fixed-size solver requires max_lidar_points to remain 64.
-    d_margin_m: 0.15
+    d_margin_m: 0.3
     d_cbf_active_m: 8.0
     max_lidar_points: 64
 

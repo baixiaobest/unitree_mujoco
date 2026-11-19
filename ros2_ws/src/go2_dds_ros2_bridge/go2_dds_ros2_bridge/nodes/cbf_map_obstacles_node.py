@@ -12,7 +12,7 @@ from sensor_msgs.msg import PointCloud2, PointField
 from visualization_msgs.msg import Marker, MarkerArray
 from tf2_ros import Buffer, TransformListener, TransformException
 from go2_dds_ros2_bridge.cbf_map import load_pcd_xyz, floor_and_rear, voxel_downsample
-from go2_dds_ros2_bridge.tf_utils import rotation_matrix_from_quaternion_xyzw
+from go2_dds_ros2_bridge.tf_utils import DEFAULT_LIDAR_TF_XYZ, rotation_matrix_from_quaternion_xyzw
 
 
 def stamp_ns(stamp):
@@ -187,6 +187,7 @@ class CbfMapObstacles(Node):
             floor_tolerance=self.floor_tolerance_m,
             support_radius_m=float(self.get_parameter('support_radius_m').value),
             min_support_points=int(self.get_parameter('min_support_points').value),
+            lidar_origin_xy=DEFAULT_LIDAR_TF_XYZ[:2],
         )
         if result is None:
             self.publish_cloud(np.empty((0, 3)), now.to_msg())

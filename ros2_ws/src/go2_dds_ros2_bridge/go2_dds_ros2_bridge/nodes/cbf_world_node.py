@@ -18,7 +18,7 @@ from std_srvs.srv import Trigger
 from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster, TransformException
 from go2_dds_ros2_bridge_msgs.msg import CbfScan3D, CbfWorldScan, CbfControlSnapshot
 from go2_dds_ros2_bridge.cbf_world import pose_at, aligned_state, world_points
-from go2_dds_ros2_bridge.tf_utils import rotation_matrix_from_quaternion_xyzw, quaternion_from_rotation_matrix
+from go2_dds_ros2_bridge.tf_utils import DEFAULT_LIDAR_TF_XYZ, rotation_matrix_from_quaternion_xyzw, quaternion_from_rotation_matrix
 
 
 def ns(stamp):
@@ -84,14 +84,16 @@ class CbfWorldNode(Node):
             return scan
         merged = deepcopy(scan)
         c, s = math.cos(yaw), math.sin(yaw)
+        lidar_x = robot_xy[0] + c * DEFAULT_LIDAR_TF_XYZ[0] - s * DEFAULT_LIDAR_TF_XYZ[1]
+        lidar_y = robot_xy[1] + s * DEFAULT_LIDAR_TF_XYZ[0] + c * DEFAULT_LIDAR_TF_XYZ[1]
         for point in points:
-            dx, dy = point[0] - robot_xy[0], point[1] - robot_xy[1]
+            dx, dy = point[0] - lidar_x, point[1] - lidar_y
             x, y = c * dx + s * dy, -s * dx + c * dy
             if x >= 0:
                 continue
             index = min(63, max(0, int((math.atan2(y, -x) / math.pi + 0.5) * 64)))
             old_x, old_y = merged.static_points_xy_m[2 * index:2 * index + 2]
-            if not merged.static_hits[index] or dx * dx + dy * dy < (old_x - robot_xy[0]) ** 2 + (old_y - robot_xy[1]) ** 2:
+            if not merged.static_hits[index] or dx * dx + dy * dy < (old_x - lidar_x) ** 2 + (old_y - lidar_y) ** 2:
                 merged.static_points_xy_m[2 * index:2 * index + 2] = [float(point[0]), float(point[1])]
                 merged.static_hits[index] = 1
         return merged

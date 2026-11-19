@@ -48,7 +48,7 @@ from go2_dds_ros2_bridge.temporal_lidar_processing import (
     reduce_front_capture_rays,
     upsample_polar_bins,
 )
-from go2_dds_ros2_bridge.tf_utils import rotation_matrix_from_quaternion_xyzw
+from go2_dds_ros2_bridge.tf_utils import DEFAULT_LIDAR_TF_XYZ, rotation_matrix_from_quaternion_xyzw
 from go2_dds_ros2_bridge.pose_prediction import (
     propagate_base_pose, newest_sample_at, claim_pair_once, bounded_prediction_seconds,
 )
@@ -684,6 +684,7 @@ class TemporalLidarNode(Node):
             static_bins=CBF_STATIC_BINS,
             front_fov_degrees=self._config.capture_fov_deg,
             range_percentile=self._config.capture_return_percentile,
+            lidar_origin_xy=DEFAULT_LIDAR_TF_XYZ[:2],
         )
         message = CbfScan()
         message.header.stamp = Time(nanoseconds=completed.stamp_ns).to_msg()
@@ -698,7 +699,7 @@ class TemporalLidarNode(Node):
         self._cbf_scan_publisher.publish(message)
         front, hits, rear, rear_hits = cbf_xyz_bins(
             completed.endpoints_base_m, completed.ray_states, completed.static_points_base_m,
-            percentile=self._config.capture_return_percentile)
+            percentile=self._config.capture_return_percentile, lidar_origin_xy=DEFAULT_LIDAR_TF_XYZ[:2])
         raw = CbfScan3D()
         raw.header = message.header
         raw.scan_start = message.scan_start
