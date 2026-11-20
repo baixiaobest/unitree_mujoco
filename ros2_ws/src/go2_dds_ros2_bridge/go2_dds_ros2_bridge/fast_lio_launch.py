@@ -214,6 +214,7 @@ def _make_runtime_nodes(context, mode: str):
                     "locate_in_prior_map": localization or checkpoint_mapping,
                     "append_to_prior_map": checkpoint_mapping,
                     "mapping.extrinsic_est_en": False,
+                    "publish.match_debug_en": LaunchConfiguration("match_debug").perform(context).lower() in ("true", "1", "yes"),
                     "mapping.extrinsic_T": [float(value) for value in extrinsic_translation],
                     "mapping.extrinsic_R": flatten_rotation_matrix(extrinsic_rotation),
                 },
@@ -343,6 +344,10 @@ def generate_launch_description(mode: str = "odometry") -> LaunchDescription:
                 "run_mode",
                 default_value="hardware",
                 description="Select the default DDS domain/interface pair for the raw bridge nodes.",
+            ),
+            DeclareLaunchArgument(
+                "match_debug", default_value="false",
+                description="Publish per-scan downsampled returns and map correspondences for bag analysis.",
             ),
             DeclareLaunchArgument(
                 "dds_domain_id",

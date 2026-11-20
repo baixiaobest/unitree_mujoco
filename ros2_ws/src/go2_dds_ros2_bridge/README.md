@@ -57,6 +57,60 @@ pose before matching scans; FAST-LIO waits for ICP to initialize. Send another
 On an accepted new match, FAST-LIO resets its filter and IMU initialization.
 Keep the robot still until localized odometry resumes.
 
+### Inspect FAST-LIO scan matches in a bag
+
+Enable the optional per-scan correspondence topic when launching localization:
+
+```bash
+ros2 launch go2_dds_ros2_bridge fast_lio_localization.launch.py \
+  run_mode:=hardware navigation:=false cbf:=false map_path:=/absolute/path/to/map.pcd \
+  match_debug:=true
+```
+
+In another sourced terminal, record the estimator, body IMU, and map alignment:
+
+```bash
+ros2 bag record /Odometry /fast_lio/estimator_diagnostics /fast_lio/match_debug \
+  /imu/data_fastlio_raw /tf /tf_static
+```
+
+ROS 2 creates the bag folder in that terminal's current working directory.
+Run `pwd` there to locate it. Relative `BAG_DIR` paths passed to the analyzer
+are resolved from the analyzer terminal's current working directory.
+
+Start the local Plotly viewer. It opens a browser page and fetches each 3D scan
+when selected; it does not generate an HTML file. The **3D scan match** tab is
+available whenever the bag contains `/fast_lio/match_debug` and the map TF.
+Click **Reference PCD** in that tab to load the same localization map used by
+`map_path`, enter its path in **Or enter PCD path** (useful for hidden `~/.local`
+folders), or pass `--map-pcd` to preload it. The map is in the `map` frame;
+recorded `/tf` places each scan in that frame. Select a scan and click a
+matched return, or enter its match number, to query its five map neighbors and
+association lines. The selected return and its association appear in the main
+3D map.
+
+Run the analyzer without a bag argument to open a file-picker window. Use
+**Browse** to select the bag folder and optionally preload a reference PCD:
+
+```bash
+python3 src/go2_dds_ros2_bridge/scripts/analyze_fast_lio_bag.py
+```
+
+The command-line form remains available:
+
+```bash
+python3 src/go2_dds_ros2_bridge/scripts/analyze_fast_lio_bag.py BAG_DIR \
+  --map-pcd /absolute/path/to/map.pcd
+```
+
+The server prints a `http://127.0.0.1:.../` URL. Press Ctrl+C in its terminal to
+stop it. Use `--no-open` if you want to open the URL yourself.
+
+The debug topic is absent by default. It records all downsampled returns and
+accepted correspondences for every processed scan, so bag size increases when
+`match_debug:=true`. `--map-point-limit` controls only how many reference-map
+points the browser displays; it does not change the bag data.
+
 Localization includes mapped obstacles behind the LiDAR origin in CBF by default when `cbf:=true`.
 Pass `cbf_map_obstacles:=false` to disable them. RViz's
 **CBF Map Floor** and **CBF Map Rear Obstacles** displays show the fitted local
