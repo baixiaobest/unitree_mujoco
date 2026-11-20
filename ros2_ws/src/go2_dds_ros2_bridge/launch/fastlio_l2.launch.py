@@ -2,6 +2,7 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -25,6 +26,9 @@ def _nodes(context):
                          ("/Laser_map", "/fastlio_l2/laser_map")]),
         Node(package="go2_dds_ros2_bridge", executable="fastlio_l2_frames", name="fastlio_l2_frames",
              output="screen"),
+        Node(package="rviz2", executable="rviz2", name="fastlio_l2_rviz", output="screen",
+             arguments=["-d", LaunchConfiguration("rviz_config")],
+             condition=IfCondition(LaunchConfiguration("rviz"))),
     ]
 
 
@@ -32,6 +36,9 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("dds_domain_id", default_value=str(DEFAULT_HARDWARE_DDS_RUNTIME.domain_id)),
         DeclareLaunchArgument("dds_interface", default_value=DEFAULT_HARDWARE_DDS_RUNTIME.interface),
+        DeclareLaunchArgument("rviz", default_value="true"),
+        DeclareLaunchArgument("rviz_config", default_value=PathJoinSubstitution([
+            FindPackageShare("go2_dds_ros2_bridge"), "rviz", "fastlio_l2.rviz"])),
         DeclareLaunchArgument("config", default_value=PathJoinSubstitution([
             FindPackageShare("go2_dds_ros2_bridge"), "config", "fastlio_l2.yaml"])),
         OpaqueFunction(function=_nodes),

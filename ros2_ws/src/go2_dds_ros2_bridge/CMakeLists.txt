@@ -6,6 +6,8 @@ find_package(ament_cmake_python REQUIRED)
 find_package(go2_dds_ros2_bridge_msgs REQUIRED)
 
 ament_python_install_package(${PROJECT_NAME})
+install(PROGRAMS scripts/analyze_fast_lio_bag.py
+  DESTINATION lib/${PROJECT_NAME} RENAME analyze_fast_lio_bag)
 install(PROGRAMS go2_dds_ros2_bridge/nodes/cbf_world_node.py DESTINATION lib/${PROJECT_NAME} RENAME cbf_world_state)
 install(PROGRAMS go2_dds_ros2_bridge/nodes/cbf_map_obstacles_node.py DESTINATION lib/${PROJECT_NAME} RENAME cbf_map_obstacles)
 install(PROGRAMS go2_dds_ros2_bridge/nodes/cbf_velocity_predictor_node.py DESTINATION lib/${PROJECT_NAME} RENAME cbf_velocity_predictor)

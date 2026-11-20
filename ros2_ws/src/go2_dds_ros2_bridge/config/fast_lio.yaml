@@ -21,7 +21,7 @@
             # timestamp_unit from the launch file rather than editing bridge code.
             lidar_type: 2
             scan_line: 32
-            scan_rate: 7
+            scan_rate: 15
             timestamp_unit: 0
             blind: 1.0
 
