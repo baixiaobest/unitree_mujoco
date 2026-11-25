@@ -71,10 +71,18 @@ In another sourced terminal, record the estimator, body IMU, and map alignment:
 
 ```bash
 ros2 bag record /Odometry /fast_lio/estimator_diagnostics /fast_lio/pose_information /fast_lio/match_debug \
-  /imu/data_fastlio_raw /tf /tf_static
+  /imu/data_fastlio_raw /odom /estimated_velocity /tf /tf_static
 ```
 
 ROS 2 creates the bag folder in that terminal's current working directory.
+Start the raw DDS odometry bridge in another sourced terminal before recording
+`/odom` and `/estimated_velocity`:
+
+```bash
+ros2 run go2_dds_ros2_bridge odom_bridge --run-mode hardware
+```
+
+The locomotion controller publishes the underlying DDS odometry and velocity.
 Run `pwd` there to locate it. Relative `BAG_DIR` paths passed to the analyzer
 are resolved from the analyzer terminal's current working directory.
 
@@ -89,20 +97,32 @@ matched return, or enter its match number, to query its five map neighbors and
 association lines. The selected return and its association appear in the main
 3D map.
 
-The analyzer groups time series in Pose, LiDAR matching, Constraints, and Body IMU
-tabs. Each tab loads once and retains its plots and per-plot smoothing settings.
-New bags with `/fast_lio/pose_information` show position-only, rotation-only,
-and coupled pose eigenvalues in Constraints. The compact message records the
+The analyzer groups time series in Pose, LiDAR matching, Constraints, Body IMU,
+and Learned odometry tabs. Each tab loads once and retains its plots and
+per-plot smoothing settings. Hover over a time-series plot to show the nearest
+sample at the same time on the other visible plots in that tab.
+The Pose tab compares per-scan IMU-predicted position and rotation changes
+with the existing LiDAR corrections. The position prediction is reconstructed
+from `/Odometry` and the logged LiDAR position correction; the rotation plot
+uses a pre-update orientation added to `EstimatorDiagnostics`. Older bags
+still show the position prediction when both required topics were recorded.
+New bags with `/fast_lio/pose_information` show rotation-only and coupled pose
+eigenvalues in Constraints. The compact message records the
 upper triangle of the 6×6 LiDAR pose information matrix; its columns are world
 position xyz followed by IMU-frame rotation xyz. The coupled plot uses a stated
-1 m rotation lever arm. Position and rotation plots include raw and per-match
-views. With `MatchDebug` normals, the analyzer also shows the original raw and
-normalized translation-constraint plots.
+1 m rotation lever arm. Rotation plots include raw and per-match views. With
+`MatchDebug` normals, the analyzer also shows raw and normalized translation
+constraint plots. The position-only information plot is omitted because it
+duplicates the translation constraint plot apart from measurement-noise scaling.
 The 3D tab can show the corresponding axes at the robot position; uncheck
 **Translation constraint axes** to hide them or change **Axis scale** to adjust
 their length. The axes are drawn in both directions because eigenvector sign
 has no physical meaning. Rebuild and source the workspace before recording new
 bags with the updated message definition.
+The 3D tab also shows FAST-LIO and learned-velocity odometry paths from the
+selected scan time onward. It aligns the learned path's position and heading
+to FAST-LIO at that time. Separate controls toggle each path and the rotation
+constraint axes. These paths compare estimates; FAST-LIO is not ground truth.
 Older bags still open. Those without pose information omit the new constraint
 plots; bags without recorded normals also omit the original translation plots
 and 3D axes.

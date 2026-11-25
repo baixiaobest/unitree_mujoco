@@ -13,7 +13,7 @@ current directory. No HTML report file is generated.
 To record a bag while localization runs with match_debug:=true:
     ros2 bag record -o fast_lio_debug_bag \
       /Odometry /fast_lio/estimator_diagnostics /fast_lio/pose_information /fast_lio/match_debug \
-      /imu/data_fastlio_raw /tf /tf_static
+      /imu/data_fastlio_raw /odom /estimated_velocity /tf /tf_static
 
 Press Ctrl+C to finish recording. The IMU topic is the Go2 body IMU.
 """
@@ -39,6 +39,8 @@ BODY_IMU_TOPIC = "/imu/data_fastlio_raw"
 ODOMETRY_TOPIC = "/Odometry"
 MATCH_DEBUG_TOPIC = "/fast_lio/match_debug"
 POSE_INFORMATION_TOPIC = "/fast_lio/pose_information"
+LEARNED_ODOMETRY_TOPIC = "/odom"
+LEARNED_VELOCITY_TOPIC = "/estimated_velocity"
 
 
 def stamp_seconds(stamp):
@@ -70,7 +72,9 @@ def read_bag(bag, diagnostics_topic, imu_topic, odometry_topic, match_debug_topi
                 imu_topic: "sensor_msgs/msg/Imu",
                 odometry_topic: "nav_msgs/msg/Odometry",
                 match_debug_topic: "fast_lio/msg/MatchDebug",
-                POSE_INFORMATION_TOPIC: "fast_lio/msg/PoseInformation"}
+                POSE_INFORMATION_TOPIC: "fast_lio/msg/PoseInformation",
+                LEARNED_ODOMETRY_TOPIC: "nav_msgs/msg/Odometry",
+                LEARNED_VELOCITY_TOPIC: "geometry_msgs/msg/TwistStamped"}
     if diagnostics_topic not in topic_types:
         raise ValueError(f"Missing {diagnostics_topic}; available topics: {', '.join(sorted(topic_types))}")
     for topic, type_name in expected.items():
@@ -78,13 +82,24 @@ def read_bag(bag, diagnostics_topic, imu_topic, odometry_topic, match_debug_topi
             raise ValueError(f"{topic} has unexpected type {topic_types[topic]}")
     selected = [name for name in (*expected, "/tf", "/tf_static") if name in topic_types]
     classes = {name: get_message(topic_types[name]) for name in selected}
+    legacy_diagnostics_class = get_message("fast_lio/msg/EstimatorDiagnosticsLegacy")
+    diagnostics_class = classes[diagnostics_topic]
     legacy_match_class = get_message("fast_lio/msg/MatchDebugLegacy") if match_debug_topic in classes else None
     match_class = classes.get(match_debug_topic)
     messages = {name: [] for name in selected}
     while reader.has_next():
         topic, serialized, _ = reader.read_next()
         if topic in classes:
-            if topic == match_debug_topic:
+            if topic == diagnostics_topic:
+                try:
+                    message = deserialize_message(serialized, diagnostics_class)
+                except Exception:
+                    if diagnostics_class == legacy_diagnostics_class:
+                        raise
+                    diagnostics_class = legacy_diagnostics_class
+                    message = deserialize_message(serialized, legacy_diagnostics_class)
+                messages[topic].append(message)
+            elif topic == match_debug_topic:
                 try:
                     message = deserialize_message(serialized, match_class)
                 except Exception:
@@ -101,7 +116,9 @@ def read_bag(bag, diagnostics_topic, imu_topic, odometry_topic, match_debug_topi
     return (messages[diagnostics_topic], messages.get(imu_topic, []),
             messages.get(odometry_topic, []), messages.get(match_debug_topic, []),
             messages.get("/tf", []) + messages.get("/tf_static", []),
-            messages.get(POSE_INFORMATION_TOPIC, []))
+            messages.get(POSE_INFORMATION_TOPIC, []),
+            messages.get(LEARNED_ODOMETRY_TOPIC, []),
+            messages.get(LEARNED_VELOCITY_TOPIC, []))
 
 
 def read_pcd_xyz(stream):
@@ -167,6 +184,28 @@ def rotation_matrix(q):
                      [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]])
 
 
+def rotation_change(previous_xyzw, predicted_xyzw):
+    """Shortest body-frame rotation vector from the previous pose to the prediction."""
+    previous = np.asarray(previous_xyzw, dtype=np.float64)
+    predicted = np.asarray(predicted_xyzw, dtype=np.float64)
+    if not np.isfinite(previous).all() or not np.isfinite(predicted).all():
+        return None
+    previous_norm, predicted_norm = np.linalg.norm(previous), np.linalg.norm(predicted)
+    if previous_norm < 1e-8 or predicted_norm < 1e-8:
+        return None
+    x, y, z, w = previous / previous_norm
+    a, b, c, d = predicted / predicted_norm
+    # Conjugate(previous) * predicted, with quaternions stored xyzw.
+    vector = np.array([w*a - x*d - y*c + z*b,
+                       w*b + x*c - y*d - z*a,
+                       w*c - x*b + y*a - z*d])
+    scalar = w*d + x*a + y*b + z*c
+    if scalar < 0:
+        vector, scalar = -vector, -scalar
+    length = np.linalg.norm(vector)
+    return vector * (2 * math.atan2(length, scalar) / length) if length > 1e-12 else 2 * vector
+
+
 def transform_points(points, transform):
     return points @ rotation_matrix(transform.rotation).T + np.array(
         [transform.translation.x, transform.translation.y, transform.translation.z])
@@ -208,9 +247,85 @@ def pose_information_matrix(message):
     return matrix
 
 
+def odometry_series(messages):
+    if not messages:
+        return None
+    times = np.array([stamp_seconds(msg.header.stamp) for msg in messages], dtype=np.float64)
+    positions = np.array([[getattr(msg.pose.pose.position, axis) for axis in "xyz"]
+                          for msg in messages], dtype=np.float64)
+    quaternions = np.array([[getattr(msg.pose.pose.orientation, axis) for axis in "wxyz"]
+                            for msg in messages], dtype=np.float64)
+    norms = np.linalg.norm(quaternions, axis=1)
+    if not np.isfinite(positions).all() or not np.isfinite(quaternions).all() or np.any(norms < 1e-8):
+        raise ValueError("Odometry contains invalid poses")
+    return times, positions, quaternions / norms[:, None]
+
+
+def quaternion_matrix(quaternion):
+    w, x, y, z = quaternion
+    return np.array([[1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)],
+                     [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)],
+                     [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]])
+
+
+def interpolated_pose(series, stamp):
+    if series is None:
+        return None
+    times, positions, quaternions = series
+    if stamp < times[0] or stamp > times[-1]:
+        return None
+    right = int(np.searchsorted(times, stamp, side="left"))
+    if right == 0 or times[right] == stamp:
+        return positions[right].copy(), quaternion_matrix(quaternions[right])
+    left = right - 1
+    fraction = (stamp-times[left]) / (times[right]-times[left])
+    position = positions[left] + fraction*(positions[right]-positions[left])
+    q0, q1 = quaternions[left], quaternions[right].copy()
+    dot = float(np.dot(q0, q1))
+    if dot < 0:
+        q1 = -q1
+        dot = -dot
+    if dot > 0.9995:
+        quaternion = q0 + fraction*(q1-q0)
+    else:
+        angle = math.acos(np.clip(dot, -1, 1))
+        quaternion = (math.sin((1-fraction)*angle)*q0 + math.sin(fraction*angle)*q1) / math.sin(angle)
+    quaternion /= np.linalg.norm(quaternion)
+    return position, quaternion_matrix(quaternion)
+
+
+def aligned_paths(fast_series, learned_series, stamp, map_transform, max_points=1200):
+    fast_start = interpolated_pose(fast_series, stamp)
+    if fast_start is None:
+        return None, None, None
+    fast_position, fast_rotation = fast_start
+    map_rotation = rotation_matrix(map_transform.rotation)
+    map_translation = np.array([getattr(map_transform.translation, axis) for axis in "xyz"])
+
+    def sample_path(series, start_position, alignment):
+        times, positions, _ = series
+        end = int(np.searchsorted(times, min(times[-1], fast_series[0][-1]), side="right"))
+        start = int(np.searchsorted(times, stamp, side="right"))
+        indices = np.arange(start, end)
+        if len(indices) > max_points-1:
+            indices = indices[np.unique(np.linspace(0, len(indices)-1, max_points-1, dtype=int))]
+        world = fast_position + (positions[indices]-start_position) @ alignment.T
+        world = np.vstack((fast_position, world))
+        return np.round(world @ map_rotation.T + map_translation, 4).tolist()
+
+    fast_path = sample_path(fast_series, fast_position, np.eye(3))
+    learned_path = None
+    learned_start = interpolated_pose(learned_series, stamp)
+    if learned_start is not None:
+        learned_position, learned_rotation = learned_start
+        learned_path = sample_path(learned_series, learned_position, fast_rotation @ learned_rotation.T)
+    map_pose = fast_position @ map_rotation.T + map_translation
+    return fast_path, learned_path, (map_pose, map_rotation @ fast_rotation)
+
+
 class ViewerData:
     def __init__(self, diagnostics, imu, odometry, matches, tf_messages, map_pcd, map_point_limit,
-                 pose_information=()):
+                 pose_information=(), learned_odometry=(), learned_velocity=()):
         if not diagnostics:
             raise ValueError("Diagnostics topic contains no messages")
         if map_point_limit < 1:
@@ -224,6 +339,11 @@ class ViewerData:
         self.odometry = odometry
         self.odom_times = [stamp_seconds(item.header.stamp) for item in odometry]
         self.pose_information = pose_information
+        self.learned_odometry = learned_odometry
+        self.learned_velocity = learned_velocity
+        self.fast_series = odometry_series(odometry)
+        self.learned_series = odometry_series(learned_odometry)
+        self.information_times = [stamp_seconds(msg.header.stamp) for msg in pose_information]
         self.map_point_limit = map_point_limit
         self.map_points = np.empty((0, 3), dtype=np.float32)
         if map_pcd is not None:
@@ -283,18 +403,24 @@ class ViewerData:
         mask = np.ones(len(points), dtype=bool)
         mask[indices] = False
         stamp = stamp_seconds(scan.header.stamp)
-        nearest = bisect.bisect_left(self.odom_times, stamp)
-        choices = [i for i in (nearest-1, nearest) if 0 <= i < len(self.odometry)]
-        pose = tip = None
-        if choices:
-            index_odom = min(choices, key=lambda i: abs(self.odom_times[i] - stamp))
-            if abs(self.odom_times[index_odom] - stamp) < 0.2:
-                state = self.odometry[index_odom].pose.pose
-                position = state.position
-                pose_xyz = transform_points(np.array([[position.x, position.y, position.z]]), transform)[0]
-                direction = rotation_matrix(transform.rotation) @ rotation_matrix(state.orientation) @ np.array([0.4, 0., 0.])
-                pose = np.round(pose_xyz, 4).tolist()
-                tip = np.round(pose_xyz + direction, 4).tolist()
+        fast_path, learned_path, anchor = aligned_paths(
+            self.fast_series, self.learned_series, stamp, transform)
+        pose = tip = rotation_axes = None
+        if anchor is not None:
+            pose_xyz, map_imu_rotation = anchor
+            pose = np.round(pose_xyz, 4).tolist()
+            tip = np.round(pose_xyz + map_imu_rotation @ np.array([0.4, 0., 0.]), 4).tolist()
+            if self.information_times:
+                nearest = bisect.bisect_left(self.information_times, stamp)
+                choices = [i for i in (nearest-1, nearest) if 0 <= i < len(self.information_times)]
+                if choices:
+                    chosen = min(choices, key=lambda i: abs(self.information_times[i]-stamp))
+                    if abs(self.information_times[chosen]-stamp) < 0.2:
+                        matrix = pose_information_matrix(self.pose_information[chosen])
+                        if matrix is not None:
+                            values, vectors = np.linalg.eigh(matrix[3:6, 3:6])
+                            rotation_axes = {"values": np.maximum(values, 0).round(5).tolist(),
+                                             "vectors": np.round(map_imu_rotation @ vectors, 6).T.tolist()}
         axes = None
         if constraint is not None:
             values, vectors = constraint
@@ -304,6 +430,8 @@ class ViewerData:
                 "matched": np.round(points[indices], 4).tolist(),
                 "unmatched": np.round(points[mask], 4).tolist(),
                 "pose": pose, "pose_tip": tip, "constraints": axes,
+                "rotation_constraints": rotation_axes,
+                "fast_path": fast_path, "learned_path": learned_path,
                 "valid": bool(scan.update_valid)}
 
     def match_payload(self, scan_index, match_index):
@@ -345,6 +473,51 @@ class ViewerData:
             angles = [quaternion_to_rpy(item.pose.pose.orientation) for item in odometry]
             add("rotation", "Estimated rotation (roll, pitch, yaw)", "rad",
                 [(axis, ox, [a[i] for a in angles]) for i, axis in enumerate(("roll", "pitch", "yaw"))])
+            by_stamp = {(item.header.stamp.sec, item.header.stamp.nanosec): item for item in odometry}
+            position_changes = [None] * len(diagnostics)
+            rotation_changes = [None] * len(diagnostics)
+            for index in range(1, len(diagnostics)):
+                item, previous = diagnostics[index], diagnostics[index-1]
+                current_pose = by_stamp.get((item.header.stamp.sec, item.header.stamp.nanosec))
+                previous_pose = by_stamp.get((previous.header.stamp.sec, previous.header.stamp.nanosec))
+                if current_pose is None or previous_pose is None:
+                    continue
+                correction = np.asarray(item.lidar_position_correction, dtype=np.float64)
+                if item.update_valid and np.isfinite(correction).all():
+                    current_xyz = np.array([getattr(current_pose.pose.pose.position, axis) for axis in "xyz"])
+                    previous_xyz = np.array([getattr(previous_pose.pose.pose.position, axis) for axis in "xyz"])
+                    position_changes[index] = current_xyz - correction - previous_xyz
+                predicted_quaternion = getattr(item, "predicted_orientation_xyzw", None)
+                if predicted_quaternion is not None:
+                    previous_quaternion = previous_pose.pose.pose.orientation
+                    rotation_changes[index] = rotation_change(
+                        [getattr(previous_quaternion, axis) for axis in "xyzw"], predicted_quaternion)
+            if any(change is not None for change in position_changes):
+                add("predicted_position_change", "IMU-predicted position change", "m / scan",
+                    [(axis, x, [float(change[i]) if change is not None else None
+                                for change in position_changes]) for i, axis in enumerate("xyz")] +
+                    [("magnitude", x, [float(np.linalg.norm(change)) if change is not None else None
+                                       for change in position_changes])])
+            if any(change is not None for change in rotation_changes):
+                add("predicted_rotation_change", "IMU-predicted rotation change (body frame)", "rad / scan",
+                    [(axis, x, [float(change[i]) if change is not None else None
+                                for change in rotation_changes]) for i, axis in enumerate("xyz")] +
+                    [("magnitude", x, [float(np.linalg.norm(change)) if change is not None else None
+                                       for change in rotation_changes])])
+        if self.learned_odometry:
+            lx = [stamp_seconds(item.header.stamp)-self.first for item in self.learned_odometry]
+            add("learned_position", "Learned-velocity odometry position", "m",
+                [(axis, lx, [getattr(item.pose.pose.position, axis) for item in self.learned_odometry])
+                 for axis in "xyz"])
+            add("learned_angular", "Body gyroscope in learned odometry", "rad/s",
+                [(axis, lx, [getattr(item.twist.twist.angular, axis) for item in self.learned_odometry])
+                 for axis in "xyz"])
+        velocity_messages = self.learned_velocity or self.learned_odometry
+        if velocity_messages:
+            vx = [stamp_seconds(item.header.stamp)-self.first for item in velocity_messages]
+            add("learned_velocity", "Learned body-frame linear velocity", "m/s",
+                [(axis, vx, [getattr((item.twist if self.learned_velocity else item.twist.twist).linear, axis)
+                              for item in velocity_messages]) for axis in "xyz"])
         add("matches", "Match availability", "points",
             [("downsampled", x, [item.downsampled_points for item in diagnostics]),
              ("matched", x, [item.matched_points for item in diagnostics])])
@@ -364,18 +537,15 @@ class ViewerData:
         if self.pose_information:
             px = [stamp_seconds(item.header.stamp)-self.first for item in self.pose_information]
             matrices = [pose_information_matrix(item) for item in self.pose_information]
-            for block, key, title, unit in (
-                    (slice(0, 3), "position_information", "Position constraint eigenvalues", "1/m²"),
-                    (slice(3, 6), "rotation_information", "Rotation constraint eigenvalues", "1/rad²")):
-                eigens = [np.maximum(np.linalg.eigvalsh(m[block, block]), 0) if m is not None else None
-                          for m in matrices]
-                for per_match in (False, True):
-                    add(key + ("_per_match" if per_match else ""),
-                        title + (" (per match)" if per_match else ""), unit,
-                        [(name, px, [float(v[i] / item.matched_points) if v is not None and
-                           (not per_match or item.matched_points) else None
-                           for v, item in zip(eigens, self.pose_information)])
-                         for i, name in enumerate(("weakest", "middle", "strongest"))])
+            eigens = [np.maximum(np.linalg.eigvalsh(m[3:6, 3:6]), 0) if m is not None else None
+                      for m in matrices]
+            for per_match in (False, True):
+                add("rotation_information" + ("_per_match" if per_match else ""),
+                    "Rotation constraint eigenvalues" + (" (per match)" if per_match else ""), "1/rad²",
+                    [(name, px, [float(v[i] / item.matched_points if per_match else v[i]) if v is not None and
+                       (not per_match or item.matched_points) else None
+                       for v, item in zip(eigens, self.pose_information)])
+                     for i, name in enumerate(("weakest", "middle", "strongest"))])
             # With a 1 m lever arm, rotation is expressed as equivalent point displacement.
             coupled = [np.maximum(np.linalg.eigvalsh(m), 0) if m is not None else None for m in matrices]
             add("pose_information", "Coupled pose constraint eigenvalues (1 m rotation lever arm)", "1/m²",
@@ -401,15 +571,21 @@ class ViewerData:
                     [("magnitude", ix, [math.sqrt(sum(getattr(getattr(item, field), axis)**2 for axis in "xyz"))
                                        for item in imu])])
         groups = {"pose": {"position", "rotation", "position_stddev", "rotation_stddev",
-                           "position_correction", "rotation_correction"},
+                           "position_correction", "rotation_correction",
+                           "predicted_position_change", "predicted_rotation_change"},
                   "matching": {"matches", "match_ratio", "residual", "update_valid"},
-                  "imu": {"accel", "gyro"}}
+                  "imu": {"accel", "gyro"},
+                  "learned": {"learned_position", "learned_velocity", "learned_angular"}}
         for plot in plots:
             plot["category"] = next((group for group, keys in groups.items() if plot["key"] in keys),
                                     "constraints")
         return {"summary": f"{len(diagnostics)} scans; {sum(bool(item.update_valid) for item in diagnostics)} valid updates; "
-                           f"{len(odometry)} poses; {len(imu)} body IMU samples; {len(self.scans)} 3D scans.",
-                "plots": plots, "has_matches": bool(self.scans)}
+                           f"{len(odometry)} poses; {len(self.learned_odometry)} learned odometry poses; "
+                           f"{len(imu)} body IMU samples; {len(self.scans)} 3D scans.",
+                "plots": plots, "has_matches": bool(self.scans),
+                "has_learned_odometry": bool(self.learned_odometry),
+                "has_pose_information": any(item.update_valid for item in self.pose_information),
+                "has_translation_constraints": any(item is not None for item in self.constraints)}
 
 
 VIEWER_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -433,6 +609,7 @@ section label{margin:0 .5rem}section input[type=number]{width:5em}
 <button class="series-tab" data-category="matching">LiDAR matching</button>
 <button class="series-tab" data-category="constraints">Constraints</button>
 <button class="series-tab" data-category="imu">Body IMU</button>
+<button class="series-tab" data-category="learned">Learned odometry</button>
 <button id="tab-match" hidden>3D scan match</button></nav>
 <main id="series-panel"><div id="series-status" aria-live="polite"></div><div id="plots"></div>
 <p>Each plot has its own trailing smoothing window. Set it to 1 for raw data.
@@ -454,6 +631,10 @@ These signals describe estimator consistency; absolute accuracy requires ground 
 <label><input type="checkbox" id="show-neighbors" checked>Selected return and five map neighbors</label>
 <label><input type="checkbox" id="show-constraints" checked>Translation constraint axes</label>
 <label>Axis scale <input type="number" id="constraint-scale" min="0.1" step="0.1" value="1" style="width:5em"> m</label>
+<label><input type="checkbox" id="show-rotation-constraints" checked>Rotation constraint axes</label>
+<label>Rotation axis scale <input type="number" id="rotation-scale" min="0.1" step="0.1" value="1" style="width:5em"> m</label>
+<label><input type="checkbox" id="show-fast-path" checked>FAST-LIO path</label>
+<label><input type="checkbox" id="show-learned-path" checked>Learned odometry path</label>
 </div><div class="row"><form id="match-form"><label>Match number
 <input id="match-number" type="number" min="1" step="1" value="1"></label>
 <button type="submit">Show in map</button></form>
@@ -473,7 +654,8 @@ let scanTimes=[],mapPoints=[],currentScan=null,plotReady=false,selected=null,sca
 let selectedResidual=null;
 let selectedMatchData=null;
 let currentCamera=null;
-const mapPlot=$('match-plot'), switches=['map','matched','unmatched','neighbors','constraints']
+const mapPlot=$('match-plot'), switches=['map','matched','unmatched','neighbors','constraints',
+  'rotation-constraints','fast-path','learned-path']
   .reduce((items,key)=>(items[key]=$('show-'+key),items),{});
 function smooth(values,width){
   if(width===1)return values;
@@ -485,11 +667,43 @@ function smooth(values,width){
   }
   return out;
 }
-const seriesCategories=['pose','matching','constraints','imu'];
+const seriesCategories=['pose','matching','constraints','imu','learned'];
 const seriesCache=new Map();
 const plotDataCache=new Map();
 let activeTab='pose';
+let hoverSyncing=false,hoverFrame=0,hoverSource=null,hoverTime=null;
+function nearestTimeIndex(times,time){
+  let low=0,high=times.length;
+  while(low<high){const middle=(low+high)>>1;if(times[middle]<time)low=middle+1;else high=middle}
+  if(low===times.length)return times.length-1;
+  return low>0&&time-times[low-1]<times[low]-time?low-1:low;
+}
+function syncSeriesHover(){
+  hoverFrame=0;
+  const view=seriesCache.get(activeTab);
+  if(!view||hoverTime===null)return;
+  hoverSyncing=true;
+  try{
+    for(const graph of view.graphs){
+      if(graph===hoverSource||graph.parentElement.hidden||!graph.data?.[0]?.x?.length)continue;
+      const pointNumber=nearestTimeIndex(graph.data[0].x,hoverTime);
+      Plotly.Fx.hover(graph,[{curveNumber:0,pointNumber}]);
+    }
+  }finally{hoverSyncing=false}
+}
+function clearSeriesHover(source){
+  if(hoverSyncing||source!==hoverSource)return;
+  if(hoverFrame)cancelAnimationFrame(hoverFrame);
+  hoverFrame=0;hoverTime=null;hoverSource=null;
+  const view=seriesCache.get(activeTab);
+  if(!view)return;
+  hoverSyncing=true;
+  try{for(const graph of view.graphs){if(graph!==source)Plotly.Fx.unhover(graph)}}
+  finally{hoverSyncing=false}
+}
 async function showSeries(category){
+  if(hoverFrame)cancelAnimationFrame(hoverFrame);
+  hoverFrame=0;hoverTime=null;hoverSource=null;
   activeTab=category;
   $('series-panel').hidden=false;$('match-panel').hidden=true;
   document.querySelectorAll('nav button').forEach(button=>button.classList.toggle('active',
@@ -520,9 +734,16 @@ async function showSeries(category){
     const graph=document.createElement('div');box.append(graph);charts.append(box);graphs.push(graph);
     const traces=plot.traces.map(t=>({type:t.x.length>2000?'scattergl':'scatter',
       mode:'lines',name:t.name,x:t.x,y:t.y}));
-    await Plotly.newPlot(graph,traces,{xaxis:{title:'Seconds from first scan'},
+    await Plotly.newPlot(graph,traces,{xaxis:{title:'Seconds from first scan',showspikes:true,
+      spikemode:'across',spikesnap:'data'},
       yaxis:{title:plot.unit},height:430,hovermode:'x unified',
       margin:{l:65,r:25,t:30,b:55}},{responsive:true});
+    graph.on('plotly_hover',event=>{
+      if(hoverSyncing||activeTab!==category||!event.points?.length)return;
+      hoverSource=graph;hoverTime=Number(event.points[0].x);
+      if(!hoverFrame)hoverFrame=requestAnimationFrame(syncSeriesHover);
+    });
+    graph.on('plotly_unhover',()=>clearSeriesHover(graph));
     const toggle=document.createElement('label');
     const check=document.createElement('input');check.type='checkbox';check.checked=true;
     check.addEventListener('change',()=>box.hidden=!check.checked);
@@ -542,7 +763,10 @@ async function initSeries(){
   const overview=await request('/api/overview');
   $('summary').textContent=overview.summary;
   $('tab-match').hidden=!overview.has_matches;
-  await showSeries('pose');
+  switches['learned-path'].disabled=!overview.has_learned_odometry;
+  switches['rotation-constraints'].disabled=!overview.has_pose_information;
+  switches.constraints.disabled=!overview.has_translation_constraints;
+  if(activeTab!=='match')await showSeries(activeTab);
   // Warm the other tabs without making navigation wait for their first request.
   for(const category of seriesCategories.slice(1)){
     const pending=request('/api/plots/'+category);
@@ -554,6 +778,26 @@ function trace(points,name,color,size,opacity){
   return {type:'scatter3d',mode:'markers',name,x:points.map(p=>p[0]),
     y:points.map(p=>p[1]),z:points.map(p=>p[2]),marker:{color,size,opacity},
     hovertemplate:name+'<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>'};
+}
+function pathTrace(points,name,color,visible){
+  const path=points||[];
+  return {type:'scatter3d',mode:'lines',name,x:path.map(p=>p[0]),y:path.map(p=>p[1]),
+    z:path.map(p=>p[2]),line:{color,width:5},visible:!!points&&visible,
+    hovertemplate:name+'<br>x=%{x:.3f} y=%{y:.3f} z=%{z:.3f}<extra></extra>'};
+}
+function constraintTraces(constraint,start,scale,prefix,colors,visible){
+  if(!constraint||!start)return [];
+  const total=constraint.values.reduce((sum,value)=>sum+value,0);
+  return constraint.values.map((value,i)=>{
+    const length=total>0?scale*value/total:0;
+    const vector=constraint.vectors[i];
+    const minus=start.map((v,j)=>v-length*vector[j]);
+    const plus=start.map((v,j)=>v+length*vector[j]);
+    return {type:'scatter3d',mode:'lines',name:prefix+' '+['weakest','middle','strongest'][i]+
+      ': '+value.toFixed(2),x:[minus[0],plus[0]],y:[minus[1],plus[1]],z:[minus[2],plus[2]],
+      line:{color:colors[i],width:5},visible,
+      hovertemplate:'%{fullData.name}<extra></extra>'};
+  });
 }
 function summary(){
   if(!currentScan)return;
@@ -609,22 +853,14 @@ async function renderScan(){
       x:[scan.pose[0],scan.pose_tip[0]],y:[scan.pose[1],scan.pose_tip[1]],
       z:[scan.pose[2],scan.pose_tip[2]],line:{color:'#2267c5',width:6},hoverinfo:'skip'});
   }
-  if(scan.pose&&scan.constraints&&switches.constraints.checked){
-    const scale=Math.max(.1,Number($('constraint-scale').value)||1);
-    const {values,vectors}=scan.constraints;
-    const total=values.reduce((sum,value)=>sum+value,0);
-    const colors=['#8e44ad','#00a6c7','#e74c3c'];
-    for(let i=0;i<3;i++){
-      const length=total>0?scale*values[i]/total:0;
-      const vector=vectors[i],start=scan.pose;
-      const minus=start.map((v,j)=>v-length*vector[j]);
-      const plus=start.map((v,j)=>v+length*vector[j]);
-      traces.push({type:'scatter3d',mode:'lines',name:['Weakest','Middle','Strongest'][i]+
-        ' constraint: '+values[i].toFixed(2),x:[minus[0],plus[0]],
-        y:[minus[1],plus[1]],z:[minus[2],plus[2]],
-        line:{color:colors[i],width:6},hovertemplate:'%{fullData.name}<extra></extra>'});
-    }
-  }
+  traces.push(pathTrace(scan.fast_path,'FAST-LIO estimate','#2456b8',switches['fast-path'].checked));
+  traces.push(pathTrace(scan.learned_path,'Learned-velocity odometry','#e26a2c',switches['learned-path'].checked));
+  traces.push(...constraintTraces(scan.constraints,scan.pose,
+    Math.max(.1,Number($('constraint-scale').value)||1),'Translation constraint',
+    ['#8e44ad','#00a6c7','#e74c3c'],switches.constraints.checked));
+  traces.push(...constraintTraces(scan.rotation_constraints,scan.pose,
+    Math.max(.1,Number($('rotation-scale').value)||1),'Rotation constraint',
+    ['#7323a8','#c32b82','#f2a900'],switches['rotation-constraints'].checked));
   traces.push(trace([],'Five map neighbors','#e3265b',3.3,1));
   traces.push({type:'scatter3d',mode:'lines',name:'Associations',
     x:[],y:[],z:[],line:{color:'#e3265b',width:3},hoverinfo:'skip'});
@@ -688,11 +924,19 @@ $('scan-slider').addEventListener('change',event=>chooseScan(Number(event.target
 $('scan-select').addEventListener('change',event=>chooseScan(Number(event.target.value)));
 $('scan-prev').addEventListener('click',()=>chooseScan(Number($('scan-slider').value)-1));
 $('scan-next').addEventListener('click',()=>chooseScan(Number($('scan-slider').value)+1));
+function setTraceVisibility(key){
+  if(!plotReady)return;
+  const prefixes={map:'Reference map',matched:'Matched returns',unmatched:'Unmatched returns',
+    constraints:'Translation constraint','rotation-constraints':'Rotation constraint',
+    'fast-path':'FAST-LIO estimate','learned-path':'Learned-velocity odometry'};
+  const indices=mapPlot.data.flatMap((trace,index)=>trace.name.startsWith(prefixes[key])?[index]:[]);
+  if(indices.length)Plotly.restyle(mapPlot,{visible:switches[key].checked},indices);
+}
 for(const [key,input] of Object.entries(switches)){
-  input.addEventListener('change',key==='neighbors'?
-    showSelectedInMap:renderScan);
+  input.addEventListener('change',key==='neighbors'?showSelectedInMap:()=>setTraceVisibility(key));
 }
 $('constraint-scale').addEventListener('change',renderScan);
+$('rotation-scale').addEventListener('change',renderScan);
 $('match-form').addEventListener('submit',event=>{
   event.preventDefault();showMatch(Number($('match-number').value)-1);
 });
@@ -731,7 +975,7 @@ def serve_viewer(data, port, open_browser):
     plot_payloads = {category: json.dumps([plot for plot in data.overview["plots"]
                                            if plot["category"] == category],
                                           separators=(",", ":"), allow_nan=False).encode()
-                     for category in ("pose", "matching", "constraints", "imu")}
+                     for category in ("pose", "matching", "constraints", "imu", "learned")}
 
     class Handler(BaseHTTPRequestHandler):
         def respond(self, body, content_type="application/json", status=200):
@@ -892,10 +1136,10 @@ def main():
             if selected is None:
                 return
             args.bag, args.map_pcd = selected["bag"], selected["map_pcd"]
-        diagnostics, imu, odometry, matches, tf_messages, pose_information = read_bag(
+        diagnostics, imu, odometry, matches, tf_messages, pose_information, learned_odometry, learned_velocity = read_bag(
             args.bag, args.diagnostics_topic, args.imu_topic, args.odometry_topic, args.match_debug_topic)
         data = ViewerData(diagnostics, imu, odometry, matches, tf_messages, args.map_pcd,
-                          args.map_point_limit, pose_information)
+                          args.map_point_limit, pose_information, learned_odometry, learned_velocity)
         serve_viewer(data, args.port, not args.no_open)
     except (ValueError, ImportError, KeyError, OSError) as error:
         parser.exit(2, f"Error: {error}\n")
