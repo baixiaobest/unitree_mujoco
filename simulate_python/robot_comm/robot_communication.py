@@ -1,5 +1,6 @@
 from typing import Dict, List, Union, Optional
 import torch
+import threading
 import utils.math_utils as math_utils
 from unitree_sdk2py.core.channel import ChannelSubscriber, ChannelPublisher
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_
@@ -20,6 +21,8 @@ class RobotCommunication:
         """
 
         self.device = torch.device(device)
+        self.low_state_lock = threading.RLock()
+        self.low_state_tick: int | None = None
         
         # Add CRC calculator
         self.crc = CRC()
@@ -89,6 +92,10 @@ class RobotCommunication:
         Args:
             msg: Low-level state message from the robot
         """
+        with self.low_state_lock:
+            self._apply_low_state(msg)
+
+    def _apply_low_state(self, msg: LowState_) -> None:
         # Get joint positions, velocities, and torques
         positions: List[float] = []
         velocities: List[float] = []
@@ -120,6 +127,7 @@ class RobotCommunication:
         self.robot_base_state["accelerometer"] = torch.tensor(
             list(msg.imu_state.accelerometer), dtype=torch.float32, device=self.device
         )
+        self.low_state_tick = int(msg.tick)
     
     def _high_state_handler(self, msg: SportModeState_) -> None:
         """Handler for high state messages from the robot

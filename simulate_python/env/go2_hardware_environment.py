@@ -15,6 +15,7 @@ from mdp.commands import (
 from time import sleep, time
 import torch
 from utils.odometry_publisher import EstimatedOdometryPublisher
+from utils.velocity_estimates import split_velocity_estimate
 from utils.robot_posture import RobotPostureState, TOPIC_ROBOT_POSTURE
 from utils.robot_logger import RobotLogger  # Import the logger
 from utils.locomotion_mode import TOPIC_CONTROLLER_COMMAND_DEBUG
@@ -77,6 +78,7 @@ class GO2HardwareEnvironment(Go2Environment):
         self.desired_positions = [0.0] * self.num_joints
         self._last_policy_output = torch.zeros(self.num_joints, dtype=torch.float32, device=self.device)
         self._last_estimated_base_lin_vel = None
+        self._last_estimated_base_ang_vel = None
         self._pending_remote_command = None
         self._posture_motion_step_callback = None
         self._control_session_initialized = False
@@ -435,15 +437,17 @@ class GO2HardwareEnvironment(Go2Environment):
             )
         return self._observation_manager.get_observation(layout_name=self.policy_observation_layout)
 
-    def _estimate_base_lin_vel(self, obs_batched: torch.Tensor):
+    def _estimate_base_velocities(self, obs_batched: torch.Tensor):
         if self.policy_mode != "velocity_control":
-            return None
+            return None, None
         if not hasattr(self.policy, "estimate_velocity"):
-            return None
+            return None, None
 
         estimated_velocity = self.policy.estimate_velocity(obs_batched).squeeze(0).detach()
-        self._last_estimated_base_lin_vel = estimated_velocity
-        return estimated_velocity
+        estimated_linear, estimated_angular = split_velocity_estimate(estimated_velocity)
+        self._last_estimated_base_lin_vel = estimated_linear
+        self._last_estimated_base_ang_vel = estimated_angular
+        return estimated_linear, estimated_angular
 
     def hardware_stand_up(self, hold_time=2.0, sim_step_callback=None):
         """Execute stand-up sequence using RobotCommunication
@@ -570,12 +574,16 @@ class GO2HardwareEnvironment(Go2Environment):
         self._publish_controller_command_debug()
         
         # Get observation and run policy
-        policy_obs = self._get_policy_observation()
+        with self.robot_comm.low_state_lock:
+            policy_obs = self._get_policy_observation()
+            observation_tick = self.robot_comm.low_state_tick
+            observation_gyro = self.robot_comm.get_base_state()["gyroscope"].clone()
         obs_batched = policy_obs.unsqueeze(0)
         estimated_base_lin_vel = None
+        estimated_base_ang_vel = None
         
         with torch.no_grad():
-            estimated_base_lin_vel = self._estimate_base_lin_vel(obs_batched)
+            estimated_base_lin_vel, estimated_base_ang_vel = self._estimate_base_velocities(obs_batched)
             policy_action = self.policy(obs_batched).squeeze(0)
         
         # Convert policy output to robot commands
@@ -591,8 +599,11 @@ class GO2HardwareEnvironment(Go2Environment):
         if self._estimated_odometry_publisher is not None:
             self._estimated_odometry_publisher.publish(
                 estimated_linear_velocity=estimated_base_lin_vel,
-                base_quaternion=base_state["quaternion"],
-                angular_velocity=base_state["gyroscope"],
+                angular_velocity=(
+                    estimated_base_ang_vel if estimated_base_ang_vel is not None else observation_gyro
+                ),
+                tick=observation_tick,
+                angular_velocity_is_learned=estimated_base_ang_vel is not None,
             )
         
         # Log data if enabled
@@ -612,6 +623,7 @@ class GO2HardwareEnvironment(Go2Environment):
                 # Actual policy inputs (observation tensor values)
                 obs_base_lin_vel=current_obs["base_lin_vel"],
                 estimated_base_lin_vel=estimated_base_lin_vel,
+                estimated_base_ang_vel=estimated_base_ang_vel,
                 obs_base_ang_vel=current_obs["base_ang_vel"],
                 obs_imu_ang_vel=current_obs["imu_ang_vel"],
                 obs_imu_lin_acc=current_obs["imu_lin_acc"],

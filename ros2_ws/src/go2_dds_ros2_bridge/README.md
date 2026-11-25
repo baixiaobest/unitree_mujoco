@@ -188,3 +188,8 @@ ros2 run pcl_ros pcd_to_pointcloud --ros-args \
 
 Open `rviz2` in another terminal. Set **Fixed Frame** to `map`, add a
 **PointCloud2** display on `/cloud_pcd`, and use the **Orbit** view for 3D.
+## Learned motion timestamps and odometry
+
+The velocity-control controller publishes one `rt/learned_motion` DDS sample per policy estimate. It contains the LowState millisecond `tick` captured with the policy observation, a sequence number, body-frame linear and angular velocity, and an angular-source code (`0` learned, `1` raw gyroscope fallback for linear-only policies). The `imu_bridge` maps that tick using the same clock mapping as `/imu/data_fastlio`, then publishes `/estimated_velocity` (`TwistStamped`) and `/odom` (`Odometry`) with matching ROS timestamps. The controller no longer publishes `rt/estimated_velocity` or `rt/odom` directly. Do not also launch `odom_bridge` to publish those ROS topics.
+
+`/odom` starts at zero position and identity orientation and integrates the learned linear velocity and selected angular velocity. Its pose is relative, with no global alignment. Tick repeats do not advance the pose; an input gap over 0.2 seconds skips stale integration. The policy's three-output model uses the gyroscope for angular velocity, while a six-output model uses learned angular velocity.

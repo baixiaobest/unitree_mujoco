@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import sys
+import threading
 from collections import deque
 from dataclasses import dataclass
 
@@ -15,8 +16,11 @@ import rclpy
 from builtin_interfaces.msg import Time
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, JointState
+from geometry_msgs.msg import TwistStamped
+from nav_msgs.msg import Odometry
 
 from go2_dds_ros2_bridge.dds_runtime import add_dds_runtime_arguments, resolve_runtime_arguments
+from go2_dds_ros2_bridge.learned_motion_integration import LearnedMotionIntegrator
 
 DEFAULT_DDS_IMU_TOPIC = "rt/lowstate"
 DEFAULT_ROS_IMU_TOPIC = "/imu/data_raw"
@@ -35,6 +39,7 @@ LOWSTATE_TICK_WRAPAROUND = 1 << 32
 LOWSTATE_TICK_HALF_WRAPAROUND = LOWSTATE_TICK_WRAPAROUND // 2
 CLOCK_OFFSET_WINDOW_NS = 5_000_000_000
 CLOCK_OFFSET_QUANTILE = 0.05
+LEARNED_MOTION_DDS_TOPIC = "rt/learned_motion"
 IMU_DEFAULT_VARIANCES = {
     "orientation": 0.05,
     "angular_velocity": 0.02,
@@ -321,9 +326,18 @@ class DdsImuBridge(Node):
         self._tick_epoch = 0
         self._offset_samples: deque[tuple[int, int]] = deque()
         self._last_stamp_ns: int | None = None
+        self._motion_lock = threading.RLock()
+        self._recent_tick_stamps: dict[int, int] = {}
+        self._pending_motion: dict[int, list[tuple[object, int]]] = {}
+        self._motion_integrator = LearnedMotionIntegrator()
+        self._velocity_publisher = self.create_publisher(TwistStamped, "/estimated_velocity", 10)
+        self._odom_publisher = self.create_publisher(Odometry, "/odom", 10)
 
         self._dds_subscriber = channel_subscriber_cls(self._config.dds_topic, dds_lowstate_type)
         self._dds_subscriber.Init(self._dds_lowstate_handler, 10)
+        from go2_dds_ros2_bridge.learned_motion_dds import LearnedMotion
+        self._motion_subscriber = channel_subscriber_cls(LEARNED_MOTION_DDS_TOPIC, LearnedMotion)
+        self._motion_subscriber.Init(self._dds_motion_handler, 10)
 
         ros_domain_id = os.environ.get("ROS_DOMAIN_ID", "<unset>")
         self.get_logger().info(
@@ -343,8 +357,21 @@ class DdsImuBridge(Node):
         )
 
     def _dds_lowstate_handler(self, msg) -> None:
+        with self._motion_lock:
+            self._handle_lowstate(msg)
+
+    def _handle_lowstate(self, msg) -> None:
         receive_time_ns = self.get_clock().now().nanoseconds
         stamp_ns = self._stamp_from_tick(int(msg.tick), receive_time_ns)
+        tick = int(msg.tick) & (LOWSTATE_TICK_WRAPAROUND - 1)
+        self._recent_tick_stamps[tick] = stamp_ns
+        if len(self._recent_tick_stamps) > 1024:
+            self._recent_tick_stamps.pop(next(iter(self._recent_tick_stamps)))
+        for pending_msg, _ in self._pending_motion.pop(tick, []):
+            self._publish_motion(pending_msg, stamp_ns)
+        for old_tick, entries in list(self._pending_motion.items()):
+            if receive_time_ns - entries[-1][1] > 200_000_000:
+                del self._pending_motion[old_tick]
         if self._joint_publisher is not None and (
             self._last_joint_stamp_ns is None
             or stamp_ns - self._last_joint_stamp_ns >= JOINT_STATES_INTERVAL_NS
@@ -403,6 +430,39 @@ class DdsImuBridge(Node):
             ros_msg = corrected
         self._publisher.publish(ros_msg)
 
+    def _dds_motion_handler(self, msg) -> None:
+        with self._motion_lock:
+            tick = int(msg.tick) & (LOWSTATE_TICK_WRAPAROUND - 1)
+            stamp_ns = self._recent_tick_stamps.get(tick)
+            if stamp_ns is None:
+                self._pending_motion.setdefault(tick, []).append((msg, self.get_clock().now().nanoseconds))
+                return
+            self._publish_motion(msg, stamp_ns)
+
+    def _publish_motion(self, msg, stamp_ns: int) -> None:
+        linear = (float(msg.linear_x), float(msg.linear_y), float(msg.linear_z))
+        angular = (float(msg.angular_x), float(msg.angular_y), float(msg.angular_z))
+        if not self._motion_integrator.update(stamp_ns, int(msg.sequence), linear, angular):
+            return
+        stamp = stamp_from_ns(stamp_ns)
+        velocity = TwistStamped()
+        velocity.header.stamp = stamp
+        velocity.header.frame_id = "base_link"
+        velocity.twist.linear.x, velocity.twist.linear.y, velocity.twist.linear.z = linear
+        velocity.twist.angular.x, velocity.twist.angular.y, velocity.twist.angular.z = angular
+        self._velocity_publisher.publish(velocity)
+
+        odom = Odometry()
+        odom.header.stamp = stamp
+        odom.header.frame_id = "odom"
+        odom.child_frame_id = "base_link"
+        odom.pose.pose.position.x, odom.pose.pose.position.y, odom.pose.pose.position.z = self._motion_integrator.position
+        q = self._motion_integrator.orientation
+        odom.pose.pose.orientation.w, odom.pose.pose.orientation.x, odom.pose.pose.orientation.y, odom.pose.pose.orientation.z = q
+        odom.twist.twist.linear.x, odom.twist.twist.linear.y, odom.twist.twist.linear.z = linear
+        odom.twist.twist.angular.x, odom.twist.twist.angular.y, odom.twist.twist.angular.z = angular
+        self._odom_publisher.publish(odom)
+
     @staticmethod
     def _is_finite_vector(values: list[float]) -> bool:
         return all(math.isfinite(value) for value in values)
@@ -436,6 +496,9 @@ class DdsImuBridge(Node):
                 # 49-day counter wrap. Re-anchor the new clock epoch safely.
                 self._tick_epoch = 0
                 self._offset_samples.clear()
+                self._recent_tick_stamps.clear()
+                self._pending_motion.clear()
+                self._motion_integrator.reset_time_reference()
                 self.get_logger().warning("LowState.tick moved backwards; re-anchoring the IMU clock map.")
 
         self._last_tick_raw = tick_raw

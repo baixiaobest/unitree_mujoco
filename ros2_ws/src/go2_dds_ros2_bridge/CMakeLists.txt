@@ -112,6 +112,7 @@ install(
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   ament_add_pytest_test(test_cbf_world test/test_cbf_world.py)
+  ament_add_pytest_test(test_learned_motion_integration test/test_learned_motion_integration.py)
   ament_add_pytest_test(test_cbf_map test/test_cbf_map.py)
   ament_add_pytest_test(test_cbf_world_ros test/test_cbf_world_ros.py
     ENV ROS_DOMAIN_ID=187 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 TIMEOUT 60)
