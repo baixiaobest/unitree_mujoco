@@ -70,7 +70,7 @@ ros2 launch go2_dds_ros2_bridge fast_lio_localization.launch.py \
 In another sourced terminal, record the estimator, body IMU, and map alignment:
 
 ```bash
-ros2 bag record /Odometry /fast_lio/estimator_diagnostics /fast_lio/match_debug \
+ros2 bag record /Odometry /fast_lio/estimator_diagnostics /fast_lio/pose_information /fast_lio/match_debug \
   /imu/data_fastlio_raw /tf /tf_static
 ```
 
@@ -89,16 +89,23 @@ matched return, or enter its match number, to query its five map neighbors and
 association lines. The selected return and its association appear in the main
 3D map.
 
-With bags recorded using the updated `MatchDebug` message, the time-series tab
-shows the three raw translation-constraint eigenvalues and their per-match
-normalized values. These are computed offline from the accepted plane normals.
+The analyzer groups time series in Pose, LiDAR matching, Constraints, and Body IMU
+tabs. Each tab loads once and retains its plots and per-plot smoothing settings.
+New bags with `/fast_lio/pose_information` show position-only, rotation-only,
+and coupled pose eigenvalues in Constraints. The compact message records the
+upper triangle of the 6×6 LiDAR pose information matrix; its columns are world
+position xyz followed by IMU-frame rotation xyz. The coupled plot uses a stated
+1 m rotation lever arm. Position and rotation plots include raw and per-match
+views. With `MatchDebug` normals, the analyzer also shows the original raw and
+normalized translation-constraint plots.
 The 3D tab can show the corresponding axes at the robot position; uncheck
 **Translation constraint axes** to hide them or change **Axis scale** to adjust
 their length. The axes are drawn in both directions because eigenvector sign
 has no physical meaning. Rebuild and source the workspace before recording new
 bags with the updated message definition.
-Older match-debug bags still open, but they have no recorded normals, so the
-constraint plots and axes are unavailable for those scans.
+Older bags still open. Those without pose information omit the new constraint
+plots; bags without recorded normals also omit the original translation plots
+and 3D axes.
 
 Run the analyzer without a bag argument to open a file-picker window. Use
 **Browse** to select the bag folder and optionally preload a reference PCD:

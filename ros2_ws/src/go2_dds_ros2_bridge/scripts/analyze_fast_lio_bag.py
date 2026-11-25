@@ -12,7 +12,7 @@ current directory. No HTML report file is generated.
 
 To record a bag while localization runs with match_debug:=true:
     ros2 bag record -o fast_lio_debug_bag \
-      /Odometry /fast_lio/estimator_diagnostics /fast_lio/match_debug \
+      /Odometry /fast_lio/estimator_diagnostics /fast_lio/pose_information /fast_lio/match_debug \
       /imu/data_fastlio_raw /tf /tf_static
 
 Press Ctrl+C to finish recording. The IMU topic is the Go2 body IMU.
@@ -38,6 +38,7 @@ DIAGNOSTICS_TOPIC = "/fast_lio/estimator_diagnostics"
 BODY_IMU_TOPIC = "/imu/data_fastlio_raw"
 ODOMETRY_TOPIC = "/Odometry"
 MATCH_DEBUG_TOPIC = "/fast_lio/match_debug"
+POSE_INFORMATION_TOPIC = "/fast_lio/pose_information"
 
 
 def stamp_seconds(stamp):
@@ -68,7 +69,8 @@ def read_bag(bag, diagnostics_topic, imu_topic, odometry_topic, match_debug_topi
     expected = {diagnostics_topic: "fast_lio/msg/EstimatorDiagnostics",
                 imu_topic: "sensor_msgs/msg/Imu",
                 odometry_topic: "nav_msgs/msg/Odometry",
-                match_debug_topic: "fast_lio/msg/MatchDebug"}
+                match_debug_topic: "fast_lio/msg/MatchDebug",
+                POSE_INFORMATION_TOPIC: "fast_lio/msg/PoseInformation"}
     if diagnostics_topic not in topic_types:
         raise ValueError(f"Missing {diagnostics_topic}; available topics: {', '.join(sorted(topic_types))}")
     for topic, type_name in expected.items():
@@ -98,7 +100,8 @@ def read_bag(bag, diagnostics_topic, imu_topic, odometry_topic, match_debug_topi
             items.sort(key=lambda item: stamp_seconds(item.header.stamp))
     return (messages[diagnostics_topic], messages.get(imu_topic, []),
             messages.get(odometry_topic, []), messages.get(match_debug_topic, []),
-            messages.get("/tf", []) + messages.get("/tf_static", []))
+            messages.get("/tf", []) + messages.get("/tf_static", []),
+            messages.get(POSE_INFORMATION_TOPIC, []))
 
 
 def read_pcd_xyz(stream):
@@ -192,8 +195,22 @@ def translation_constraints(scan):
     return values, vectors
 
 
+def pose_information_matrix(message):
+    if not message.update_valid:
+        return None
+    values = np.asarray(message.upper_triangle, dtype=np.float64)
+    if values.shape != (21,) or not np.isfinite(values).all():
+        raise ValueError("Pose information has invalid matrix entries")
+    matrix = np.zeros((6, 6), dtype=np.float64)
+    rows, columns = np.triu_indices(6)
+    matrix[rows, columns] = values
+    matrix[columns, rows] = values
+    return matrix
+
+
 class ViewerData:
-    def __init__(self, diagnostics, imu, odometry, matches, tf_messages, map_pcd, map_point_limit):
+    def __init__(self, diagnostics, imu, odometry, matches, tf_messages, map_pcd, map_point_limit,
+                 pose_information=()):
         if not diagnostics:
             raise ValueError("Diagnostics topic contains no messages")
         if map_point_limit < 1:
@@ -206,6 +223,7 @@ class ViewerData:
         self.imu = imu
         self.odometry = odometry
         self.odom_times = [stamp_seconds(item.header.stamp) for item in odometry]
+        self.pose_information = pose_information
         self.map_point_limit = map_point_limit
         self.map_points = np.empty((0, 3), dtype=np.float32)
         if map_pcd is not None:
@@ -343,6 +361,26 @@ class ViewerData:
                                  if item is not None and (not normalized or sum(item[0]) > 0) else None
                                  for item in self.constraints])
                      for i, name in enumerate(("weakest", "middle", "strongest"))])
+        if self.pose_information:
+            px = [stamp_seconds(item.header.stamp)-self.first for item in self.pose_information]
+            matrices = [pose_information_matrix(item) for item in self.pose_information]
+            for block, key, title, unit in (
+                    (slice(0, 3), "position_information", "Position constraint eigenvalues", "1/m²"),
+                    (slice(3, 6), "rotation_information", "Rotation constraint eigenvalues", "1/rad²")):
+                eigens = [np.maximum(np.linalg.eigvalsh(m[block, block]), 0) if m is not None else None
+                          for m in matrices]
+                for per_match in (False, True):
+                    add(key + ("_per_match" if per_match else ""),
+                        title + (" (per match)" if per_match else ""), unit,
+                        [(name, px, [float(v[i] / item.matched_points) if v is not None and
+                           (not per_match or item.matched_points) else None
+                           for v, item in zip(eigens, self.pose_information)])
+                         for i, name in enumerate(("weakest", "middle", "strongest"))])
+            # With a 1 m lever arm, rotation is expressed as equivalent point displacement.
+            coupled = [np.maximum(np.linalg.eigvalsh(m), 0) if m is not None else None for m in matrices]
+            add("pose_information", "Coupled pose constraint eigenvalues (1 m rotation lever arm)", "1/m²",
+                [(f"mode {i+1}", px, [float(v[i]) if v is not None else None for v in coupled])
+                 for i in range(6)])
         add("residual", "Mean absolute point-to-plane residual", "m",
             [("residual", x, [item.mean_abs_residual if item.update_valid else None for item in diagnostics])])
         add("position_correction", "LiDAR position correction", "m",
@@ -362,6 +400,13 @@ class ViewerData:
                     [(axis, ix, [getattr(getattr(item, field), axis) for item in imu]) for axis in "xyz"] +
                     [("magnitude", ix, [math.sqrt(sum(getattr(getattr(item, field), axis)**2 for axis in "xyz"))
                                        for item in imu])])
+        groups = {"pose": {"position", "rotation", "position_stddev", "rotation_stddev",
+                           "position_correction", "rotation_correction"},
+                  "matching": {"matches", "match_ratio", "residual", "update_valid"},
+                  "imu": {"accel", "gyro"}}
+        for plot in plots:
+            plot["category"] = next((group for group, keys in groups.items() if plot["key"] in keys),
+                                    "constraints")
         return {"summary": f"{len(diagnostics)} scans; {sum(bool(item.update_valid) for item in diagnostics)} valid updates; "
                            f"{len(odometry)} poses; {len(imu)} body IMU samples; {len(self.scans)} 3D scans.",
                 "plots": plots, "has_matches": bool(self.scans)}
@@ -371,7 +416,8 @@ VIEWER_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>FAST-LIO analyzer</title>
 <script src="/plotly.js"></script><style>
 body{font-family:system-ui,sans-serif;max-width:1250px;margin:1.5rem auto;padding:0 1rem;color:#182333}
-nav{display:flex;gap:.5rem;border-bottom:1px solid #dae1e8;margin:1rem 0}
+nav{display:flex;gap:.5rem;border-bottom:1px solid #dae1e8;margin:1rem 0;overflow-x:auto}
+nav button{white-space:nowrap}
 nav button{border:1px solid #dae1e8;background:#eef3f8;padding:.65rem 1rem;cursor:pointer;border-radius:.5rem .5rem 0 0}
 nav button.active{background:white;font-weight:600}
 .controls,.row{display:flex;flex-wrap:wrap;align-items:center;gap:.7rem 1.2rem;margin:1rem 0}
@@ -383,8 +429,12 @@ section label{margin:0 .5rem}section input[type=number]{width:5em}
 [hidden]{display:none!important}
 </style></head><body>
 <h1>FAST-LIO estimator diagnostics</h1><p id="summary">Loading bag…</p>
-<nav><button id="tab-series" class="active">Time series</button><button id="tab-match" hidden>3D scan match</button></nav>
-<main id="series-panel"><div class="controls" id="plot-controls"></div><div id="plots"></div>
+<nav><button class="series-tab active" data-category="pose">Pose</button>
+<button class="series-tab" data-category="matching">LiDAR matching</button>
+<button class="series-tab" data-category="constraints">Constraints</button>
+<button class="series-tab" data-category="imu">Body IMU</button>
+<button id="tab-match" hidden>3D scan match</button></nav>
+<main id="series-panel"><div id="series-status" aria-live="polite"></div><div id="plots"></div>
 <p>Each plot has its own trailing smoothing window. Set it to 1 for raw data.
 These signals describe estimator consistency; absolute accuracy requires ground truth.</p></main>
 <main id="match-panel" hidden>
@@ -435,31 +485,69 @@ function smooth(values,width){
   }
   return out;
 }
-async function initSeries(){
-  const overview=await request('/api/overview');
-  $('summary').textContent=overview.summary;
-  $('tab-match').hidden=!overview.has_matches;
-  for(const plot of overview.plots){
+const seriesCategories=['pose','matching','constraints','imu'];
+const seriesCache=new Map();
+const plotDataCache=new Map();
+let activeTab='pose';
+async function showSeries(category){
+  activeTab=category;
+  $('series-panel').hidden=false;$('match-panel').hidden=true;
+  document.querySelectorAll('nav button').forEach(button=>button.classList.toggle('active',
+    button.dataset.category===category));
+  for(const [key,view] of seriesCache){view.panel.hidden=key!==category}
+  if(seriesCache.has(category)){
+    requestAnimationFrame(()=>seriesCache.get(category).graphs.forEach(graph=>Plotly.Plots.resize(graph)));
+    return;
+  }
+  $('series-status').textContent='Loading '+category+' plots…';
+  try{
+    if(!plotDataCache.has(category))plotDataCache.set(category,request('/api/plots/'+category));
+    const plots=await plotDataCache.get(category);
+    if(seriesCache.has(category))return;
+    const panel=document.createElement('div');
+    const controls=document.createElement('div');controls.className='controls';
+    const charts=document.createElement('div');panel.append(controls,charts);$('plots').append(panel);
+    const graphs=[];
+    seriesCache.set(category,{panel,graphs});
+    panel.hidden=activeTab!==category;
+    for(const plot of plots){
     const box=document.createElement('section');
     const heading=document.createElement('h2');heading.textContent=plot.title;box.append(heading);
     const label=document.createElement('label');label.textContent='Smoothing window (samples): ';
     const input=document.createElement('input');input.type='number';input.min=1;input.step=1;input.value=1;
     input.setAttribute('aria-label','Smoothing window for '+plot.title);
     label.append(input);if(plot.key!=='update_valid')box.append(label);
-    const graph=document.createElement('div');box.append(graph);$('plots').append(box);
-    const traces=plot.traces.map(t=>({type:(plot.key==='accel'||plot.key==='gyro')?'scattergl':'scatter',
+    const graph=document.createElement('div');box.append(graph);charts.append(box);graphs.push(graph);
+    const traces=plot.traces.map(t=>({type:t.x.length>2000?'scattergl':'scatter',
       mode:'lines',name:t.name,x:t.x,y:t.y}));
-    Plotly.newPlot(graph,traces,{xaxis:{title:'Seconds from first scan'},
+    await Plotly.newPlot(graph,traces,{xaxis:{title:'Seconds from first scan'},
       yaxis:{title:plot.unit},height:430,hovermode:'x unified',
       margin:{l:65,r:25,t:30,b:55}},{responsive:true});
     const toggle=document.createElement('label');
     const check=document.createElement('input');check.type='checkbox';check.checked=true;
     check.addEventListener('change',()=>box.hidden=!check.checked);
-    toggle.append(check,document.createTextNode(' '+plot.title));$('plot-controls').append(toggle);
+    toggle.append(check,document.createTextNode(' '+plot.title));controls.append(toggle);
     input.addEventListener('change',()=>{
       const width=Math.max(1,Math.floor(Number(input.value)||1));input.value=width;
       Plotly.restyle(graph,{y:plot.traces.map(t=>smooth(t.y,width))});
     });
+    if(activeTab!==category)panel.hidden=true;
+    await new Promise(resolve=>requestAnimationFrame(resolve));
+    }
+    if(!plots.length)charts.textContent='No data available for this tab in this bag.';
+    if(activeTab===category)$('series-status').textContent='';
+  }catch(error){if(activeTab===category)$('series-status').textContent='Error: '+error.message}
+}
+async function initSeries(){
+  const overview=await request('/api/overview');
+  $('summary').textContent=overview.summary;
+  $('tab-match').hidden=!overview.has_matches;
+  await showSeries('pose');
+  // Warm the other tabs without making navigation wait for their first request.
+  for(const category of seriesCategories.slice(1)){
+    const pending=request('/api/plots/'+category);
+    plotDataCache.set(category,pending);
+    pending.catch(()=>plotDataCache.delete(category));
   }
 }
 function trace(points,name,color,size,opacity){
@@ -586,14 +674,13 @@ async function initMatches(){
     if(update['scene.camera'])currentCamera=JSON.parse(JSON.stringify(update['scene.camera']));
   });
 }
-$('tab-series').addEventListener('click',()=>{
-  $('series-panel').hidden=false;$('match-panel').hidden=true;
-  $('tab-series').classList.add('active');$('tab-match').classList.remove('active');
-});
+document.querySelectorAll('.series-tab').forEach(button=>button.addEventListener('click',
+  ()=>showSeries(button.dataset.category)));
 let matchesInitialized=false;
 $('tab-match').addEventListener('click',async()=>{
   $('series-panel').hidden=true;$('match-panel').hidden=false;
-  $('tab-series').classList.remove('active');$('tab-match').classList.add('active');
+  activeTab='match';
+  document.querySelectorAll('nav button').forEach(button=>button.classList.toggle('active',button.id==='tab-match'));
   if(!matchesInitialized){matchesInitialized=true;try{await initMatches()}catch(error){$('scan-summary').textContent='Error: '+error.message}}
   else if(plotReady)Plotly.Plots.resize(mapPlot);
 });
@@ -639,7 +726,12 @@ def serve_viewer(data, port, open_browser):
     from plotly.offline import get_plotlyjs
 
     plotly_js = get_plotlyjs().encode("utf-8")
-    overview = json.dumps(data.overview, separators=(",", ":"), allow_nan=False).encode()
+    overview = json.dumps({key: value for key, value in data.overview.items() if key != "plots"},
+                          separators=(",", ":"), allow_nan=False).encode()
+    plot_payloads = {category: json.dumps([plot for plot in data.overview["plots"]
+                                           if plot["category"] == category],
+                                          separators=(",", ":"), allow_nan=False).encode()
+                     for category in ("pose", "matching", "constraints", "imu")}
 
     class Handler(BaseHTTPRequestHandler):
         def respond(self, body, content_type="application/json", status=200):
@@ -664,6 +756,8 @@ def serve_viewer(data, port, open_browser):
                     self.respond(plotly_js, "text/javascript; charset=utf-8")
                 elif path == "/api/overview":
                     self.respond(overview)
+                elif path.startswith("/api/plots/") and path.removeprefix("/api/plots/") in plot_payloads:
+                    self.respond(plot_payloads[path.removeprefix("/api/plots/")])
                 elif path == "/api/scans":
                     self.json_response(data.scan_index())
                 elif path == "/api/map":
@@ -798,9 +892,10 @@ def main():
             if selected is None:
                 return
             args.bag, args.map_pcd = selected["bag"], selected["map_pcd"]
-        diagnostics, imu, odometry, matches, tf_messages = read_bag(
+        diagnostics, imu, odometry, matches, tf_messages, pose_information = read_bag(
             args.bag, args.diagnostics_topic, args.imu_topic, args.odometry_topic, args.match_debug_topic)
-        data = ViewerData(diagnostics, imu, odometry, matches, tf_messages, args.map_pcd, args.map_point_limit)
+        data = ViewerData(diagnostics, imu, odometry, matches, tf_messages, args.map_pcd,
+                          args.map_point_limit, pose_information)
         serve_viewer(data, args.port, not args.no_open)
     except (ValueError, ImportError, KeyError, OSError) as error:
         parser.exit(2, f"Error: {error}\n")
