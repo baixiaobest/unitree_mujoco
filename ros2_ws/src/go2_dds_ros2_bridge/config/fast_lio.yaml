@@ -23,7 +23,7 @@
             scan_line: 32
             scan_rate: 15
             timestamp_unit: 0
-            blind: 1.0
+            blind: 0.3
 
         mapping:
             acc_cov: 0.1

@@ -89,6 +89,17 @@ matched return, or enter its match number, to query its five map neighbors and
 association lines. The selected return and its association appear in the main
 3D map.
 
+With bags recorded using the updated `MatchDebug` message, the time-series tab
+shows the three raw translation-constraint eigenvalues and their per-match
+normalized values. These are computed offline from the accepted plane normals.
+The 3D tab can show the corresponding axes at the robot position; uncheck
+**Translation constraint axes** to hide them or change **Axis scale** to adjust
+their length. The axes are drawn in both directions because eigenvector sign
+has no physical meaning. Rebuild and source the workspace before recording new
+bags with the updated message definition.
+Older match-debug bags still open, but they have no recorded normals, so the
+constraint plots and axes are unavailable for those scans.
+
 Run the analyzer without a bag argument to open a file-picker window. Use
 **Browse** to select the bag folder and optionally preload a reference PCD:
 

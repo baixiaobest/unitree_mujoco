@@ -76,11 +76,23 @@ def read_bag(bag, diagnostics_topic, imu_topic, odometry_topic, match_debug_topi
             raise ValueError(f"{topic} has unexpected type {topic_types[topic]}")
     selected = [name for name in (*expected, "/tf", "/tf_static") if name in topic_types]
     classes = {name: get_message(topic_types[name]) for name in selected}
+    legacy_match_class = get_message("fast_lio/msg/MatchDebugLegacy") if match_debug_topic in classes else None
+    match_class = classes.get(match_debug_topic)
     messages = {name: [] for name in selected}
     while reader.has_next():
         topic, serialized, _ = reader.read_next()
         if topic in classes:
-            messages[topic].append(deserialize_message(serialized, classes[topic]))
+            if topic == match_debug_topic:
+                try:
+                    message = deserialize_message(serialized, match_class)
+                except Exception:
+                    if match_class == legacy_match_class:
+                        raise
+                    match_class = legacy_match_class
+                    message = deserialize_message(serialized, legacy_match_class)
+                messages[topic].append(message)
+            else:
+                messages[topic].append(deserialize_message(serialized, classes[topic]))
     for name, items in messages.items():
         if name not in ("/tf", "/tf_static"):
             items.sort(key=lambda item: stamp_seconds(item.header.stamp))
@@ -165,6 +177,21 @@ def finite(value):
     return float(value) if math.isfinite(value) else None
 
 
+def translation_constraints(scan):
+    normals = point_array(getattr(scan, "match_normals", []))
+    if not scan.update_valid or not len(normals):
+        return None
+    if len(normals) != len(scan.matched_indices):
+        raise ValueError("Match debug has a different number of normals and matched returns")
+    lengths = np.linalg.norm(normals, axis=1)
+    if not np.isfinite(normals).all() or np.any(lengths < 1e-8):
+        raise ValueError("Match debug contains invalid plane normals")
+    normals = normals / lengths[:, None]
+    values, vectors = np.linalg.eigh(normals.T @ normals)
+    values = np.maximum(values, 0.0)
+    return values, vectors
+
+
 class ViewerData:
     def __init__(self, diagnostics, imu, odometry, matches, tf_messages, map_pcd, map_point_limit):
         if not diagnostics:
@@ -185,6 +212,7 @@ class ViewerData:
             with map_pcd.expanduser().open("rb") as stream:
                 self.set_map(stream)
         self.scans = []
+        self.constraints = []
         self.skipped_scans = 0
         if matches:
             frames = {item.header.frame_id for item in matches}
@@ -207,6 +235,7 @@ class ViewerData:
                     self.skipped_scans += 1
                     continue
                 self.scans.append((scan, transforms[index][1]))
+                self.constraints.append(translation_constraints(scan))
         self.overview = self._make_overview()
 
     def set_map(self, stream):
@@ -225,6 +254,7 @@ class ViewerData:
 
     def scan_payload(self, index):
         scan, transform = self.scans[index]
+        constraint = self.constraints[index]
         count = len(scan.matched_indices)
         if len(scan.map_neighbors) != 5*count or len(scan.signed_residuals) != count:
             raise ValueError(f"Malformed match debug scan {index}: expected five map neighbors per match")
@@ -247,10 +277,16 @@ class ViewerData:
                 direction = rotation_matrix(transform.rotation) @ rotation_matrix(state.orientation) @ np.array([0.4, 0., 0.])
                 pose = np.round(pose_xyz, 4).tolist()
                 tip = np.round(pose_xyz + direction, 4).tolist()
+        axes = None
+        if constraint is not None:
+            values, vectors = constraint
+            axes = {"values": np.round(values, 5).tolist(),
+                    "vectors": np.round(rotation_matrix(transform.rotation) @ vectors, 6).T.tolist()}
         return {"time": round(stamp-self.first, 3),
                 "matched": np.round(points[indices], 4).tolist(),
                 "unmatched": np.round(points[mask], 4).tolist(),
-                "pose": pose, "pose_tip": tip, "valid": bool(scan.update_valid)}
+                "pose": pose, "pose_tip": tip, "constraints": axes,
+                "valid": bool(scan.update_valid)}
 
     def match_payload(self, scan_index, match_index):
         scan, transform = self.scans[scan_index]
@@ -297,6 +333,16 @@ class ViewerData:
         add("match_ratio", "Match ratio", "fraction",
             [("matched / downsampled", x, [item.matched_points/item.downsampled_points
               if item.update_valid and item.downsampled_points else None for item in diagnostics])])
+        if any(item is not None for item in self.constraints):
+            cx = [stamp_seconds(scan.header.stamp)-self.first for scan, _ in self.scans]
+            for normalized, key, title, unit in (
+                    (False, "constraint_raw", "Translation constraint eigenvalues (raw)", "matches"),
+                    (True, "constraint_normalized", "Translation constraint eigenvalues (per match)", "fraction")):
+                add(key, title, unit,
+                    [(name, cx, [float(item[0][i] / (sum(item[0]) if normalized else 1))
+                                 if item is not None and (not normalized or sum(item[0]) > 0) else None
+                                 for item in self.constraints])
+                     for i, name in enumerate(("weakest", "middle", "strongest"))])
         add("residual", "Mean absolute point-to-plane residual", "m",
             [("residual", x, [item.mean_abs_residual if item.update_valid else None for item in diagnostics])])
         add("position_correction", "LiDAR position correction", "m",
@@ -331,6 +377,7 @@ nav button.active{background:white;font-weight:600}
 .controls,.row{display:flex;flex-wrap:wrap;align-items:center;gap:.7rem 1.2rem;margin:1rem 0}
 .controls{padding:1rem;background:#eef3f8;border-radius:.6rem}
 section{border:1px solid #dae1e8;border-radius:.6rem;margin:1rem 0;padding:.5rem}
+section h2{font-size:1.1rem;margin:.25rem .5rem .6rem}
 section label{margin:0 .5rem}section input[type=number]{width:5em}
 #scan-slider{width:min(50vw,500px)}#match-plot{height:700px}
 [hidden]{display:none!important}
@@ -341,6 +388,7 @@ section label{margin:0 .5rem}section input[type=number]{width:5em}
 <p>Each plot has its own trailing smoothing window. Set it to 1 for raw data.
 These signals describe estimator consistency; absolute accuracy requires ground truth.</p></main>
 <main id="match-panel" hidden>
+<h2>3D scan match</h2>
 <div class="row"><label>Reference PCD <input type="file" id="pcd-file" accept=".pcd"></label><span id="map-status"></span></div>
 <form class="row" id="pcd-path-form"><label>Or enter PCD path
 <input type="text" id="pcd-path" value="~/.local/share/go2_fast_lio/maps/map.pcd" size="52"></label>
@@ -354,6 +402,8 @@ These signals describe estimator consistency; absolute accuracy requires ground 
 <label><input type="checkbox" id="show-matched" checked>Matched returns</label>
 <label><input type="checkbox" id="show-unmatched" checked>Unmatched returns</label>
 <label><input type="checkbox" id="show-neighbors" checked>Selected return and five map neighbors</label>
+<label><input type="checkbox" id="show-constraints" checked>Translation constraint axes</label>
+<label>Axis scale <input type="number" id="constraint-scale" min="0.1" step="0.1" value="1" style="width:5em"> m</label>
 </div><div class="row"><form id="match-form"><label>Match number
 <input id="match-number" type="number" min="1" step="1" value="1"></label>
 <button type="submit">Show in map</button></form>
@@ -373,7 +423,7 @@ let scanTimes=[],mapPoints=[],currentScan=null,plotReady=false,selected=null,sca
 let selectedResidual=null;
 let selectedMatchData=null;
 let currentCamera=null;
-const mapPlot=$('match-plot'), switches=['map','matched','unmatched','neighbors']
+const mapPlot=$('match-plot'), switches=['map','matched','unmatched','neighbors','constraints']
   .reduce((items,key)=>(items[key]=$('show-'+key),items),{});
 function smooth(values,width){
   if(width===1)return values;
@@ -391,6 +441,7 @@ async function initSeries(){
   $('tab-match').hidden=!overview.has_matches;
   for(const plot of overview.plots){
     const box=document.createElement('section');
+    const heading=document.createElement('h2');heading.textContent=plot.title;box.append(heading);
     const label=document.createElement('label');label.textContent='Smoothing window (samples): ';
     const input=document.createElement('input');input.type='number';input.min=1;input.step=1;input.value=1;
     input.setAttribute('aria-label','Smoothing window for '+plot.title);
@@ -398,9 +449,9 @@ async function initSeries(){
     const graph=document.createElement('div');box.append(graph);$('plots').append(box);
     const traces=plot.traces.map(t=>({type:(plot.key==='accel'||plot.key==='gyro')?'scattergl':'scatter',
       mode:'lines',name:t.name,x:t.x,y:t.y}));
-    Plotly.newPlot(graph,traces,{title:plot.title,xaxis:{title:'Seconds from first scan'},
+    Plotly.newPlot(graph,traces,{xaxis:{title:'Seconds from first scan'},
       yaxis:{title:plot.unit},height:430,hovermode:'x unified',
-      margin:{l:65,r:25,t:60,b:55}},{responsive:true});
+      margin:{l:65,r:25,t:30,b:55}},{responsive:true});
     const toggle=document.createElement('label');
     const check=document.createElement('input');check.type='checkbox';check.checked=true;
     check.addEventListener('change',()=>box.hidden=!check.checked);
@@ -470,6 +521,22 @@ async function renderScan(){
       x:[scan.pose[0],scan.pose_tip[0]],y:[scan.pose[1],scan.pose_tip[1]],
       z:[scan.pose[2],scan.pose_tip[2]],line:{color:'#2267c5',width:6},hoverinfo:'skip'});
   }
+  if(scan.pose&&scan.constraints&&switches.constraints.checked){
+    const scale=Math.max(.1,Number($('constraint-scale').value)||1);
+    const {values,vectors}=scan.constraints;
+    const total=values.reduce((sum,value)=>sum+value,0);
+    const colors=['#8e44ad','#00a6c7','#e74c3c'];
+    for(let i=0;i<3;i++){
+      const length=total>0?scale*values[i]/total:0;
+      const vector=vectors[i],start=scan.pose;
+      const minus=start.map((v,j)=>v-length*vector[j]);
+      const plus=start.map((v,j)=>v+length*vector[j]);
+      traces.push({type:'scatter3d',mode:'lines',name:['Weakest','Middle','Strongest'][i]+
+        ' constraint: '+values[i].toFixed(2),x:[minus[0],plus[0]],
+        y:[minus[1],plus[1]],z:[minus[2],plus[2]],
+        line:{color:colors[i],width:6},hovertemplate:'%{fullData.name}<extra></extra>'});
+    }
+  }
   traces.push(trace([],'Five map neighbors','#e3265b',3.3,1));
   traces.push({type:'scatter3d',mode:'lines',name:'Associations',
     x:[],y:[],z:[],line:{color:'#e3265b',width:3},hoverinfo:'skip'});
@@ -538,6 +605,7 @@ for(const [key,input] of Object.entries(switches)){
   input.addEventListener('change',key==='neighbors'?
     showSelectedInMap:renderScan);
 }
+$('constraint-scale').addEventListener('change',renderScan);
 $('match-form').addEventListener('submit',event=>{
   event.preventDefault();showMatch(Number($('match-number').value)-1);
 });
