@@ -5,6 +5,8 @@ From source/unitree_mujoco/ros2_ws:
     source /opt/ros/humble/setup.bash
     source install/setup.bash
     python3 src/go2_dds_ros2_bridge/scripts/analyze_fast_lio_bag.py fast_lio_debug_bag/
+    python3 src/go2_dds_ros2_bridge/scripts/analyze_fast_lio_bag.py baseline_bag/ \
+      --compare-bag learned_result/
 
 Omit BAG_DIR to choose it in a file-picker window. The server listens only on
 127.0.0.1; press Ctrl+C to stop it. A relative BAG_DIR uses the terminal's
@@ -13,9 +15,11 @@ current directory. No HTML report file is generated.
 To record a bag while localization runs with match_debug:=true:
     ros2 bag record -o fast_lio_debug_bag \
       /Odometry /fast_lio/estimator_diagnostics /fast_lio/pose_information /fast_lio/match_debug \
-      /fast_lio/velocity_fusion_debug /imu/data_fastlio_raw /odom /estimated_velocity /tf /tf_static
+      /fast_lio/velocity_fusion_debug /utlidar/time_corrected/cloud \
+      /imu/data_fastlio /imu/data_fastlio_raw /odom /estimated_velocity /tf /tf_static
 
 Press Ctrl+C to finish recording. The IMU topic is the Go2 body IMU.
+Use replay_fast_lio_bag.py to produce a result bag from the recorded inputs.
 """
 
 from __future__ import annotations
@@ -69,6 +73,8 @@ def read_bag(bag, diagnostics_topic, imu_topic, odometry_topic, match_debug_topi
         rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"),
     )
     topic_types = {item.name: item.type for item in reader.get_all_topics_and_types()}
+    if imu_topic not in topic_types and imu_topic == BODY_IMU_TOPIC and "/imu/data_fastlio" in topic_types:
+        imu_topic = "/imu/data_fastlio"
     expected = {diagnostics_topic: "fast_lio/msg/EstimatorDiagnostics",
                 imu_topic: "sensor_msgs/msg/Imu",
                 odometry_topic: "nav_msgs/msg/Odometry",
@@ -122,6 +128,38 @@ def read_bag(bag, diagnostics_topic, imu_topic, odometry_topic, match_debug_topi
             messages.get(LEARNED_ODOMETRY_TOPIC, []),
             messages.get(LEARNED_VELOCITY_TOPIC, []),
             messages.get(VELOCITY_FUSION_TOPIC, []))
+
+
+def read_comparison_odometry(bag, topic=ODOMETRY_TOPIC):
+    """Read only the second bag's estimates; its large scan debug data is unnecessary."""
+    try:
+        import rosbag2_py
+    except ModuleNotFoundError as error:
+        raise ImportError("rosbag2_py is unavailable; source ROS and the workspace setup files") from error
+    from rclpy.serialization import deserialize_message
+    from nav_msgs.msg import Odometry
+    import yaml
+
+    bag = bag.expanduser().resolve()
+    metadata = bag / "metadata.yaml"
+    if not metadata.is_file():
+        raise ValueError(f"No metadata.yaml in comparison bag {bag}")
+    info = yaml.safe_load(metadata.read_text())["rosbag2_bagfile_information"]
+    reader = rosbag2_py.SequentialReader()
+    reader.open(rosbag2_py.StorageOptions(uri=str(bag), storage_id=info["storage_identifier"]),
+                rosbag2_py.ConverterOptions(input_serialization_format="cdr", output_serialization_format="cdr"))
+    types = {item.name: item.type for item in reader.get_all_topics_and_types()}
+    if types.get(topic) != "nav_msgs/msg/Odometry":
+        raise ValueError(f"Comparison bag needs {topic} (nav_msgs/msg/Odometry)")
+    messages = []
+    while reader.has_next():
+        name, serialized, _ = reader.read_next()
+        if name == topic:
+            messages.append(deserialize_message(serialized, Odometry))
+    messages.sort(key=lambda item: stamp_seconds(item.header.stamp))
+    if not messages:
+        raise ValueError(f"Comparison bag has no {topic} messages")
+    return messages
 
 
 def read_pcd_xyz(stream):
@@ -297,6 +335,82 @@ def interpolated_pose(series, stamp):
     return position, quaternion_matrix(quaternion)
 
 
+def matrix_rpy(rotation):
+    pitch = math.asin(float(np.clip(-rotation[2, 0], -1, 1)))
+    return [math.atan2(rotation[2, 1], rotation[2, 2]), pitch,
+            math.atan2(rotation[1, 0], rotation[0, 0])]
+
+
+def comparison_payload(primary_messages, second_messages, origin):
+    primary = odometry_series(primary_messages)
+    second = odometry_series(second_messages)
+    if primary is None or second is None:
+        raise ValueError("Both bags need /Odometry for comparison")
+    start = max(primary[0][0], second[0][0])
+    end = min(primary[0][-1], second[0][-1])
+    if start >= end:
+        raise ValueError("The two /Odometry timestamp ranges do not overlap")
+    first_pose = interpolated_pose(primary, start)
+    second_pose = interpolated_pose(second, start)
+    rotation = first_pose[1] @ second_pose[1].T
+    translation = first_pose[0] - rotation @ second_pose[0]
+
+    def sampled(series, align=False):
+        times = series[0]
+        indices = np.flatnonzero((times >= start) & (times <= end))
+        # Keep the 3D scene responsive without reducing time-series resolution.
+        scene_indices = indices
+        if len(indices) > 1500:
+            scene_indices = indices[np.unique(np.linspace(0, len(indices)-1, 1500, dtype=int))]
+        path = series[1][scene_indices]
+        if align:
+            path = path @ rotation.T + translation
+        positions = series[1][indices]
+        if align:
+            positions = positions @ rotation.T + translation
+        rotations = [quaternion_matrix(q) for q in series[2][indices]]
+        if align:
+            rotations = [rotation @ item for item in rotations]
+        return (times[indices]-origin).tolist(), positions, rotations, path.round(4).tolist()
+
+    first_t, first_p, first_r, first_path = sampled(primary)
+    second_t, second_p, second_r, second_path = sampled(second, True)
+    delta_t, delta_p, delta_rotation = [], [], []
+    for stamp, position, orientation in zip(primary[0], primary[1], primary[2]):
+        if not start <= stamp <= end:
+            continue
+        other = interpolated_pose(second, float(stamp))
+        if other is None:
+            continue
+        delta_t.append(float(stamp-origin))
+        delta_p.append(float(np.linalg.norm(position-(rotation @ other[0]+translation))))
+        relative = quaternion_matrix(orientation).T @ rotation @ other[1]
+        delta_rotation.append(math.acos(float(np.clip((np.trace(relative)-1)/2, -1, 1))))
+
+    def plot(key, title, unit, traces):
+        return {"key": key, "category": "comparison", "title": title, "unit": unit,
+                "traces": [{"name": name, "x": times, "y": values} for name, times, values in traces]}
+
+    plots = [
+        plot("comparison_position", "Estimated position: baseline and replay", "m",
+             [(f"baseline {axis}", first_t, first_p[:, index].tolist())
+              for index, axis in enumerate("xyz")] +
+             [(f"replay {axis}", second_t, second_p[:, index].tolist())
+              for index, axis in enumerate("xyz")]),
+        plot("comparison_rotation", "Estimated rotation: baseline and replay", "rad",
+             [(f"baseline {axis}", first_t, [matrix_rpy(item)[index] for item in first_r])
+              for index, axis in enumerate(("roll", "pitch", "yaw"))] +
+             [(f"replay {axis}", second_t, [matrix_rpy(item)[index] for item in second_r])
+              for index, axis in enumerate(("roll", "pitch", "yaw"))]),
+        plot("comparison_position_difference", "Position difference after initial alignment", "m",
+             [("distance", delta_t, delta_p)]),
+        plot("comparison_rotation_difference", "Rotation difference after initial alignment", "rad",
+             [("angle", delta_t, delta_rotation)]),
+    ]
+    return plots, {"baseline": first_path, "replay": second_path,
+                   "alignment_time": round(start-origin, 3)}
+
+
 def aligned_paths(fast_series, learned_series, stamp, map_transform, max_points=1200):
     fast_start = interpolated_pose(fast_series, stamp)
     if fast_start is None:
@@ -368,7 +482,14 @@ class ViewerData:
                         transforms.append((stamp_seconds(item.header.stamp), item.transform))
             transforms.sort(key=lambda item: item[0])
             if not transforms:
-                raise ValueError(f"No map-to-{frame} transform in recorded /tf")
+                if frame != "camera_init":
+                    raise ValueError(f"No map-to-{frame} transform in recorded /tf")
+                # Standalone odometry replay has no external map frame. Its
+                # registered points already use camera_init coordinates.
+                from geometry_msgs.msg import Transform
+                identity = Transform()
+                identity.rotation.w = 1.0
+                transforms = [(float("-inf"), identity)]
             tf_times = [item[0] for item in transforms]
             for scan in matches:
                 stamp = stamp_seconds(scan.header.stamp)
@@ -670,6 +791,7 @@ section label{margin:0 .5rem}section input[type=number]{width:5em}
 <button class="series-tab" data-category="imu">Body IMU</button>
 <button class="series-tab" data-category="learned">Learned odometry</button>
 <button class="series-tab" data-category="fusion">Velocity fusion</button>
+<button class="series-tab" data-category="comparison" id="tab-comparison" hidden>Compare estimates</button>
 <button id="tab-match" hidden>3D scan match</button></nav>
 <main id="series-panel"><div id="series-status" aria-live="polite"></div><div id="plots"></div>
 <p>Each plot has its own trailing smoothing window. Set it to 1 for raw data.
@@ -727,7 +849,7 @@ function smooth(values,width){
   }
   return out;
 }
-const seriesCategories=['pose','matching','constraints','imu','learned','fusion'];
+const seriesCategories=['pose','matching','constraints','imu','learned','fusion','comparison'];
 const seriesCache=new Map();
 const plotDataCache=new Map();
 let activeTab='pose';
@@ -815,6 +937,17 @@ async function showSeries(category){
     if(activeTab!==category)panel.hidden=true;
     await new Promise(resolve=>requestAnimationFrame(resolve));
     }
+    if(category==='comparison'){
+      const paths=await request('/api/comparison-paths');
+      const box=document.createElement('section');
+      const heading=document.createElement('h2');heading.textContent='3D estimate paths';box.append(heading);
+      const graph=document.createElement('div');box.append(graph);charts.append(box);
+      await Plotly.newPlot(graph,[pathTrace(paths.baseline,'Baseline','#2456b8',true),
+        pathTrace(paths.replay,'Replay','#e26a2c',true)],
+        {scene:{aspectmode:'data',xaxis:{title:'x (m)'},yaxis:{title:'y (m)'},zaxis:{title:'z (m)'}},
+         height:650,margin:{l:0,r:0,t:20,b:0},uirevision:'comparison'},
+        {responsive:true});
+    }
     if(!plots.length)charts.textContent='No data available for this tab in this bag.';
     if(activeTab===category)$('series-status').textContent='';
   }catch(error){if(activeTab===category)$('series-status').textContent='Error: '+error.message}
@@ -823,6 +956,7 @@ async function initSeries(){
   const overview=await request('/api/overview');
   $('summary').textContent=overview.summary;
   $('tab-match').hidden=!overview.has_matches;
+  $('tab-comparison').hidden=!overview.has_comparison;
   switches['learned-path'].disabled=!overview.has_learned_odometry;
   switches['rotation-constraints'].disabled=!overview.has_pose_information;
   switches.constraints.disabled=!overview.has_translation_constraints;
@@ -1026,7 +1160,7 @@ initSeries().catch(error=>{$('summary').textContent='Error: '+error.message});
 """
 
 
-def serve_viewer(data, port, open_browser):
+def serve_viewer(data, port, open_browser, comparison_paths=None):
     from plotly.offline import get_plotlyjs
 
     plotly_js = get_plotlyjs().encode("utf-8")
@@ -1035,7 +1169,7 @@ def serve_viewer(data, port, open_browser):
     plot_payloads = {category: json.dumps([plot for plot in data.overview["plots"]
                                            if plot["category"] == category],
                                           separators=(",", ":"), allow_nan=False).encode()
-                     for category in ("pose", "matching", "constraints", "imu", "learned", "fusion")}
+                     for category in ("pose", "matching", "constraints", "imu", "learned", "fusion", "comparison")}
 
     class Handler(BaseHTTPRequestHandler):
         def respond(self, body, content_type="application/json", status=200):
@@ -1060,6 +1194,8 @@ def serve_viewer(data, port, open_browser):
                     self.respond(plotly_js, "text/javascript; charset=utf-8")
                 elif path == "/api/overview":
                     self.respond(overview)
+                elif path == "/api/comparison-paths" and comparison_paths is not None:
+                    self.json_response(comparison_paths)
                 elif path.startswith("/api/plots/") and path.removeprefix("/api/plots/") in plot_payloads:
                     self.respond(plot_payloads[path.removeprefix("/api/plots/")])
                 elif path == "/api/scans":
@@ -1131,11 +1267,12 @@ def select_paths_gui(args):
     except tk.TclError as error:
         raise ValueError(f"Cannot open file picker: {error}. Pass BAG_DIR on the command line") from error
     root.title("FAST-LIO analyzer")
-    root.geometry("720x225")
+    root.geometry("760x275")
     frame = ttk.Frame(root, padding=18)
     frame.pack(fill="both", expand=True)
     frame.columnconfigure(1, weight=1)
     bag_var = tk.StringVar(value=str(args.bag or ""))
+    compare_var = tk.StringVar(value=str(args.compare_bag or ""))
     map_var = tk.StringVar(value=str(args.map_pcd or ""))
     chosen = {}
 
@@ -1150,18 +1287,25 @@ def select_paths_gui(args):
         if path:
             map_var.set(path)
 
+    def choose_compare():
+        path = filedialog.askdirectory(title="Choose comparison ROS 2 bag folder", initialdir=str(Path.cwd()))
+        if path:
+            compare_var.set(path)
+
     for row, (label, variable, command) in enumerate((
         ("ROS 2 bag folder", bag_var, choose_bag),
+        ("Comparison bag (optional)", compare_var, choose_compare),
         ("Reference PCD (optional)", map_var, choose_map),
     )):
         ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=8)
         ttk.Entry(frame, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=8)
         ttk.Button(frame, text="Browse…", command=command).grid(row=row, column=2, padx=(10, 0), pady=8)
     ttk.Label(frame, text="The browser can also load or replace the PCD after the viewer opens.").grid(
-        row=2, column=0, columnspan=3, sticky="w", pady=10)
+        row=3, column=0, columnspan=3, sticky="w", pady=10)
 
     def launch():
         bag = Path(bag_var.get().strip()).expanduser()
+        compare_bag = Path(compare_var.get().strip()).expanduser() if compare_var.get().strip() else None
         map_pcd = Path(map_var.get().strip()).expanduser() if map_var.get().strip() else None
         if not (bag / "metadata.yaml").is_file():
             messagebox.showerror("FAST-LIO analyzer", "Choose a bag folder containing metadata.yaml.")
@@ -1169,10 +1313,13 @@ def select_paths_gui(args):
         if map_pcd is not None and not map_pcd.is_file():
             messagebox.showerror("FAST-LIO analyzer", "Choose an existing PCD file.")
             return
-        chosen.update(bag=bag, map_pcd=map_pcd)
+        if compare_bag is not None and not (compare_bag / "metadata.yaml").is_file():
+            messagebox.showerror("FAST-LIO analyzer", "Choose a comparison bag folder containing metadata.yaml.")
+            return
+        chosen.update(bag=bag, compare_bag=compare_bag, map_pcd=map_pcd)
         root.destroy()
 
-    ttk.Button(frame, text="Open viewer", command=launch).grid(row=3, column=2, sticky="e", pady=10)
+    ttk.Button(frame, text="Open viewer", command=launch).grid(row=4, column=2, sticky="e", pady=10)
     root.mainloop()
     return chosen or None
 
@@ -1180,6 +1327,7 @@ def select_paths_gui(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("bag", nargs="?", type=Path, help="ROS 2 bag directory; omit to choose in a file picker")
+    parser.add_argument("--compare-bag", type=Path, help="Optional second bag to overlay with the primary estimate")
     parser.add_argument("--map-pcd", type=Path, help="Optional reference PCD to load at startup")
     parser.add_argument("--map-point-limit", type=int, default=8000,
                         help="Maximum displayed reference-map points (default: 8000)")
@@ -1195,12 +1343,21 @@ def main():
             selected = select_paths_gui(args)
             if selected is None:
                 return
-            args.bag, args.map_pcd = selected["bag"], selected["map_pcd"]
+            args.bag, args.compare_bag, args.map_pcd = selected["bag"], selected["compare_bag"], selected["map_pcd"]
         diagnostics, imu, odometry, matches, tf_messages, pose_information, learned_odometry, learned_velocity, velocity_fusion = read_bag(
             args.bag, args.diagnostics_topic, args.imu_topic, args.odometry_topic, args.match_debug_topic)
         data = ViewerData(diagnostics, imu, odometry, matches, tf_messages, args.map_pcd,
                           args.map_point_limit, pose_information, learned_odometry, learned_velocity, velocity_fusion)
-        serve_viewer(data, args.port, not args.no_open)
+        comparison_paths = None
+        if args.compare_bag is not None:
+            if args.bag.expanduser().resolve() == args.compare_bag.expanduser().resolve():
+                raise ValueError("Choose two different bags for comparison")
+            second = read_comparison_odometry(args.compare_bag, args.odometry_topic)
+            comparison_plots, comparison_paths = comparison_payload(odometry, second, data.first)
+            data.overview["plots"].extend(comparison_plots)
+            data.overview["summary"] += f" Comparing with {args.compare_bag.expanduser().resolve().name}."
+        data.overview["has_comparison"] = comparison_paths is not None
+        serve_viewer(data, args.port, not args.no_open, comparison_paths)
     except (ValueError, ImportError, KeyError, OSError) as error:
         parser.exit(2, f"Error: {error}\n")
 

@@ -71,7 +71,8 @@ In another sourced terminal, record the estimator, body IMU, and map alignment:
 
 ```bash
 ros2 bag record /Odometry /fast_lio/estimator_diagnostics /fast_lio/pose_information /fast_lio/match_debug \
-  /fast_lio/velocity_fusion_debug /imu/data_fastlio_raw /odom /estimated_velocity /tf /tf_static
+  /fast_lio/velocity_fusion_debug /utlidar/time_corrected/cloud \
+  /imu/data_fastlio /imu/data_fastlio_raw /odom /estimated_velocity /tf /tf_static
 ```
 
 ROS 2 creates the bag folder in that terminal's current working directory.
@@ -103,6 +104,28 @@ recorded `/tf` places each scan in that frame. Select a scan and click a
 matched return, or enter its match number, to query its five map neighbors and
 association lines. The selected return and its association appear in the main
 3D map.
+
+To compare FAST-LIO configurations, record its *inputs* as well as the debug
+outputs. Include `/utlidar/time_corrected/cloud`, `/imu/data_fastlio`, and
+`/estimated_velocity`. The November 25 debug bag has the velocity and output
+topics but lacks the LiDAR cloud and processed IMU, so it can serve as a
+baseline but cannot be rerun. From the sourced ROS workspace:
+
+```bash
+python3 src/go2_dds_ros2_bridge/scripts/replay_fast_lio_bag.py INPUT_BAG --inspect \
+  --mode imu_lidar_learned_velocity
+python3 src/go2_dds_ros2_bridge/scripts/replay_fast_lio_bag.py INPUT_BAG \
+  --mode imu_lidar_learned_velocity --output learned_result
+python3 src/go2_dds_ros2_bridge/scripts/analyze_fast_lio_bag.py BASELINE_BAG \
+  --compare-bag learned_result
+```
+
+The replay script starts only FAST-LIO in an isolated ROS domain, plays the
+recorded inputs, and saves a new output bag plus effective parameters and a
+run manifest. The analyzer's **Compare estimates** tab aligns the two paths at
+their first shared timestamp and plots both estimates and their differences.
+Initial alignment removes frame-origin differences; it does not provide
+ground truth. Inspect velocity fusion status in the result bag for late drops.
 
 The analyzer groups time series in Pose, LiDAR matching, Constraints, Body IMU,
 and Learned odometry tabs. Each tab loads once and retains its plots and
