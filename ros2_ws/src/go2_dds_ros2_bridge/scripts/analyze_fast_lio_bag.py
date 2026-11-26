@@ -835,6 +835,7 @@ These signals describe estimator consistency; absolute accuracy requires ground 
 <label>Rotation axis scale <input type="number" id="rotation-scale" min="0.1" step="0.1" value="1" style="width:5em"> m</label>
 <label><input type="checkbox" id="show-fast-path" checked>FAST-LIO path</label>
 <label><input type="checkbox" id="show-learned-path" checked>Learned odometry path</label>
+<label><input type="checkbox" id="show-replay-path" checked>Replay estimate path</label>
 </div><div class="row"><form id="match-form"><label>Match number
 <input id="match-number" type="number" min="1" step="1" value="1"></label>
 <button type="submit">Show in map</button></form>
@@ -850,12 +851,12 @@ const request=async(path,options)=>{
   if(!response.ok)throw Error(data.error||response.statusText);
   return data;
 };
-let scanTimes=[],mapPoints=[],currentScan=null,plotReady=false,selected=null,scanToken=0,matchToken=0;
+let scanTimes=[],mapPoints=[],replayPath=null,currentScan=null,plotReady=false,selected=null,scanToken=0,matchToken=0;
 let selectedResidual=null;
 let selectedMatchData=null;
 let currentCamera=null;
 const mapPlot=$('match-plot'), switches=['map','matched','unmatched','neighbors','constraints',
-  'rotation-constraints','fast-path','learned-path']
+  'rotation-constraints','fast-path','learned-path','replay-path']
   .reduce((items,key)=>(items[key]=$('show-'+key),items),{});
 function smooth(values,width){
   if(width===1)return values;
@@ -976,6 +977,7 @@ async function initSeries(){
   $('tab-match').hidden=!overview.has_matches;
   $('tab-comparison').hidden=!overview.has_comparison;
   switches['learned-path'].disabled=!overview.has_learned_odometry;
+  switches['replay-path'].disabled=!overview.has_comparison;
   switches['rotation-constraints'].disabled=!overview.has_pose_information;
   switches.constraints.disabled=!overview.has_translation_constraints;
   if(activeTab!=='match')await showSeries(activeTab);
@@ -1067,6 +1069,13 @@ async function renderScan(){
   }
   traces.push(pathTrace(scan.fast_path,'FAST-LIO estimate','#2456b8',switches['fast-path'].checked));
   traces.push(pathTrace(scan.learned_path,'Learned-velocity odometry','#e26a2c',switches['learned-path'].checked));
+  const replayPoints=replayPath?.points;
+  traces.push(pathTrace(replayPoints,'Replay estimate path','#b53291',switches['replay-path'].checked));
+  const replayIndex=replayPath?.times.length?nearestTimeIndex(replayPath.times,scan.time):-1;
+  const replayMarker=trace(replayIndex>=0?[replayPoints[replayIndex]]:[],
+    'Replay estimate position','#b53291',7,1);
+  replayMarker.visible=!!replayPoints&&switches['replay-path'].checked;
+  traces.push(replayMarker);
   traces.push(...constraintTraces(scan.constraints,scan.pose,
     Math.max(.1,Number($('constraint-scale').value)||1),'Translation constraint',
     ['#8e44ad','#00a6c7','#e74c3c'],switches.constraints.checked));
@@ -1109,6 +1118,9 @@ async function initMatches(){
     option.textContent=scanTimes[i].toFixed(3)+' s';$('scan-select').append(option);
   }
   const map=await request('/api/map');mapPoints=map.points;
+  if(!$('tab-comparison').hidden){
+    const paths=await request('/api/match-replay-path');replayPath=paths.replay;
+  }
   $('map-status').textContent=map.count?map.count+' displayed map points':'Choose a reference PCD to show the map.';
   if(scanTimes.length)await chooseScan(0);
   mapPlot.on('plotly_click',event=>{
@@ -1140,7 +1152,8 @@ function setTraceVisibility(key){
   if(!plotReady)return;
   const prefixes={map:'Reference map',matched:'Matched returns',unmatched:'Unmatched returns',
     constraints:'Translation constraint','rotation-constraints':'Rotation constraint',
-    'fast-path':'FAST-LIO estimate','learned-path':'Learned-velocity odometry'};
+    'fast-path':'FAST-LIO estimate','learned-path':'Learned-velocity odometry',
+    'replay-path':'Replay estimate'};
   const indices=mapPlot.data.flatMap((trace,index)=>trace.name.startsWith(prefixes[key])?[index]:[]);
   if(indices.length)Plotly.restyle(mapPlot,{visible:switches[key].checked},indices);
 }
@@ -1242,6 +1255,7 @@ def load_viewer(args, bag, compare_bag=None, map_pcd=None, previous=None):
                           args.map_point_limit, pose_information, learned_odometry, learned_velocity, velocity_fusion)
     overview_data = {**data.overview, "plots": list(data.overview["plots"])}
     comparison_paths = None
+    match_replay_path = None
     if compare_bag is not None:
         if bag == compare_bag:
             raise ValueError("Choose two different bags for comparison")
@@ -1249,6 +1263,24 @@ def load_viewer(args, bag, compare_bag=None, map_pcd=None, previous=None):
         comparison_plots, comparison_paths = comparison_payload(data.odometry, second, data.first)
         overview_data["plots"].extend(comparison_plots)
         overview_data["summary"] += f" Comparing with {compare_bag.name}."
+        if data.scans:
+            # Replay /Odometry is an absolute estimate in its recorded frame.
+            # Keep that pose; learned /odom alone is anchored at the selected scan.
+            frame = second[0].header.frame_id.lstrip("/")
+            scan_frame = data.scans[0][0].header.frame_id.lstrip("/")
+            if frame not in (scan_frame, "map"):
+                raise ValueError(f"Replay /Odometry frame {frame} cannot be placed in the match map")
+            series = odometry_series(second)
+            indices = np.flatnonzero((series[0] >= data.odom_times[0]) &
+                                     (series[0] <= data.odom_times[-1]))
+            if len(indices) > 1500:
+                indices = indices[np.unique(np.linspace(0, len(indices)-1, 1500, dtype=int))]
+            positions = series[1][indices]
+            if frame == scan_frame:
+                transform = data.scans[0][1]
+                positions = transform_points(positions, transform)
+            match_replay_path = {"times": np.round(series[0][indices]-data.first, 3).tolist(),
+                                 "points": np.round(positions, 4).tolist()}
     overview_data["has_comparison"] = comparison_paths is not None
     overview = json.dumps({key: value for key, value in overview_data.items() if key != "plots"},
                           separators=(",", ":"), allow_nan=False).encode()
@@ -1258,7 +1290,8 @@ def load_viewer(args, bag, compare_bag=None, map_pcd=None, previous=None):
                      for category in ("pose", "matching", "constraints", "imu", "learned", "fusion", "comparison")}
     return {"bag": str(bag), "compare_bag": str(compare_bag) if compare_bag else "",
             "map_pcd": str(map_pcd) if map_pcd else "", "data": data,
-            "overview": overview, "plots": plot_payloads, "comparison_paths": comparison_paths}
+            "overview": overview, "plots": plot_payloads, "comparison_paths": comparison_paths,
+            "match_replay_path": match_replay_path}
 
 
 def browse_paths(raw_path, kind):
@@ -1327,6 +1360,8 @@ def serve_viewer(args):
                     self.respond(current["overview"])
                 elif path == "/api/comparison-paths" and current["comparison_paths"] is not None:
                     self.json_response(current["comparison_paths"])
+                elif path == "/api/match-replay-path" and current["match_replay_path"] is not None:
+                    self.json_response({"replay": current["match_replay_path"]})
                 elif path.startswith("/api/plots/") and path.removeprefix("/api/plots/") in current["plots"]:
                     self.respond(current["plots"][path.removeprefix("/api/plots/")])
                 elif path == "/api/scans":
