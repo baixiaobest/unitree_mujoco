@@ -19,7 +19,7 @@
             mode: "imu_lidar"
             topic: "/estimated_velocity"
             # Learned body-frame linear velocity standard deviation [x, y, z] in m/s.
-            stddev: [0.5, 0.5, 0.5]
+            stddev: [0.1, 0.1, 0.1]
             # base_link origin in the body IMU frame; launch supplies the same TF.
             base_in_imu_translation: [0.02557, 0.0, -0.04232]
             base_in_imu_rotation: [1.0, 0.0, 0.0,
