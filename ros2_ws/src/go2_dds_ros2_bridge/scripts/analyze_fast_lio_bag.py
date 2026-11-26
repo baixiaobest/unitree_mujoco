@@ -8,7 +8,7 @@ From source/unitree_mujoco/ros2_ws:
     python3 src/go2_dds_ros2_bridge/scripts/analyze_fast_lio_bag.py baseline_bag/ \
       --compare-bag learned_result/
 
-Omit BAG_DIR to choose it in a file-picker window. The server listens only on
+Omit BAG_DIR to choose it in the web page. The server listens only on
 127.0.0.1; press Ctrl+C to stop it. A relative BAG_DIR uses the terminal's
 current directory. No HTML report file is generated.
 
@@ -33,7 +33,7 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
@@ -782,10 +782,28 @@ section{border:1px solid #dae1e8;border-radius:.6rem;margin:1rem 0;padding:.5rem
 section h2{font-size:1.1rem;margin:.25rem .5rem .6rem}
 section label{margin:0 .5rem}section input[type=number]{width:5em}
 #scan-slider{width:min(50vw,500px)}#match-plot{height:700px}
+#bag-form input[type=text]{width:min(52vw,580px)}
+#path-dialog{border:1px solid #dae1e8;border-radius:.6rem;width:min(720px,90vw);max-height:80vh}
+#browser-entries{max-height:50vh;overflow:auto;display:grid;gap:.25rem}
+#browser-entries button{text-align:left;padding:.35rem;border:0;background:#eef3f8;cursor:pointer}
 [hidden]{display:none!important}
 </style></head><body>
 <h1>FAST-LIO estimator diagnostics</h1><p id="summary">Loading bag…</p>
-<nav><button class="series-tab active" data-category="pose">Pose</button>
+<form id="bag-form" class="controls">
+<label>Baseline bag <input type="text" id="bag-path" placeholder="ROS bag directory" required></label>
+<button type="button" class="browse-path" data-target="bag-path" data-kind="bag">Browse…</button>
+<label>Compare bag <input type="text" id="compare-path" placeholder="Optional second bag"></label>
+<button type="button" class="browse-path" data-target="compare-path" data-kind="bag">Browse…</button>
+<label>Reference PCD <input type="text" id="initial-map-path" placeholder="Optional .pcd file"></label>
+<button type="button" class="browse-path" data-target="initial-map-path" data-kind="pcd">Browse…</button>
+<button type="submit" id="load-bags">Load</button><span id="bag-status" aria-live="polite"></span>
+</form>
+<dialog id="path-dialog"><h2 id="browser-title">Browse</h2><p id="browser-current"></p>
+<div class="row"><button type="button" id="browser-up">↑ Parent</button>
+<button type="button" id="browser-use">Use this bag folder</button>
+<button type="button" id="browser-close">Close</button></div>
+<div id="browser-entries"></div></dialog>
+<nav hidden><button class="series-tab active" data-category="pose">Pose</button>
 <button class="series-tab" data-category="matching">LiDAR matching</button>
 <button class="series-tab" data-category="constraints">Constraints</button>
 <button class="series-tab" data-category="imu">Body IMU</button>
@@ -793,7 +811,7 @@ section label{margin:0 .5rem}section input[type=number]{width:5em}
 <button class="series-tab" data-category="fusion">Velocity fusion</button>
 <button class="series-tab" data-category="comparison" id="tab-comparison" hidden>Compare estimates</button>
 <button id="tab-match" hidden>3D scan match</button></nav>
-<main id="series-panel"><div id="series-status" aria-live="polite"></div><div id="plots"></div>
+<main id="series-panel" hidden><div id="series-status" aria-live="polite"></div><div id="plots"></div>
 <p>Each plot has its own trailing smoothing window. Set it to 1 for raw data.
 These signals describe estimator consistency; absolute accuracy requires ground truth.</p></main>
 <main id="match-panel" hidden>
@@ -1156,20 +1174,121 @@ $('pcd-path-form').addEventListener('submit',async event=>{
     await renderScan();
   }catch(error){$('map-status').textContent='Error: '+error.message}
 });
-initSeries().catch(error=>{$('summary').textContent='Error: '+error.message});
+let browserTarget=null,browserKind=null,browserPath=null;
+async function browse(path){
+  const view=await request('/api/browse?kind='+encodeURIComponent(browserKind)+
+    '&path='+encodeURIComponent(path||'.'));
+  browserPath=view.path;
+  $('browser-current').textContent=view.path;
+  $('browser-use').hidden=browserKind!=='bag'||!view.is_bag;
+  $('browser-up').disabled=view.parent===view.path;
+  $('browser-up').onclick=()=>browse(view.parent);
+  const entries=$('browser-entries');entries.replaceChildren();
+  for(const entry of view.entries){
+    const button=document.createElement('button');button.type='button';
+    button.textContent=(entry.directory?'📁 ':'📄 ')+entry.name+(entry.is_bag?' (ROS bag)':'');
+    button.onclick=()=>{
+      if(entry.directory)browse(entry.path).catch(error=>$('browser-current').textContent='Error: '+error.message);
+      else{$(browserTarget).value=entry.path;$('path-dialog').close()}
+    };
+    entries.append(button);
+  }
+}
+document.querySelectorAll('.browse-path').forEach(button=>button.addEventListener('click',async()=>{
+  browserTarget=button.dataset.target;browserKind=button.dataset.kind;
+  $('browser-title').textContent=browserKind==='pcd'?'Choose reference PCD':'Choose ROS bag folder';
+  $('path-dialog').showModal();
+  try{await browse($(browserTarget).value.trim()||'.')}
+  catch(error){$('browser-current').textContent='Error: '+error.message}
+}));
+$('browser-use').addEventListener('click',()=>{
+  $(browserTarget).value=browserPath;$('path-dialog').close();
+});
+$('browser-close').addEventListener('click',()=>$('path-dialog').close());
+$('bag-form').addEventListener('submit',async event=>{
+  event.preventDefault();
+  const button=$('load-bags');button.disabled=true;$('bag-status').textContent='Loading bags…';
+  try{
+    await request('/api/load',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({bag:$('bag-path').value.trim(),
+        compare_bag:$('compare-path').value.trim(),map_pcd:$('initial-map-path').value.trim()})});
+    location.reload();
+  }catch(error){$('bag-status').textContent='Error: '+error.message;button.disabled=false}
+});
+async function initializeApp(){
+  const config=await request('/api/config');
+  $('bag-path').value=config.bag||'';
+  $('compare-path').value=config.compare_bag||'';
+  $('initial-map-path').value=config.map_pcd||'';
+  if(!config.loaded){$('summary').textContent='Choose a ROS bag folder to begin.';return}
+  document.querySelector('nav').hidden=false;
+  $('series-panel').hidden=false;
+  await initSeries();
+}
+initializeApp().catch(error=>{$('summary').textContent='Error: '+error.message});
 """
 
 
-def serve_viewer(data, port, open_browser, comparison_paths=None):
-    from plotly.offline import get_plotlyjs
-
-    plotly_js = get_plotlyjs().encode("utf-8")
-    overview = json.dumps({key: value for key, value in data.overview.items() if key != "plots"},
+def load_viewer(args, bag, compare_bag=None, map_pcd=None, previous=None):
+    bag = Path(bag).expanduser().resolve()
+    compare_bag = Path(compare_bag).expanduser().resolve() if compare_bag else None
+    map_pcd = Path(map_pcd).expanduser().resolve() if map_pcd else None
+    if previous and previous["bag"] == str(bag) and previous["map_pcd"] == (str(map_pcd) if map_pcd else ""):
+        data = previous["data"]
+    else:
+        diagnostics, imu, odometry, matches, tf_messages, pose_information, learned_odometry, learned_velocity, velocity_fusion = read_bag(
+            bag, args.diagnostics_topic, args.imu_topic, args.odometry_topic, args.match_debug_topic)
+        data = ViewerData(diagnostics, imu, odometry, matches, tf_messages, map_pcd,
+                          args.map_point_limit, pose_information, learned_odometry, learned_velocity, velocity_fusion)
+    overview_data = {**data.overview, "plots": list(data.overview["plots"])}
+    comparison_paths = None
+    if compare_bag is not None:
+        if bag == compare_bag:
+            raise ValueError("Choose two different bags for comparison")
+        second = read_comparison_odometry(compare_bag, args.odometry_topic)
+        comparison_plots, comparison_paths = comparison_payload(data.odometry, second, data.first)
+        overview_data["plots"].extend(comparison_plots)
+        overview_data["summary"] += f" Comparing with {compare_bag.name}."
+    overview_data["has_comparison"] = comparison_paths is not None
+    overview = json.dumps({key: value for key, value in overview_data.items() if key != "plots"},
                           separators=(",", ":"), allow_nan=False).encode()
-    plot_payloads = {category: json.dumps([plot for plot in data.overview["plots"]
+    plot_payloads = {category: json.dumps([plot for plot in overview_data["plots"]
                                            if plot["category"] == category],
                                           separators=(",", ":"), allow_nan=False).encode()
                      for category in ("pose", "matching", "constraints", "imu", "learned", "fusion", "comparison")}
+    return {"bag": str(bag), "compare_bag": str(compare_bag) if compare_bag else "",
+            "map_pcd": str(map_pcd) if map_pcd else "", "data": data,
+            "overview": overview, "plots": plot_payloads, "comparison_paths": comparison_paths}
+
+
+def browse_paths(raw_path, kind):
+    if kind not in ("bag", "pcd"):
+        raise ValueError("Invalid browser kind")
+    path = Path(raw_path or ".").expanduser().resolve()
+    if path.is_file():
+        path = path.parent
+    if not path.is_dir():
+        raise ValueError(f"Not a directory: {path}")
+    entries = []
+    for item in sorted(path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+        try:
+            directory = item.is_dir()
+            if directory or (kind == "pcd" and item.is_file() and item.suffix.lower() == ".pcd"):
+                entries.append({"name": item.name, "path": str(item), "directory": directory,
+                                "is_bag": directory and (item / "metadata.yaml").is_file()})
+        except OSError:
+            continue
+        if len(entries) >= 500:
+            break
+    return {"path": str(path), "parent": str(path.parent),
+            "is_bag": (path / "metadata.yaml").is_file(), "entries": entries}
+
+
+def serve_viewer(args):
+    from plotly.offline import get_plotlyjs
+
+    plotly_js = get_plotlyjs().encode("utf-8")
+    state = {"current": load_viewer(args, args.bag, args.compare_bag, args.map_pcd) if args.bag else None}
 
     class Handler(BaseHTTPRequestHandler):
         def respond(self, body, content_type="application/json", status=200):
@@ -1184,7 +1303,9 @@ def serve_viewer(data, port, open_browser, comparison_paths=None):
             self.respond(json.dumps(value, separators=(",", ":"), allow_nan=False).encode(), status=status)
 
         def do_GET(self):
-            path = urlparse(self.path).path
+            parsed = urlparse(self.path)
+            path = parsed.path
+            current = state["current"]
             try:
                 if path == "/":
                     self.respond(VIEWER_HTML.encode(), "text/html; charset=utf-8")
@@ -1192,39 +1313,64 @@ def serve_viewer(data, port, open_browser, comparison_paths=None):
                     self.respond(VIEWER_JS.encode(), "text/javascript; charset=utf-8")
                 elif path == "/plotly.js":
                     self.respond(plotly_js, "text/javascript; charset=utf-8")
+                elif path == "/api/config":
+                    self.json_response({"loaded": current is not None,
+                        "bag": current["bag"] if current else str(args.bag or ""),
+                        "compare_bag": current["compare_bag"] if current else str(args.compare_bag or ""),
+                        "map_pcd": current["map_pcd"] if current else str(args.map_pcd or "")})
+                elif path == "/api/browse":
+                    query = parse_qs(parsed.query)
+                    self.json_response(browse_paths(query.get("path", ["."])[0], query.get("kind", ["bag"])[0]))
+                elif current is None:
+                    self.json_response({"error": "Load a baseline bag first"}, 409)
                 elif path == "/api/overview":
-                    self.respond(overview)
-                elif path == "/api/comparison-paths" and comparison_paths is not None:
-                    self.json_response(comparison_paths)
-                elif path.startswith("/api/plots/") and path.removeprefix("/api/plots/") in plot_payloads:
-                    self.respond(plot_payloads[path.removeprefix("/api/plots/")])
+                    self.respond(current["overview"])
+                elif path == "/api/comparison-paths" and current["comparison_paths"] is not None:
+                    self.json_response(current["comparison_paths"])
+                elif path.startswith("/api/plots/") and path.removeprefix("/api/plots/") in current["plots"]:
+                    self.respond(current["plots"][path.removeprefix("/api/plots/")])
                 elif path == "/api/scans":
-                    self.json_response(data.scan_index())
+                    self.json_response(current["data"].scan_index())
                 elif path == "/api/map":
-                    self.json_response(data.map_payload())
+                    self.json_response(current["data"].map_payload())
                 elif path.startswith("/api/scan/"):
                     parts = path.split("/")
                     if len(parts) not in (4, 6) or (len(parts) == 6 and parts[4] != "match"):
                         raise ValueError("Invalid scan request")
                     index = int(parts[3])
-                    if not 0 <= index < len(data.scans):
+                    if not 0 <= index < len(current["data"].scans):
                         raise ValueError("Scan index out of range")
                     if len(parts) == 6:
-                        self.json_response(data.match_payload(index, int(parts[5])))
+                        self.json_response(current["data"].match_payload(index, int(parts[5])))
                     else:
-                        self.json_response(data.scan_payload(index))
+                        self.json_response(current["data"].scan_payload(index))
                 else:
                     self.json_response({"error": "Not found"}, 404)
-            except (ValueError, IndexError) as error:
+            except (ValueError, IndexError, OSError) as error:
                 self.json_response({"error": str(error)}, 400)
 
         def do_POST(self):
             path = urlparse(self.path).path
-            if path not in ("/api/map", "/api/map-path"):
+            if path not in ("/api/load", "/api/map", "/api/map-path"):
                 self.json_response({"error": "Not found"}, 404)
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
+                if path == "/api/load":
+                    if not 0 < length <= 16384:
+                        raise ValueError("Bag selection request is empty or too long")
+                    requested = json.loads(self.rfile.read(length))
+                    if not requested.get("bag"):
+                        raise ValueError("Choose a baseline ROS bag folder")
+                    selected = load_viewer(args, requested["bag"], requested.get("compare_bag"),
+                                           requested.get("map_pcd"), state["current"])
+                    state["current"] = selected
+                    self.json_response({"loaded": True, "bag": selected["bag"]})
+                    return
+                current = state["current"]
+                if current is None:
+                    raise ValueError("Load a baseline bag first")
+                data = current["data"]
                 if path == "/api/map-path":
                     if not 0 < length <= 4096:
                         raise ValueError("PCD path request is empty or too long")
@@ -1244,11 +1390,11 @@ def serve_viewer(data, port, open_browser, comparison_paths=None):
         def log_message(self, format, *args):
             return
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     url = f"http://127.0.0.1:{server.server_port}/"
     print(f"FAST-LIO viewer: {url}")
     print("Press Ctrl+C to stop the server.")
-    if open_browser:
+    if not args.no_open:
         threading.Timer(0.3, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
@@ -1258,75 +1404,9 @@ def serve_viewer(data, port, open_browser, comparison_paths=None):
         server.server_close()
 
 
-def select_paths_gui(args):
-    import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
-
-    try:
-        root = tk.Tk()
-    except tk.TclError as error:
-        raise ValueError(f"Cannot open file picker: {error}. Pass BAG_DIR on the command line") from error
-    root.title("FAST-LIO analyzer")
-    root.geometry("760x275")
-    frame = ttk.Frame(root, padding=18)
-    frame.pack(fill="both", expand=True)
-    frame.columnconfigure(1, weight=1)
-    bag_var = tk.StringVar(value=str(args.bag or ""))
-    compare_var = tk.StringVar(value=str(args.compare_bag or ""))
-    map_var = tk.StringVar(value=str(args.map_pcd or ""))
-    chosen = {}
-
-    def choose_bag():
-        path = filedialog.askdirectory(title="Choose ROS 2 bag folder", initialdir=str(Path.cwd()))
-        if path:
-            bag_var.set(path)
-
-    def choose_map():
-        path = filedialog.askopenfilename(title="Choose reference PCD", initialdir=str(Path.cwd()),
-                                          filetypes=[("PCD point clouds", "*.pcd"), ("All files", "*")])
-        if path:
-            map_var.set(path)
-
-    def choose_compare():
-        path = filedialog.askdirectory(title="Choose comparison ROS 2 bag folder", initialdir=str(Path.cwd()))
-        if path:
-            compare_var.set(path)
-
-    for row, (label, variable, command) in enumerate((
-        ("ROS 2 bag folder", bag_var, choose_bag),
-        ("Comparison bag (optional)", compare_var, choose_compare),
-        ("Reference PCD (optional)", map_var, choose_map),
-    )):
-        ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=8)
-        ttk.Entry(frame, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=8)
-        ttk.Button(frame, text="Browse…", command=command).grid(row=row, column=2, padx=(10, 0), pady=8)
-    ttk.Label(frame, text="The browser can also load or replace the PCD after the viewer opens.").grid(
-        row=3, column=0, columnspan=3, sticky="w", pady=10)
-
-    def launch():
-        bag = Path(bag_var.get().strip()).expanduser()
-        compare_bag = Path(compare_var.get().strip()).expanduser() if compare_var.get().strip() else None
-        map_pcd = Path(map_var.get().strip()).expanduser() if map_var.get().strip() else None
-        if not (bag / "metadata.yaml").is_file():
-            messagebox.showerror("FAST-LIO analyzer", "Choose a bag folder containing metadata.yaml.")
-            return
-        if map_pcd is not None and not map_pcd.is_file():
-            messagebox.showerror("FAST-LIO analyzer", "Choose an existing PCD file.")
-            return
-        if compare_bag is not None and not (compare_bag / "metadata.yaml").is_file():
-            messagebox.showerror("FAST-LIO analyzer", "Choose a comparison bag folder containing metadata.yaml.")
-            return
-        chosen.update(bag=bag, compare_bag=compare_bag, map_pcd=map_pcd)
-        root.destroy()
-
-    ttk.Button(frame, text="Open viewer", command=launch).grid(row=4, column=2, sticky="e", pady=10)
-    root.mainloop()
-    return chosen or None
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("bag", nargs="?", type=Path, help="ROS 2 bag directory; omit to choose in a file picker")
+    parser.add_argument("bag", nargs="?", type=Path, help="ROS 2 bag directory; omit to choose in the web page")
     parser.add_argument("--compare-bag", type=Path, help="Optional second bag to overlay with the primary estimate")
     parser.add_argument("--map-pcd", type=Path, help="Optional reference PCD to load at startup")
     parser.add_argument("--map-point-limit", type=int, default=8000,
@@ -1339,25 +1419,7 @@ def main():
     parser.add_argument("--match-debug-topic", default=MATCH_DEBUG_TOPIC)
     args = parser.parse_args()
     try:
-        if args.bag is None:
-            selected = select_paths_gui(args)
-            if selected is None:
-                return
-            args.bag, args.compare_bag, args.map_pcd = selected["bag"], selected["compare_bag"], selected["map_pcd"]
-        diagnostics, imu, odometry, matches, tf_messages, pose_information, learned_odometry, learned_velocity, velocity_fusion = read_bag(
-            args.bag, args.diagnostics_topic, args.imu_topic, args.odometry_topic, args.match_debug_topic)
-        data = ViewerData(diagnostics, imu, odometry, matches, tf_messages, args.map_pcd,
-                          args.map_point_limit, pose_information, learned_odometry, learned_velocity, velocity_fusion)
-        comparison_paths = None
-        if args.compare_bag is not None:
-            if args.bag.expanduser().resolve() == args.compare_bag.expanduser().resolve():
-                raise ValueError("Choose two different bags for comparison")
-            second = read_comparison_odometry(args.compare_bag, args.odometry_topic)
-            comparison_plots, comparison_paths = comparison_payload(odometry, second, data.first)
-            data.overview["plots"].extend(comparison_plots)
-            data.overview["summary"] += f" Comparing with {args.compare_bag.expanduser().resolve().name}."
-        data.overview["has_comparison"] = comparison_paths is not None
-        serve_viewer(data, args.port, not args.no_open, comparison_paths)
+        serve_viewer(args)
     except (ValueError, ImportError, KeyError, OSError) as error:
         parser.exit(2, f"Error: {error}\n")
 

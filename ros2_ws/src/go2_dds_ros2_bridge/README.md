@@ -90,8 +90,9 @@ python3 src/go2_dds_ros2_bridge/scripts/analyze_fast_lio_bag.py BASELINE_BAG \
   --compare-bag learned_result
 ```
 
-Omit `BAG_DIR` to choose a bag in a file picker. Relative paths use the
-terminal's current directory. In **3D scan match**, load the reference PCD,
+Omit `BAG_DIR` to choose a bag in the web page; the comparison bag and PCD
+can be selected there too. Relative paths use the terminal's current
+directory. In **3D scan match**, load the reference PCD,
 select a scan, and click a matched return to see its five map neighbors.
 Each time-series plot has its own smoothing control. **Compare estimates**
 aligns the two paths at their first shared timestamp; neither is ground truth.
