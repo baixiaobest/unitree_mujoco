@@ -121,7 +121,7 @@ def run(args) -> None:
     values["common"]["lid_topic"] = args.cloud_topic
     values["common"]["imu_topic"] = args.imu_topic
     values["learned_velocity"].update(
-        mode=args.mode, topic=args.velocity_topic, stddev=args.sigma,
+        mode=args.mode, topic=args.velocity_topic,
         base_in_imu_translation=[float(v) for v in base_t],
         base_in_imu_rotation=flatten_rotation_matrix(base_r))
     values["mapping"]["extrinsic_est_en"] = False
@@ -240,11 +240,10 @@ def main() -> None:
     parser.add_argument("--imu-topic", default=DEFAULT_IMU)
     parser.add_argument("--raw-imu-topic", default=f"{DEFAULT_IMU}_raw")
     parser.add_argument("--velocity-topic", default=DEFAULT_VELOCITY)
-    parser.add_argument("--sigma", type=float, nargs=3, default=[0.5, 0.5, 0.5], metavar=("X", "Y", "Z"))
     args = parser.parse_args()
     try:
-        if args.rate <= 0 or any(not 0 < value < float("inf") for value in args.sigma):
-            raise ValueError("Replay rate and velocity standard deviations must be finite and positive")
+        if args.rate <= 0 or not args.rate < float("inf"):
+            raise ValueError("Replay rate must be finite and positive")
         args.bag = args.bag.expanduser().resolve()
         args.topics = inspect_bag(args.bag)
         required = {args.cloud_topic: "sensor_msgs/msg/PointCloud2", args.imu_topic: "sensor_msgs/msg/Imu"}
