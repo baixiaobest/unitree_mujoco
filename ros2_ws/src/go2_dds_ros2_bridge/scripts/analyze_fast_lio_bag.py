@@ -13,7 +13,7 @@ current directory. No HTML report file is generated.
 To record a bag while localization runs with match_debug:=true:
     ros2 bag record -o fast_lio_debug_bag \
       /Odometry /fast_lio/estimator_diagnostics /fast_lio/pose_information /fast_lio/match_debug \
-      /imu/data_fastlio_raw /odom /estimated_velocity /tf /tf_static
+      /fast_lio/velocity_fusion_debug /imu/data_fastlio_raw /odom /estimated_velocity /tf /tf_static
 
 Press Ctrl+C to finish recording. The IMU topic is the Go2 body IMU.
 """
@@ -41,6 +41,7 @@ MATCH_DEBUG_TOPIC = "/fast_lio/match_debug"
 POSE_INFORMATION_TOPIC = "/fast_lio/pose_information"
 LEARNED_ODOMETRY_TOPIC = "/odom"
 LEARNED_VELOCITY_TOPIC = "/estimated_velocity"
+VELOCITY_FUSION_TOPIC = "/fast_lio/velocity_fusion_debug"
 
 
 def stamp_seconds(stamp):
@@ -75,6 +76,7 @@ def read_bag(bag, diagnostics_topic, imu_topic, odometry_topic, match_debug_topi
                 POSE_INFORMATION_TOPIC: "fast_lio/msg/PoseInformation",
                 LEARNED_ODOMETRY_TOPIC: "nav_msgs/msg/Odometry",
                 LEARNED_VELOCITY_TOPIC: "geometry_msgs/msg/TwistStamped"}
+    expected[VELOCITY_FUSION_TOPIC] = "fast_lio/msg/VelocityFusionDebug"
     if diagnostics_topic not in topic_types:
         raise ValueError(f"Missing {diagnostics_topic}; available topics: {', '.join(sorted(topic_types))}")
     for topic, type_name in expected.items():
@@ -118,7 +120,8 @@ def read_bag(bag, diagnostics_topic, imu_topic, odometry_topic, match_debug_topi
             messages.get("/tf", []) + messages.get("/tf_static", []),
             messages.get(POSE_INFORMATION_TOPIC, []),
             messages.get(LEARNED_ODOMETRY_TOPIC, []),
-            messages.get(LEARNED_VELOCITY_TOPIC, []))
+            messages.get(LEARNED_VELOCITY_TOPIC, []),
+            messages.get(VELOCITY_FUSION_TOPIC, []))
 
 
 def read_pcd_xyz(stream):
@@ -325,7 +328,7 @@ def aligned_paths(fast_series, learned_series, stamp, map_transform, max_points=
 
 class ViewerData:
     def __init__(self, diagnostics, imu, odometry, matches, tf_messages, map_pcd, map_point_limit,
-                 pose_information=(), learned_odometry=(), learned_velocity=()):
+                 pose_information=(), learned_odometry=(), learned_velocity=(), velocity_fusion=()):
         if not diagnostics:
             raise ValueError("Diagnostics topic contains no messages")
         if map_point_limit < 1:
@@ -341,6 +344,7 @@ class ViewerData:
         self.pose_information = pose_information
         self.learned_odometry = learned_odometry
         self.learned_velocity = learned_velocity
+        self.velocity_fusion = velocity_fusion
         self.fast_series = odometry_series(odometry)
         self.learned_series = odometry_series(learned_odometry)
         self.information_times = [stamp_seconds(msg.header.stamp) for msg in pose_information]
@@ -493,13 +497,15 @@ class ViewerData:
                     rotation_changes[index] = rotation_change(
                         [getattr(previous_quaternion, axis) for axis in "xyzw"], predicted_quaternion)
             if any(change is not None for change in position_changes):
-                add("predicted_position_change", "IMU-predicted position change", "m / scan",
+                prediction_source = "IMU + learned velocity" if any(item.status == 0 for item in self.velocity_fusion) else "IMU"
+                add("predicted_position_change", f"{prediction_source}-predicted position change", "m / scan",
                     [(axis, x, [float(change[i]) if change is not None else None
                                 for change in position_changes]) for i, axis in enumerate("xyz")] +
                     [("magnitude", x, [float(np.linalg.norm(change)) if change is not None else None
                                        for change in position_changes])])
             if any(change is not None for change in rotation_changes):
-                add("predicted_rotation_change", "IMU-predicted rotation change (body frame)", "rad / scan",
+                prediction_source = "IMU + learned velocity" if any(item.status == 0 for item in self.velocity_fusion) else "IMU"
+                add("predicted_rotation_change", f"{prediction_source}-predicted rotation change (body frame)", "rad / scan",
                     [(axis, x, [float(change[i]) if change is not None else None
                                 for change in rotation_changes]) for i, axis in enumerate("xyz")] +
                     [("magnitude", x, [float(np.linalg.norm(change)) if change is not None else None
@@ -570,18 +576,71 @@ class ViewerData:
                     [(axis, ix, [getattr(getattr(item, field), axis) for item in imu]) for axis in "xyz"] +
                     [("magnitude", ix, [math.sqrt(sum(getattr(getattr(item, field), axis)**2 for axis in "xyz"))
                                        for item in imu])])
+        if self.velocity_fusion:
+            fusion = self.velocity_fusion
+            fx = [stamp_seconds(item.header.stamp)-self.first for item in fusion]
+            accepted = [item.status == 0 for item in fusion]
+            add("fusion_status", "Learned velocity fusion status", "0 accepted, 1 late, 2 invalid, 3 numerical",
+                [("status", fx, [item.status for item in fusion])])
+            late_count = np.cumsum([item.status == 1 for item in fusion])
+            add("fusion_late_rate", "Cumulative late-discard rate", "%",
+                [("late", fx, [100*count/(i+1) for i, count in enumerate(late_count)])])
+            add("fusion_delay", "Learned velocity delivery and processing age", "ms",
+                [("observation to arrival", fx, [1000*(stamp_seconds(item.arrival_stamp)-stamp_seconds(item.header.stamp))
+                                              for item in fusion]),
+                 ("observation to processing", fx, [1000*(stamp_seconds(item.processing_stamp)-stamp_seconds(item.header.stamp))
+                                                 for item in fusion])])
+            for key, title, unit, getter in (
+                ("fusion_velocity", "Learned and predicted base velocity", "m/s",
+                 lambda item: (item.learned_velocity, item.predicted_velocity)),
+                ("fusion_residual", "Learned velocity innovation", "m/s",
+                 lambda item: (item.residual,)),
+                ("fusion_velocity_change", "IMU-frame velocity before and after fusion", "m/s",
+                 lambda item: (item.velocity_before, item.velocity_after)),
+                ("fusion_bias", "Estimated IMU biases after velocity fusion", "sensor units",
+                 lambda item: (item.gyro_bias, item.accel_bias))):
+                labels = {"fusion_velocity": ("learned", "predicted"),
+                          "fusion_residual": ("innovation",),
+                          "fusion_velocity_change": ("before", "after"),
+                          "fusion_bias": ("gyro", "accelerometer")}[key]
+                add(key, title, unit,
+                    [(f"{label} {axis}", fx,
+                      [float(getter(item)[group][i]) if accepted[index] else None
+                       for index, item in enumerate(fusion)])
+                     for group, label in enumerate(labels) for i, axis in enumerate("xyz")])
+            add("fusion_nis", "Learned velocity normalized innovation squared", "χ² (3 DoF)",
+                [("NIS", fx, [item.nis if valid else None for item, valid in zip(fusion, accepted)])])
+            add("fusion_correction", "Velocity fusion state correction", "mixed units",
+                [(name, fx, [float(np.linalg.norm(item.state_correction[start:start+count]))
+                             if valid else None for item, valid in zip(fusion, accepted)])
+                 for name, start, count in (("position m", 0, 3), ("rotation rad", 3, 3),
+                                            ("velocity m/s", 12, 3), ("gyro bias rad/s", 15, 3),
+                                            ("accel bias m/s²", 18, 3))])
+            add("fusion_gain", "Velocity fusion Kalman gain by state component", "gain norm",
+                [(name, fx, [float(np.linalg.norm(np.asarray(item.kalman_gain).reshape(23, 3)[start:start+count]))
+                             if valid else None for item, valid in zip(fusion, accepted)])
+                 for name, start, count in (("position", 0, 3), ("rotation", 3, 3),
+                                            ("velocity", 12, 3), ("gyro bias", 15, 3),
+                                            ("accel bias", 18, 3))])
+            add("fusion_covariance", "Velocity covariance diagonal after fusion", "(m/s)²",
+                [(axis, fx, [item.covariance_diagonal[12+i] if valid else None
+                             for item, valid in zip(fusion, accepted)]) for i, axis in enumerate("xyz")])
         groups = {"pose": {"position", "rotation", "position_stddev", "rotation_stddev",
                            "position_correction", "rotation_correction",
                            "predicted_position_change", "predicted_rotation_change"},
                   "matching": {"matches", "match_ratio", "residual", "update_valid"},
                   "imu": {"accel", "gyro"},
-                  "learned": {"learned_position", "learned_velocity", "learned_angular"}}
+                  "learned": {"learned_position", "learned_velocity", "learned_angular"},
+                  "fusion": {"fusion_status", "fusion_late_rate", "fusion_delay", "fusion_velocity",
+                             "fusion_residual", "fusion_velocity_change", "fusion_bias", "fusion_nis",
+                             "fusion_correction", "fusion_gain", "fusion_covariance"}}
         for plot in plots:
             plot["category"] = next((group for group, keys in groups.items() if plot["key"] in keys),
                                     "constraints")
         return {"summary": f"{len(diagnostics)} scans; {sum(bool(item.update_valid) for item in diagnostics)} valid updates; "
                            f"{len(odometry)} poses; {len(self.learned_odometry)} learned odometry poses; "
-                           f"{len(imu)} body IMU samples; {len(self.scans)} 3D scans.",
+                           f"{len(imu)} body IMU samples; {len(self.velocity_fusion)} velocity fusion events; "
+                           f"{len(self.scans)} 3D scans.",
                 "plots": plots, "has_matches": bool(self.scans),
                 "has_learned_odometry": bool(self.learned_odometry),
                 "has_pose_information": any(item.update_valid for item in self.pose_information),
@@ -610,6 +669,7 @@ section label{margin:0 .5rem}section input[type=number]{width:5em}
 <button class="series-tab" data-category="constraints">Constraints</button>
 <button class="series-tab" data-category="imu">Body IMU</button>
 <button class="series-tab" data-category="learned">Learned odometry</button>
+<button class="series-tab" data-category="fusion">Velocity fusion</button>
 <button id="tab-match" hidden>3D scan match</button></nav>
 <main id="series-panel"><div id="series-status" aria-live="polite"></div><div id="plots"></div>
 <p>Each plot has its own trailing smoothing window. Set it to 1 for raw data.
@@ -667,7 +727,7 @@ function smooth(values,width){
   }
   return out;
 }
-const seriesCategories=['pose','matching','constraints','imu','learned'];
+const seriesCategories=['pose','matching','constraints','imu','learned','fusion'];
 const seriesCache=new Map();
 const plotDataCache=new Map();
 let activeTab='pose';
@@ -975,7 +1035,7 @@ def serve_viewer(data, port, open_browser):
     plot_payloads = {category: json.dumps([plot for plot in data.overview["plots"]
                                            if plot["category"] == category],
                                           separators=(",", ":"), allow_nan=False).encode()
-                     for category in ("pose", "matching", "constraints", "imu", "learned")}
+                     for category in ("pose", "matching", "constraints", "imu", "learned", "fusion")}
 
     class Handler(BaseHTTPRequestHandler):
         def respond(self, body, content_type="application/json", status=200):
@@ -1136,10 +1196,10 @@ def main():
             if selected is None:
                 return
             args.bag, args.map_pcd = selected["bag"], selected["map_pcd"]
-        diagnostics, imu, odometry, matches, tf_messages, pose_information, learned_odometry, learned_velocity = read_bag(
+        diagnostics, imu, odometry, matches, tf_messages, pose_information, learned_odometry, learned_velocity, velocity_fusion = read_bag(
             args.bag, args.diagnostics_topic, args.imu_topic, args.odometry_topic, args.match_debug_topic)
         data = ViewerData(diagnostics, imu, odometry, matches, tf_messages, args.map_pcd,
-                          args.map_point_limit, pose_information, learned_odometry, learned_velocity)
+                          args.map_point_limit, pose_information, learned_odometry, learned_velocity, velocity_fusion)
         serve_viewer(data, args.port, not args.no_open)
     except (ValueError, ImportError, KeyError, OSError) as error:
         parser.exit(2, f"Error: {error}\n")

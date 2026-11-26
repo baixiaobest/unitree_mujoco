@@ -71,16 +71,23 @@ In another sourced terminal, record the estimator, body IMU, and map alignment:
 
 ```bash
 ros2 bag record /Odometry /fast_lio/estimator_diagnostics /fast_lio/pose_information /fast_lio/match_debug \
-  /imu/data_fastlio_raw /odom /estimated_velocity /tf /tf_static
+  /fast_lio/velocity_fusion_debug /imu/data_fastlio_raw /odom /estimated_velocity /tf /tf_static
 ```
 
 ROS 2 creates the bag folder in that terminal's current working directory.
-Start the raw DDS odometry bridge in another sourced terminal before recording
-`/odom` and `/estimated_velocity`:
+The launched `imu_bridge` publishes `/odom` and `/estimated_velocity` from the
+controller's `rt/learned_motion` DDS messages when hardware control is running.
+Do not start `odom_bridge` for the same topics.
 
-```bash
-ros2 run go2_dds_ros2_bridge odom_bridge --run-mode hardware
-```
+FAST-LIO defaults to its original IMU and LiDAR mode. To fuse the learned
+linear velocity as an additional filter measurement, add
+`velocity_mode:=imu_lidar_learned_velocity` to the launch command. The learned
+mode requires the controller and `imu_bridge` to publish `/estimated_velocity`.
+Tune the optional `learned_velocity_sigma_x`, `_y`, and `_z` launch arguments
+(m/s; defaults are 0.5). Switching modes requires restarting FAST-LIO. The
+analyzer's **Velocity fusion** tab shows accepted and discarded measurements,
+delivery delay, innovations, NIS, state corrections, Kalman gain, and velocity
+covariance when `/fast_lio/velocity_fusion_debug` is recorded.
 
 The locomotion controller publishes the underlying DDS odometry and velocity.
 Run `pwd` there to locate it. Relative `BAG_DIR` paths passed to the analyzer

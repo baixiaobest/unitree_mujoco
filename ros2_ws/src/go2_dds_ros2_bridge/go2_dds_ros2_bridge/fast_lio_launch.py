@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 
 import yaml
 
@@ -14,6 +15,7 @@ from go2_dds_ros2_bridge.tf_utils import (
     DEFAULT_IMU_TF_XYZ,
     DEFAULT_LIDAR_TF_RPY_DEG,
     DEFAULT_LIDAR_TF_XYZ,
+    base_link_pose_in_imu_frame,
     flatten_rotation_matrix,
     lidar_pose_in_imu_frame,
 )
@@ -113,6 +115,16 @@ def _make_runtime_nodes(context, mode: str):
     # The corrected Unitree cloud preserves the incoming utlidar_lidar frame, so pass
     # the physical LiDAR pose in the IMU/body frame.
     extrinsic_translation, extrinsic_rotation = lidar_pose_in_imu_frame()
+    learned_translation, learned_rotation = base_link_pose_in_imu_frame()
+    velocity_mode = LaunchConfiguration("velocity_mode").perform(context)
+    if velocity_mode not in ("imu_lidar", "imu_lidar_learned_velocity"):
+        raise ValueError("velocity_mode must be imu_lidar or imu_lidar_learned_velocity")
+    learned_stddev = [0.5, 0.5, 0.5]
+    if velocity_mode == "imu_lidar_learned_velocity":
+        learned_stddev = [float(LaunchConfiguration(f"learned_velocity_sigma_{axis}").perform(context))
+                          for axis in "xyz"]
+        if any(not math.isfinite(value) or value <= 0 for value in learned_stddev):
+            raise ValueError("learned velocity standard deviations must be finite and positive")
     body_to_base_translation = (-DEFAULT_IMU_TF_XYZ[0], -DEFAULT_IMU_TF_XYZ[1], -DEFAULT_IMU_TF_XYZ[2])
 
     return [
@@ -211,6 +223,11 @@ def _make_runtime_nodes(context, mode: str):
                 {
                     "common.lid_topic": cloud_topic,
                     "common.imu_topic": imu_topic,
+                    "learned_velocity.mode": velocity_mode,
+                    "learned_velocity.topic": "/estimated_velocity",
+                    "learned_velocity.stddev": learned_stddev,
+                    "learned_velocity.base_in_imu_translation": [float(value) for value in learned_translation],
+                    "learned_velocity.base_in_imu_rotation": flatten_rotation_matrix(learned_rotation),
                     "locate_in_prior_map": localization or checkpoint_mapping,
                     "append_to_prior_map": checkpoint_mapping,
                     "mapping.extrinsic_est_en": False,
@@ -349,6 +366,14 @@ def generate_launch_description(mode: str = "odometry") -> LaunchDescription:
                 "match_debug", default_value="false",
                 description="Publish per-scan downsampled returns and map correspondences for bag analysis.",
             ),
+            DeclareLaunchArgument(
+                "velocity_mode", default_value="imu_lidar",
+                description="imu_lidar (original) or imu_lidar_learned_velocity (fuse learned base_link linear velocity).",
+            ),
+            *[DeclareLaunchArgument(
+                f"learned_velocity_sigma_{axis}", default_value="0.5",
+                description=f"Learned {axis}-axis velocity measurement standard deviation in m/s.",
+            ) for axis in "xyz"],
             DeclareLaunchArgument(
                 "dds_domain_id",
                 default_value="",
