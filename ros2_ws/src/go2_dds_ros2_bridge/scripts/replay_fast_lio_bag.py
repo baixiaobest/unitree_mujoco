@@ -109,6 +109,8 @@ def run(args) -> None:
     from nav_msgs.msg import Odometry
 
     output = args.output.expanduser().resolve()
+    bag_info = yaml.safe_load((args.bag / "metadata.yaml").read_text())["rosbag2_bagfile_information"]
+    duration = bag_info["duration"]["nanoseconds"] / 1e9
     if output.exists():
         raise ValueError(f"Output already exists: {output}")
     config_path = args.config.expanduser().resolve() if args.config else bridge_src / "config/fast_lio.yaml"
@@ -181,12 +183,20 @@ def run(args) -> None:
                                 "--rate", str(args.rate), "--delay", "2",
                                 "--disable-keyboard-controls",
                                 "--topics", *play_topics])
+                playback_started = time.monotonic() + 2  # ros2 bag play --delay 2
+                last_report = -1
                 while player.poll() is None:
                     rclpy.spin_once(node, timeout_sec=0.1)
+                    percent = min(99, int(100 * max(0, time.monotonic()-playback_started)
+                                          * args.rate / max(duration, 0.001)))
+                    if percent >= last_report + 5:
+                        print(f"Playback: {percent}%", flush=True)
+                        last_report = percent
                     if fast.poll() is not None or recorder.poll() is not None:
                         raise RuntimeError("FAST-LIO or recorder exited during playback; see replay_process.log")
                 if player.returncode != 0:
                     raise RuntimeError("Bag playback failed; see replay_process.log")
+                print("Playback: 100% — processing final scans", flush=True)
                 # Wait for output to settle; heavy scans can finish after playback.
                 last_estimate[0] = time.monotonic()
                 drain_deadline = time.monotonic() + 30
@@ -195,6 +205,7 @@ def run(args) -> None:
                 if time.monotonic()-last_estimate[0] < 3:
                     print("Warning: output was still active after the 30 s drain limit", flush=True)
                 stop_process(recorder)
+                print("Result bag finalized", flush=True)
                 stop_process(fast)
         if not (output / "metadata.yaml").is_file():
             raise RuntimeError("Recorder did not finalize the result bag")
