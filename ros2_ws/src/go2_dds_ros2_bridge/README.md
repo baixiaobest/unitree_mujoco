@@ -59,7 +59,10 @@ Keep the robot still until localized odometry resumes.
 
 ### Inspect FAST-LIO scan matches in a bag
 
-Enable the optional per-scan correspondence topic when launching localization:
+Enable scan correspondences with `match_debug:=true`. Add
+`velocity_mode:=imu_lidar_learned_velocity` to fuse learned linear velocity
+(`learned_velocity_sigma_x/y/z` default to 0.5 m/s). The `imu_bridge` publishes
+`/estimated_velocity` and `/odom` when the controller is running.
 
 ```bash
 ros2 launch go2_dds_ros2_bridge fast_lio_localization.launch.py \
@@ -67,7 +70,7 @@ ros2 launch go2_dds_ros2_bridge fast_lio_localization.launch.py \
   match_debug:=true
 ```
 
-In another sourced terminal, record the estimator, body IMU, and map alignment:
+Record both inputs and diagnostics in another sourced terminal:
 
 ```bash
 ros2 bag record /Odometry /fast_lio/estimator_diagnostics /fast_lio/pose_information /fast_lio/match_debug \
@@ -75,109 +78,27 @@ ros2 bag record /Odometry /fast_lio/estimator_diagnostics /fast_lio/pose_informa
   /imu/data_fastlio /imu/data_fastlio_raw /odom /estimated_velocity /tf /tf_static
 ```
 
-ROS 2 creates the bag folder in that terminal's current working directory.
-The launched `imu_bridge` publishes `/odom` and `/estimated_velocity` from the
-controller's `rt/learned_motion` DDS messages when hardware control is running.
-Do not start `odom_bridge` for the same topics.
-
-FAST-LIO defaults to its original IMU and LiDAR mode. To fuse the learned
-linear velocity as an additional filter measurement, add
-`velocity_mode:=imu_lidar_learned_velocity` to the launch command. The learned
-mode requires the controller and `imu_bridge` to publish `/estimated_velocity`.
-Tune the optional `learned_velocity_sigma_x`, `_y`, and `_z` launch arguments
-(m/s; defaults are 0.5). Switching modes requires restarting FAST-LIO. The
-analyzer's **Velocity fusion** tab shows accepted and discarded measurements,
-delivery delay, innovations, NIS, state corrections, Kalman gain, and velocity
-covariance when `/fast_lio/velocity_fusion_debug` is recorded.
-
-The locomotion controller publishes the underlying DDS odometry and velocity.
-Run `pwd` there to locate it. Relative `BAG_DIR` paths passed to the analyzer
-are resolved from the analyzer terminal's current working directory.
-
-Start the local Plotly viewer. It opens a browser page and fetches each 3D scan
-when selected; it does not generate an HTML file. The **3D scan match** tab is
-available whenever the bag contains `/fast_lio/match_debug` and the map TF.
-Click **Reference PCD** in that tab to load the same localization map used by
-`map_path`, enter its path in **Or enter PCD path** (useful for hidden `~/.local`
-folders), or pass `--map-pcd` to preload it. The map is in the `map` frame;
-recorded `/tf` places each scan in that frame. Select a scan and click a
-matched return, or enter its match number, to query its five map neighbors and
-association lines. The selected return and its association appear in the main
-3D map.
-
-To compare FAST-LIO configurations, record its *inputs* as well as the debug
-outputs. Include `/utlidar/time_corrected/cloud`, `/imu/data_fastlio`, and
-`/estimated_velocity`. The November 25 debug bag has the velocity and output
-topics but lacks the LiDAR cloud and processed IMU, so it can serve as a
-baseline but cannot be rerun. From the sourced ROS workspace:
+From the sourced ROS workspace, open the Plotly viewer or rerun a bag with a
+different estimator mode:
 
 ```bash
-python3 src/go2_dds_ros2_bridge/scripts/replay_fast_lio_bag.py INPUT_BAG --inspect \
-  --mode imu_lidar_learned_velocity
+python3 src/go2_dds_ros2_bridge/scripts/analyze_fast_lio_bag.py BAG_DIR \
+  --map-pcd /absolute/path/to/map.pcd
 python3 src/go2_dds_ros2_bridge/scripts/replay_fast_lio_bag.py INPUT_BAG \
   --mode imu_lidar_learned_velocity --output learned_result
 python3 src/go2_dds_ros2_bridge/scripts/analyze_fast_lio_bag.py BASELINE_BAG \
   --compare-bag learned_result
 ```
 
-The replay script starts only FAST-LIO in an isolated ROS domain, plays the
-recorded inputs, and saves a new output bag plus effective parameters and a
-run manifest. The analyzer's **Compare estimates** tab aligns the two paths at
-their first shared timestamp and plots both estimates and their differences.
-Initial alignment removes frame-origin differences; it does not provide
-ground truth. Inspect velocity fusion status in the result bag for late drops.
-
-The analyzer groups time series in Pose, LiDAR matching, Constraints, Body IMU,
-and Learned odometry tabs. Each tab loads once and retains its plots and
-per-plot smoothing settings. Hover over a time-series plot to show the nearest
-sample at the same time on the other visible plots in that tab.
-The Pose tab compares per-scan IMU-predicted position and rotation changes
-with the existing LiDAR corrections. The position prediction is reconstructed
-from `/Odometry` and the logged LiDAR position correction; the rotation plot
-uses a pre-update orientation added to `EstimatorDiagnostics`. Older bags
-still show the position prediction when both required topics were recorded.
-New bags with `/fast_lio/pose_information` show rotation-only and coupled pose
-eigenvalues in Constraints. The compact message records the
-upper triangle of the 6×6 LiDAR pose information matrix; its columns are world
-position xyz followed by IMU-frame rotation xyz. The coupled plot uses a stated
-1 m rotation lever arm. Rotation plots include raw and per-match views. With
-`MatchDebug` normals, the analyzer also shows raw and normalized translation
-constraint plots. The position-only information plot is omitted because it
-duplicates the translation constraint plot apart from measurement-noise scaling.
-The 3D tab can show the corresponding axes at the robot position; uncheck
-**Translation constraint axes** to hide them or change **Axis scale** to adjust
-their length. The axes are drawn in both directions because eigenvector sign
-has no physical meaning. Rebuild and source the workspace before recording new
-bags with the updated message definition.
-The 3D tab also shows FAST-LIO and learned-velocity odometry paths from the
-selected scan time onward. It aligns the learned path's position and heading
-to FAST-LIO at that time. Separate controls toggle each path and the rotation
-constraint axes. These paths compare estimates; FAST-LIO is not ground truth.
-Older bags still open. Those without pose information omit the new constraint
-plots; bags without recorded normals also omit the original translation plots
-and 3D axes.
-
-Run the analyzer without a bag argument to open a file-picker window. Use
-**Browse** to select the bag folder and optionally preload a reference PCD:
-
-```bash
-python3 src/go2_dds_ros2_bridge/scripts/analyze_fast_lio_bag.py
-```
-
-The command-line form remains available:
-
-```bash
-python3 src/go2_dds_ros2_bridge/scripts/analyze_fast_lio_bag.py BAG_DIR \
-  --map-pcd /absolute/path/to/map.pcd
-```
-
-The server prints a `http://127.0.0.1:.../` URL. Press Ctrl+C in its terminal to
-stop it. Use `--no-open` if you want to open the URL yourself.
-
-The debug topic is absent by default. It records all downsampled returns and
-accepted correspondences for every processed scan, so bag size increases when
-`match_debug:=true`. `--map-point-limit` controls only how many reference-map
-points the browser displays; it does not change the bag data.
+Omit `BAG_DIR` to choose a bag in a file picker. Relative paths use the
+terminal's current directory. In **3D scan match**, load the reference PCD,
+select a scan, and click a matched return to see its five map neighbors.
+Each time-series plot has its own smoothing control. **Compare estimates**
+aligns the two paths at their first shared timestamp; neither is ground truth.
+The replay result includes its parameters, run manifest, and velocity fusion
+acceptance and late-drop counts. Use `--inspect` to check input topics before
+replay. Bags without the corrected cloud and processed body IMU cannot be
+rerun; the November 25 debug bag is one such example.
 
 Localization includes mapped obstacles behind the LiDAR origin in CBF by default when `cbf:=true`.
 Pass `cbf_map_obstacles:=false` to disable them. RViz's
