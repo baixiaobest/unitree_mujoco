@@ -359,8 +359,8 @@ def generate_launch_description(mode: str = "odometry") -> LaunchDescription:
                 description="Publish per-scan downsampled returns and map correspondences for bag analysis.",
             ),
             DeclareLaunchArgument(
-                "velocity_mode", default_value="imu_lidar",
-                description="imu_lidar (original) or imu_lidar_learned_velocity (fuse learned base_link linear velocity).",
+                "velocity_mode", default_value="imu_lidar_learned_velocity",
+                description="imu_lidar_learned_velocity (default) or imu_lidar (original).",
             ),
             DeclareLaunchArgument(
                 "dds_domain_id",

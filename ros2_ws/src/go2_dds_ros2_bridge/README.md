@@ -59,8 +59,8 @@ Keep the robot still until localized odometry resumes.
 
 ### Inspect FAST-LIO scan matches in a bag
 
-Enable scan correspondences with `match_debug:=true`. Add
-`velocity_mode:=imu_lidar_learned_velocity` to fuse learned linear velocity.
+Enable scan correspondences with `match_debug:=true`. Learned velocity fusion
+is enabled by default; use `velocity_mode:=imu_lidar` for the original mode.
 Set `learned_velocity.stddev` in `config/fast_lio.yaml` to tune its x/y/z
 measurement noise (default 0.5 m/s per axis). The `imu_bridge` publishes
 `/estimated_velocity` and `/odom` when the controller is running.
