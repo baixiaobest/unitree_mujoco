@@ -12,7 +12,7 @@ from mdp.commands import (
     WasdKeyboardCommand,
     WasdKeyboardCommandConfig,
 )
-from time import sleep, time
+from time import perf_counter, sleep, time
 import torch
 from utils.odometry_publisher import EstimatedOdometryPublisher
 from utils.velocity_estimates import split_velocity_estimate
@@ -635,7 +635,7 @@ class GO2HardwareEnvironment(Go2Environment):
                 obs_count_down=current_obs["count_down"],
             )
 
-            self._maybe_print_update_rate()
+        self._maybe_print_update_rate()
         return True
     
     def run(self):
@@ -660,20 +660,54 @@ class GO2HardwareEnvironment(Go2Environment):
                 f"Running {self.policy_mode} control loop at {self.rate} Hz "
                 f"(period: {period*1000:.2f} ms)"
             )
+            timing_window_start = perf_counter()
+            timing_steps = timing_overruns = timing_late_wakeups = 0
+            max_step_ms = max_wakeup_delay_ms = max_start_interval_ms = 0.0
+            previous_start = expected_wakeup = None
             while True:
                 # Start timing this iteration
-                iteration_start = time()
+                iteration_start = perf_counter()
+                if self.debug_print:
+                    if previous_start is not None:
+                        max_start_interval_ms = max(
+                            max_start_interval_ms, (iteration_start - previous_start) * 1000
+                        )
+                    if expected_wakeup is not None:
+                        wakeup_delay_ms = max(0.0, (iteration_start - expected_wakeup) * 1000)
+                        max_wakeup_delay_ms = max(max_wakeup_delay_ms, wakeup_delay_ms)
+                        timing_late_wakeups += wakeup_delay_ms > 1.0
+                    previous_start = iteration_start
+                    if iteration_start - timing_window_start >= 1.0:
+                        print(
+                            f"Control timing: steps={timing_steps}, step_overruns={timing_overruns}, "
+                            f"max_step={max_step_ms:.1f} ms, late_wakeups_gt_1ms={timing_late_wakeups}, "
+                            f"max_wakeup_delay={max_wakeup_delay_ms:.1f} ms, "
+                            f"max_start_interval={max_start_interval_ms:.1f} ms "
+                            f"(target={period * 1000:.1f} ms)",
+                            flush=True,
+                        )
+                        timing_window_start = iteration_start
+                        timing_steps = timing_overruns = timing_late_wakeups = 0
+                        max_step_ms = max_wakeup_delay_ms = max_start_interval_ms = 0.0
                 
                 # Execute control step
                 self.step()
                 
                 # Calculate how much time has elapsed
-                elapsed = time() - iteration_start
+                step_end = perf_counter()
+                elapsed = step_end - iteration_start
+                if self.debug_print:
+                    timing_steps += 1
+                    timing_overruns += elapsed > period
+                    max_step_ms = max(max_step_ms, elapsed * 1000)
                 
                 # Sleep only for the remaining time to maintain desired rate
                 sleep_time = period - elapsed
                 if sleep_time > 0:
+                    expected_wakeup = step_end + sleep_time
                     sleep(sleep_time)
+                else:
+                    expected_wakeup = None
 
         except KeyboardInterrupt:
             print("Stopping and laying down the robot...")

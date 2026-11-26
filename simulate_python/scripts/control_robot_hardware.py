@@ -1,4 +1,5 @@
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -48,6 +49,12 @@ def parse_args():
         "--debug-print",
         action="store_true",
         help="Print debug information such as the measured control update rate once per second.",
+    )
+    parser.add_argument(
+        "--cpu-affinity",
+        type=str,
+        default=None,
+        help="Pin all locomotion process threads to this taskset CPU list (for example, 4,5).",
     )
     parser.add_argument(
         "--kp",
@@ -163,6 +170,11 @@ def main():
         status_monitor_process = launch_status_monitor(args.run_mode)
 
     try:
+        if args.cpu_affinity:
+            subprocess.run(
+                ["taskset", "--all-tasks", "--pid", "--cpu-list", args.cpu_affinity, str(os.getpid())],
+                check=True,
+            )
         if is_simulation:
             sim_env = HardwareSimulationEnvironment(simulator_update_time=0.02)
             sim_env.hardware_env = env
